@@ -29,7 +29,7 @@ Helm 차트, 환경별 값, ArgoCD 정의가 여기에 있고, 클러스터에�
 charts/shortener/                Helm 차트: 앱 + 클러스터 안의 PostgreSQL·Redis (앱 저장소의 deploy/helm/shortener를 옮겨 온 것)
 environments/dev/values.yaml     dev 값. image.tag는 앱 저장소 CI가 고친다
 environments/prod/values.yaml    prod 값. image.tag는 사람이 PR로 바꾼다(승격)
-clusters/local/k3d.yaml          로컬 k3d 클러스터 정의 (맥의 8090 포트 → Traefik 80)
+clusters/local/k3d.yaml          로컬 k3d 클러스터 정의 (맥의 8090 포트 → Traefik 80). 그 클러스터는 지금 멈춰 두었다
 bootstrap/argocd/values.yaml     ArgoCD를 처음 설치할 때 쓰는 Helm 값 (최소 구성)
 argocd/root.yaml                 app-of-apps 루트 Application. ArgoCD를 설치한 뒤 손으로 한 번만 적용한다
 argocd/apps/shortener-dev.yaml   dev Application
@@ -41,12 +41,16 @@ argocd/apps/shortener-prod.yaml  prod Application
 | | dev | prod |
 |---|---|---|
 | 네임스페이스 | `shortener-dev` | `shortener-prod` |
-| 주소 | http://shortener-dev.localhost:8090 | http://shortener.localhost:8090 |
+| 주소 | http://dev.dev-ops-study.duckdns.org | http://dev-ops-study.duckdns.org |
 | 이미지 태그를 바꾸는 방법 | 앱 저장소 CI가 자동으로 커밋 | 사람이 PR로 승격 |
-| 파드 | 1개 고정 | 1개 고정 (HPA는 끔. 아래 메모리 메모) |
-| 앱 메모리 요청 / 한도 | 256Mi / 384Mi | 256Mi / 384Mi |
+| 파드 | 1개 고정 | HPA가 1~3개로 조절 (아래 메모리 메모) |
+| 앱 메모리 요청 / 한도 | 384Mi / 512Mi | 384Mi / 512Mi |
 | ArgoCD Application | `shortener-dev` | `shortener-prod` |
 
+- 클러스터는 EC2 `m7i-flex.large`(2 vCPU, 메모리 8GiB, ap-northeast-2) 한 대의 k3s다. dev·prod 두 환경과 ArgoCD가 이 노드 하나를 나눠 쓴다.
+  로컬 k3d 클러스터는 Docker VM(2.84GiB)의 메모리가 dev 롤링 업데이트 중에 모자라서 프로젝트를 옮기고 멈춰 두었다(아래 메모리 메모).
+- 주소는 DuckDNS 이름 `dev-ops-study`다. DuckDNS가 그 아래의 하위 이름도 같은 IP로 해석하므로 dev 주소(`dev.dev-ops-study.duckdns.org`)는 따로 등록하지 않는다.
+  두 주소가 같은 노드의 80 포트로 들어오고, Traefik이 Host 헤더로 dev와 prod를 나눈다. 지금은 평문 HTTP(80)뿐이다(HTTPS는 나중에 cert-manager로 붙인다).
 - DB 비밀번호 Secret `shortener-db`(키 `password`)는 **Git에 없다.** 각 네임스페이스에 손으로 만든다(아래 부트스트랩).
 - 리소스 이름은 ArgoCD가 Application 이름을 Helm 릴리스 이름으로 쓰기 때문에 `shortener-dev`, `shortener-dev-postgresql`, `shortener-dev-redis`처럼 환경 이름으로 시작한다(prod도 같다).
 - ArgoCD는 Helm을 `helm template`으로 렌더링하는 도구로만 쓴다. Helm 릴리스를 만들지 않으므로 `helm ls`에 보이지 않고 `helm rollback`·`helm test`는 쓸 수 없다
@@ -60,7 +64,7 @@ argocd/apps/shortener-prod.yaml  prod Application
   → shortener-dev Application이 자동 동기화 → Deployment 롤링 업데이트(새 파드가 Ready가 된 뒤에 옛 파드가 내려간다)
 ```
 
-- GitHub 웹훅은 맥의 로컬 클러스터에 닿을 수 없어서 ArgoCD의 **폴링**만 변경을 알아채는 수단이다. 확인 주기는 60초로 줄였지만(기본은 최대 3분), ArgoCD의 repo-server도 같은 값을
+- ArgoCD를 Ingress로 열지 않아서(EC2에서는 port-forward로만 본다. 아래 "ArgoCD UI") GitHub 웹훅이 닿을 곳이 없다. 그래서 ArgoCD의 **폴링**만 변경을 알아채는 수단이다. 확인 주기는 60초로 줄였지만(기본은 최대 3분), ArgoCD의 repo-server도 같은 값을
   "main이 가리키는 커밋" 조회 결과의 캐시 시간으로 쓴다. 그래서 커밋 후 반영까지 60초 안팎에서, 확인 시점과 캐시 만료가 어긋나면 2분 가까이 걸릴 수 있다.
 - 기다리지 않고 바로 확인시키려면 Application을 새로고침한다(UI의 Refresh 버튼, 또는 아래 명령. 컨트롤러가 새로고침을 처리하고 나면 이 어노테이션을 지운다).
   ```bash
@@ -107,10 +111,10 @@ gh pr create --fill
 
 ## 처음부터 띄우기 (부트스트랩)
 
-필요한 것: Docker(VM 메모리 2.84GiB), k3d, kubectl, Helm 4. 이 저장소가 GitHub(공개)에 올라가 있어야 한다. 공개 저장소라서 ArgoCD에 저장소 자격 증명을 등록하지 않아도 읽힌다.
+필요한 것: kubectl, Helm 4, 그리고 클러스터. 지금 클러스터는 EC2의 k3s다(Docker와 k3d는 1번으로 로컬 k3d를 띄울 때만 필요하다). 이 저장소가 GitHub(공개)에 올라가 있어야 한다. 공개 저장소라서 ArgoCD에 저장소 자격 증명을 등록하지 않아도 읽힌다.
 
 ```bash
-# 1. 클러스터 (맥의 8090 포트 → Traefik 80). 이미 있으면 건너뛴다
+# 1. 로컬 k3d 클러스터 (맥의 8090 포트 → Traefik 80). EC2의 k3s에는 이미 있으므로 건너뛴다
 k3d cluster create --config clusters/local/k3d.yaml
 
 # 2. ArgoCD 설치 (차트 버전을 고정한다. 아래 "ArgoCD" 절 참고)
@@ -132,8 +136,8 @@ kubectl apply -f argocd/root.yaml
 - 2번은 ArgoCD 이미지(약 200MB)를 처음 내려받아서 몇 분 걸린다. 진행은 `kubectl -n argocd get pods`로 본다.
 - 3번에서 네임스페이스를 미리 만드는 것은 Secret을 먼저 넣으려는 것이다. Application의 `CreateNamespace=true`는 이미 있는 네임스페이스를 건드리지 않는다.
   Secret이 없으면 앱·PostgreSQL 파드가 `CreateContainerConfigError`로 멈춰 있다가 Secret이 생기면 시작한다.
-- 이전 단계에서 `helm install`로 직접 설치한 `shortener` 릴리스(`shortener` 네임스페이스)가 남아 있으면 먼저 지운다. 같은 호스트 `shortener.localhost`를 쓰는 Ingress가 둘이 되면
-  요청이 어느 쪽으로 갈지 보장되지 않는다.
+- 로컬 k3d에 이전 단계에서 `helm install`로 직접 설치한 `shortener` 릴리스(`shortener` 네임스페이스)가 남아 있으면 먼저 지운다. 로컬용으로 덮어쓴 prod 호스트(`shortener.localhost`)와
+  같은 호스트를 쓰는 Ingress가 둘이 되면 요청이 어느 쪽으로 갈지 보장되지 않는다. EC2에는 그런 릴리스가 없다.
 
 확인:
 
@@ -141,19 +145,23 @@ kubectl apply -f argocd/root.yaml
 kubectl -n argocd get applications          # root, shortener-dev, shortener-prod가 Synced·Healthy가 될 때까지 몇 분 걸린다
 kubectl -n shortener-dev get pods
 kubectl -n shortener-prod get pods
-curl -i -X POST http://shortener-dev.localhost:8090/api/v1/urls -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
-curl -i -X POST http://shortener.localhost:8090/api/v1/urls     -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
+curl -i -X POST http://dev.dev-ops-study.duckdns.org/api/v1/urls -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
+curl -i -X POST http://dev-ops-study.duckdns.org/api/v1/urls     -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
 ```
 
 첫 배포에서 앱이 DB보다 먼저 뜨면 몇 번 재시작한 뒤 자리를 잡는다(정상).
 
-**ArgoCD UI**: http://argocd.localhost:8090 , 사용자 `admin`. 초기 비밀번호는 ArgoCD 서버가 처음 시작할 때 Secret에 만들어 둔다.
+**ArgoCD UI**: EC2에서는 Ingress로 열지 않고 port-forward로 본다(`server.insecure: true`라 UI가 평문 HTTP이기 때문이다). `kubectl -n argocd port-forward svc/argocd-server 8080:80` 뒤 http://localhost:8080 , 사용자 `admin`.
+초기 비밀번호는 ArgoCD 서버가 처음 시작할 때 Secret에 만들어 둔다. (로컬 k3d에서는 Ingress로 http://argocd.localhost:8090 이다.)
 
 ```bash
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
 ```
 
-(argocd CLI는 쓰지 않는다. 로컬 전용이라 이 비밀번호를 그대로 쓴다. 비밀번호를 바꿨다면 이 Secret은 지워도 된다.)
+(argocd CLI는 쓰지 않는다. 인터넷에 열지 않는 UI라서 이 비밀번호를 그대로 쓴다. 비밀번호를 바꿨다면 이 Secret은 지워도 된다.)
+
+`bootstrap/argocd/values.yaml`은 로컬 k3d용이라 아직 ArgoCD의 Ingress(`argocd.localhost`)를 켜 둔다. EC2에 설치할 때는 위 2번 명령에 `--set server.ingress.enabled=false`를 더하고, 업그레이드 때도 같은 옵션을 다시 준다.
+옵션이 빠지면 Ingress가 생기고, Host 헤더만 `argocd.localhost`로 맞추면 누구나 80 포트로 로그인 화면에 닿는다.
 
 ## ArgoCD
 
@@ -187,7 +195,7 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 
 - CPU 한도는 두지 않는다(앱 차트와 같은 이유: CFS 쿼터 스로틀링). 위 값은 클러스터에서 측정한 것이 아니라 작은 규모를 가정한 추정이다. 띄운 뒤 `kubectl top pods -n argocd`로 확인한다.
 - 설치·업그레이드 때만 도는 것이 따로 있다: redis 비밀번호 Secret을 만드는 Job(`redis-secret-init`, 끝나면 60초 뒤 지워진다)과 repo-server의 초기화 컨테이너(`copyutil`).
-- `server.insecure: true`: TLS를 끝내는 곳이 없는 로컬 전용 구성이다(브라우저 → Traefik → 서버가 모두 평문 HTTP). 외부에 공개하면 안 된다.
+- `server.insecure: true`: TLS를 끝내는 곳이 없어서 서버가 평문 HTTP로만 받는 구성이다(로컬 k3d에서는 브라우저 → Traefik → 서버가 모두 평문 HTTP). 그래서 인터넷에 공개하면 안 되고, EC2에서는 Ingress 없이 port-forward로만 본다.
 - ArgoCD 자신은 이 저장소의 Application으로 관리하지 않는다. 설치·업그레이드는 위 `helm upgrade --install` 명령으로 한다.
 
 ### `helm.sh/hook: test` 파드는 어떻게 되나
@@ -206,29 +214,33 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 
 ## 메모리 메모
 
-Docker VM은 2.84GiB(약 2908MiB)이고, 그중 사용자의 다른 컨테이너가 약 600MiB, 빈 클러스터(k3s·Traefik 등)가 약 770MiB를 써서 이 클러스터의 워크로드에 쓸 여유가 약 1.5GiB(약 1538MiB)다.
-이전 단계는 앱 한 벌이었는데 이제 앱 두 벌(dev·prod)과 ArgoCD가 함께 뜬다. 그래서 두 환경 모두 파드 1개(HPA 끔), 앱 메모리 요청 256Mi·한도 384Mi로 잡았다.
-JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 `-XX:MaxRAMPercentage=75.0`)라서 한도 384Mi에서는 288Mi다(차트 기본값 한도 512Mi에서는 384Mi).
+노드는 EC2 `m7i-flex.large`(2 vCPU, 메모리 8GiB = 8192Mi) 한 대다. 로컬 Docker VM(2.84GiB)은 dev 롤링 업데이트 중에 메모리가 모자라서 프로젝트를 이 노드로 옮겼다.
+8GiB에서는 앱 메모리를 줄일 이유가 없어 두 환경 모두 차트 기본값(요청 384Mi·한도 512Mi)으로 되돌렸고, prod의 HPA를 다시 켰다(파드 1~3개). dev는 파드 1개 고정이다.
+JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 `-XX:MaxRAMPercentage=75.0`)라서 한도 512Mi에서는 384Mi다.
 
 | | 요청 합 | 한도 합 |
 |---|---|---|
+| k3s와 기본 구성요소 (Traefik 등. 사용량으로 잡은 값) | 약 800Mi | 약 800Mi |
 | ArgoCD (파드 4개) | 304Mi | 768Mi |
-| dev (앱 256Mi/384Mi + PostgreSQL 128Mi/256Mi + Redis 32Mi/128Mi) | 416Mi | 768Mi |
-| prod (같은 구성, 앱 1개) | 416Mi | 768Mi |
-| 합계 | 1136Mi | 2304Mi |
-| 롤링 업데이트 중 환경마다 앱 파드 하나 추가 (maxSurge 1) | +256Mi | +384Mi |
+| dev (앱 384Mi/512Mi + PostgreSQL 128Mi/256Mi + Redis 32Mi/128Mi, 앱 1개) | 544Mi | 896Mi |
+| prod, HPA가 최대 3개까지 늘었을 때 (같은 구성, 앱 3개) | 1312Mi | 1920Mi |
+| 합계 | 2960Mi | 4384Mi |
+| 롤링 업데이트 중 환경마다 앱 파드 하나 추가 (maxSurge 1) | +384Mi | +512Mi |
+| 합계, 두 환경이 동시에 롤링 중일 때 | 3728Mi | 5408Mi |
 
-- **한도 합(2304Mi)은 여유(약 1538Mi)를 넘는다.** 한도는 상한일 뿐 평소 사용량은 훨씬 작지만, 실제 사용량이 VM 메모리를 넘으면 이 클러스터와 상관없는 컨테이너까지 죽을 수 있다(스케줄러는 이것을 막지 못한다).
-  띄운 뒤 실제 값을 확인한다: `kubectl top pods -A --sort-by=memory`, `docker stats --no-stream`.
-- 요청 합(1136Mi)은 여유 안이다. 롤링 업데이트로 앱 파드가 하나 더 뜨면 1392Mi이고, **차트의 파드 템플릿을 고쳐 dev와 prod가 함께 롤링되면 1648Mi로 여유를 넘는다**(두 환경이 같은 `main`의 차트를 읽는다). 그 순간이 가장 빠듯하다.
-  실제 사용량은 요청과 다르다: 2단계에서 한도 512Mi로 띄웠을 때 유휴 상태의 앱 파드는 약 320Mi, PostgreSQL은 약 55Mi, Redis는 약 15Mi였다(`kubectl top`). 앱 한도를 384Mi로 줄인 뒤의 값은 재지 않았다.
-- **prod의 HPA를 끈 이유가 이 예산이다.** HPA가 prod를 2개로 늘려 둔 채 롤링 업데이트를 하면 prod의 앱 JVM만 3개가 된다. 2단계에서는 새 파드가 뜬 직후 HPA가 앱을 1개에서 2개로 늘렸다가
-  5분쯤 뒤에 줄이는 일이 여러 번 있었다(콜드 JVM의 CPU 급증 때문으로 추정하지만 그 순간의 CPU는 재지 않았다). HPA는 prod를 EC2로 옮기는 6단계에서 다시 켠다. HPA 자체는 2단계에서 이미 연습했다.
-  차트의 기본값(HPA 1~2개, 앱 요청 384Mi·한도 512Mi)은 그대로 두었고 환경 값 파일이 덮어쓴다.
-- 클러스터가 떠 있는 동안에는 로컬 이미지 빌드를 피한다. 쓰지 않을 때는 `k3d cluster stop devops-study`로 멈추고(데이터는 남는다), 다시 켤 때는 `k3d cluster start devops-study`.
-- dev나 prod를 잠시 끄고 싶다면 `kubectl scale`이 아니라 Git에서 그 환경의 `environments/<환경>/values.yaml`의 `replicaCount`를 0으로 바꾼다. 두 환경 모두 HPA가 없어 selfHeal이 손으로 바꾼 파드 수를 되돌리기 때문이다.
-- OOMKilled(exit 137)가 보이면 그 컨테이너의 메모리 한도를 올린다(ArgoCD는 `bootstrap/argocd/values.yaml`을 고치고 `helm upgrade --install`을 다시 실행, 앱은 `environments/<환경>/values.yaml`의 `resources.limits.memory`).
-  앱은 한도를 384Mi로 줄였으므로 힙 밖 몫이 128Mi에서 96Mi로 줄어 가장 먼저 의심할 곳이다. 한도를 올리면 힙 상한도 한도의 75%로 따라 오른다.
+- **최악의 경우에도 4단계 모니터링 몫이 남는다.** 한도 합 5408Mi는 모든 컨테이너가 한도까지 쓰고 prod가 3개인 채 두 환경이 동시에 롤링하는 경우다(차트의 파드 템플릿을 고치면 두 환경이 같은 `main`의 차트를 읽어 동시에 롤링된다).
+  8192Mi에서 빼면 2784Mi(약 2.7GiB)가 남고, 4단계 모니터링에 계획한 약 1.5GiB(1536Mi, 추정)를 빼도 1248Mi가 남는다.
+- 위 합계는 추정이다. k3s 행의 약 800Mi는 로컬 k3d의 빈 클러스터에서 잰 약 770MiB를 올려 잡은 값이고 EC2에서는 재지 않았다. 8GiB는 명목 크기라 실제 MemTotal은 조금 작고 호스트 OS도 메모리를 쓰므로 그만큼 위 여유가 줄어든다.
+  한도는 상한일 뿐 평소 사용량은 훨씬 작다: 2단계에서 한도 512Mi로 띄웠을 때 유휴 상태의 앱 파드는 약 320Mi, PostgreSQL은 약 55Mi, Redis는 약 15Mi였다(`kubectl top`). 띄운 뒤 실제 값을 확인한다: `kubectl top pods -A --sort-by=memory`, 노드에서 `free -m`.
+- **prod가 최대 3개까지 늘 수 있다고 보고 예산을 잡았다.** 2단계에서는 새 파드가 뜬 직후 HPA가 앱을 1개에서 2개로 늘렸다가 5분쯤 뒤에 줄이는 일이 여러 번 있었다(콜드 JVM의 CPU 급증 때문으로 추정하지만 그 순간의 CPU는 재지 않았다).
+  HPA 자체는 2단계에서 이미 연습했다. 차트의 기본값(HPA 1~2개)은 그대로 두었고 prod의 환경 값 파일이 최대를 3개로 덮어쓴다.
+  메모리 말고 DB 커넥션도 상한이다: 앱 파드가 커넥션을 10개씩 잡아 3개면 30개인데 차트 PostgreSQL의 `max_connections`도 30이다(자세히는 `environments/prod/values.yaml`의 autoscaling 위 주석).
+- **로컬 k3d(`devops-study`)는 멈춰 두었다**(`k3d cluster stop devops-study`. 데이터는 남는다). 다시 켜면(`k3d cluster start devops-study`) 그 안의 ArgoCD가 `main`의 값(EC2 주소와 크기)으로 맞추려 하므로, 로컬에서 쓰려면 먼저 두 환경 값 파일을 덮어써야 한다:
+  `baseUrl`·`ingress.host`는 `*.localhost` 이름(예전 값: `shortener-dev.localhost:8090`, `shortener.localhost:8090`)으로, 앱 메모리·HPA는 2.84GiB VM에 맞춘 예전 크기(앱 요청 256Mi·한도 384Mi, 두 환경 모두 파드 1개 고정)로. 예전 값은 `git log -p -- environments/`에 있다.
+- dev를 잠시 끄고 싶다면 `kubectl scale`이 아니라 Git에서 `environments/dev/values.yaml`의 `replicaCount`를 0으로 바꾼다. dev는 HPA가 없어 selfHeal이 손으로 바꾼 파드 수를 되돌리기 때문이다.
+  prod는 HPA가 켜져 있어 `replicaCount`가 쓰이지 않는다: 끄려면 `autoscaling.enabled`를 false로 바꾸고 `replicaCount: 0`을 적는다.
+- OOMKilled(exit 137)가 보이면 그 컨테이너의 메모리 한도를 올린다. ArgoCD는 `bootstrap/argocd/values.yaml`을 고치고 `helm upgrade --install`을 다시 실행한다(EC2에서는 `--set server.ingress.enabled=false`도 다시 준다).
+  앱은 `environments/<환경>/values.yaml`의 `resources.limits.memory`를 고친다. 한도를 올리면 힙 상한도 한도의 75%로 따라 오른다.
 
 ## 로컬에서 검증하기
 
