@@ -1,0 +1,92 @@
+{{- /*
+클러스터 안의 Redis (redis.enabled=true일 때만 만든다). 리다이렉트 캐시로만 쓰므로 Deployment 1개로 충분하다.
+지켜야 할 데이터가 없어서 StatefulSet이나 PVC가 필요 없다: 파드가 다시 뜨면 캐시가 비고, 앱은 그동안 PostgreSQL에서 읽는다(Redis 장애가 요청 실패로 번지지 않게 앱이 처리한다).
+*/ -}}
+{{- if .Values.redis.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "shortener.fullname" . }}-redis
+  labels:
+    {{- include "shortener.labels" (dict "ctx" . "component" "redis") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "shortener.selectorLabels" (dict "ctx" . "component" "redis") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "shortener.selectorLabels" (dict "ctx" . "component" "redis") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "shortener.fullname" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- /*
+      Redis 이미지가 만들어 둔 redis 계정으로 실행한다(alpine 이미지에서는 UID 999, GID 1000). runAsGroup도 명시해서 이미지의 계정과 어긋나지 않게 한다.
+      다른 보안 설정의 의미는 앱과 같다(deployment.yaml 참고).
+      */}}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: {{ .Values.redis.image | quote }}
+          imagePullPolicy: IfNotPresent
+          {{- /*
+          이미지의 CMD(redis-server)만 바꾸고 ENTRYPOINT는 그대로 둔다: 첫 인자가 -로 시작하면 이미지의 진입 스크립트가 redis-server를 앞에 붙여 준다.
+          - save "": RDB 스냅샷을 끈다. 스냅샷은 fork한 자식 프로세스가 만드는데, 쓰기가 많으면 복사된 메모리 페이지가 늘어 메모리 사용량이 순간적으로 크게 뛴다.
+            작은 메모리 한도에서는 그게 OOMKilled의 원인이 된다. 디스크에 쓰지 않으니 읽기 전용 루트 파일시스템에서도 쓸 곳이 필요 없다.
+          - appendonly no: AOF(쓰기 로그)도 끈다. 캐시는 사라져도 되는 데이터다.
+          - maxmemory·maxmemory-policy: 메모리가 차면 가장 오래 안 쓴 키부터 쫓아낸다(allkeys-lru). 기본 정책(noeviction)이면 메모리가 찬 뒤의 쓰기가 오류로 실패한다.
+            maxmemory를 컨테이너 한도보다 낮게 두는 이유는 values.yaml의 redis.maxmemory에 있다.
+          "no"는 따옴표로 감싸야 한다. 따옴표가 없으면 YAML이 불리언 false로 읽어서 문자열 목록이 아니게 된다.
+          */}}
+          args:
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --maxmemory
+            - {{ .Values.redis.maxmemory | quote }}
+            - --maxmemory-policy
+            - allkeys-lru
+          ports:
+            - name: redis
+              containerPort: 6379
+          {{- /*
+          redis-cli ping이 PONG을 받아야(종료 코드 0) 통과한다. exec 프로브의 timeoutSeconds 기본값은 1초라서 3초로 늘렸다.
+          Redis는 시작이 거의 즉시라서 startupProbe는 두지 않았다.
+          */}}
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+          {{- /*
+          읽기 전용 루트 파일시스템에서도 쓸 곳이 없다: 위 설정이면 Redis가 디스크에 아무것도 쓰지 않는다
+          (같은 설정으로 docker run --read-only 컨테이너를 띄워 확인했다).
+          */}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+{{- end }}

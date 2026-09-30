@@ -1,0 +1,60 @@
+{{- /*
+helm test가 실행하는 검사 파드: 이 릴리스의 앱 Service를 management 포트(8081)로 불러서 readiness 엔드포인트가 성공(HTTP 2xx)하는지 본다.
+  helm test <릴리스> -n <네임스페이스>
+클러스터 안에서 Service의 DNS 이름으로 접속하므로 Service → 파드 경로(셀렉터, 포트 이름, management 포트)까지 함께 확인된다.
+앱의 readiness 그룹에는 DB 연결이 들어 있어서, 통과하면 앱에서 PostgreSQL까지 이어져 있다는 뜻이다.
+busybox의 wget은 HTTP 4xx·5xx 응답과 연결 실패에 0이 아닌 종료 코드를 돌려준다(그때 파드가 Failed가 되어 테스트가 실패한다).
+성공하면 응답 본문이 로그에 남지만, 실패했을 때는 "server returned error: HTTP/1.1 503" 한 줄만 남고 본문은 찍지 않는다.
+어느 구성요소가 DOWN인지 보려면 kubectl -n <네임스페이스> port-forward svc/<릴리스> 8081:8081로 연 뒤 curl localhost:8081/actuator/health/readiness로 본문을 확인한다.
+*/ -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "shortener.fullname" . }}-test-readiness
+  labels:
+    {{- include "shortener.labels" (dict "ctx" . "component" "test") | nindent 4 }}
+  annotations:
+    {{- /*
+    helm.sh/hook: test는 helm install·upgrade 때는 만들지 않고 helm test를 실행할 때만 만들라는 표시다.
+    hook-delete-policy: 같은 이름의 옛 검사 파드가 남아 있으면 새로 만들기 전에 지우고(before-hook-creation), 성공하면 지운다(hook-succeeded).
+    실패한 파드는 남겨 두므로 kubectl logs로 원인을 볼 수 있다(helm test --logs는 지우기 전에 로그를 보여 준다).
+    */}}
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  {{- /* wget의 -T는 읽기 대기 시간만 제한한다. 그 밖의 이유로 멈춰도 검사 파드가 계속 남지 않게 파드 전체에 60초 상한을 둔다. */}}
+  activeDeadlineSeconds: 60
+  serviceAccountName: {{ include "shortener.fullname" . }}
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: wget
+      image: {{ .Values.test.image | quote }}
+      imagePullPolicy: IfNotPresent
+      command:
+        - wget
+        - -q
+        - -T
+        - "5"
+        - -O
+        - "-"
+        - http://{{ include "shortener.fullname" . }}:8081/actuator/health/readiness
+      resources:
+        requests:
+          cpu: 10m
+          memory: 8Mi
+        limits:
+          memory: 32Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL

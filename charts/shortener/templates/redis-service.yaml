@@ -1,0 +1,19 @@
+{{- /*
+Redis Service (ClusterIP). 앱이 REDIS_HOST로 쓰는 주소다. 앱이 접속하는 포트는 redis.port이고, 그 포트로 들어온 요청을 컨테이너의 redis 포트(6379)로 보낸다.
+*/ -}}
+{{- if .Values.redis.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "shortener.fullname" . }}-redis
+  labels:
+    {{- include "shortener.labels" (dict "ctx" . "component" "redis") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "shortener.selectorLabels" (dict "ctx" . "component" "redis") | nindent 4 }}
+  ports:
+    - name: redis
+      port: {{ .Values.redis.port }}
+      targetPort: redis
+{{- end }}

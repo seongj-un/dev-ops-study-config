@@ -1,0 +1,12 @@
+{{- /*
+앱의 비밀이 아닌 설정(환경 변수). 값의 계산은 _helpers.tpl의 shortener.configData가 한다.
+12-Factor 방식대로 설정은 이미지가 아니라 환경 변수로 주입하고, 앱은 application.yml의 ${DB_HOST:localhost} 같은 자리표시자로 받는다.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "shortener.fullname" . }}
+  labels:
+    {{- include "shortener.labels" (dict "ctx" . "component" "app" "version" .Values.image.tag) | nindent 4 }}
+data:
+  {{- include "shortener.configData" . | nindent 2 }}

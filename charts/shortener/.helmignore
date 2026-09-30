@@ -1,0 +1,12 @@
+# 차트 패키징(helm package)에서 뺄 파일. 이 저장소에서는 에디터·VCS 잡파일이 들어가지 않게 하는 용도다.
+.DS_Store
+.git/
+.gitignore
+.gitattributes
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.idea/
+.vscode/

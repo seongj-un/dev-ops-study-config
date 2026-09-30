@@ -1,0 +1,24 @@
+{{- /*
+앱 Service (ClusterIP: 클러스터 안에서만 닿는 가상 IP).
+- http: 80 → 컨테이너의 http(8080). Ingress가 이 포트로 요청을 보낸다.
+- management: 8081 → 컨테이너의 management(8081). Ingress는 이 포트를 가리키지 않아서 클러스터 밖에서는 닿지 않는다.
+  클러스터 안에서 helm test가 readiness를 확인하고, 4단계의 Prometheus가 /actuator/prometheus를 가져가는 데 쓴다.
+targetPort를 번호가 아니라 컨테이너 포트 이름으로 적어서, 컨테이너 포트 번호를 바꿔도 Service를 고치지 않아도 된다.
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "shortener.fullname" . }}
+  labels:
+    {{- include "shortener.labels" (dict "ctx" . "component" "app" "version" .Values.image.tag) | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "shortener.selectorLabels" (dict "ctx" . "component" "app") | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+    - name: management
+      port: 8081
+      targetPort: management

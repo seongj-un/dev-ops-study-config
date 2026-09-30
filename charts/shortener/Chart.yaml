@@ -1,0 +1,13 @@
+apiVersion: v2
+name: shortener
+description: URL 단축 서비스(Spring Boot)와, 같은 클러스터 안에서 도는 PostgreSQL·Redis를 함께 배포하는 차트 (로컬 k3d 학습용)
+type: application
+version: 0.1.0
+# appVersion은 일부러 적지 않는다. 배포되는 앱의 버전은 차트가 아니라 이미지 태그(커밋 SHA, values의 image.tag)가 정하고 배포할 때마다 바뀌는데,
+# 차트 파일에 적어 두면 실제 이미지와 어긋난 값이 남기 때문이다.
+# lifecycle.preStop.sleep 액션(종료 전 대기)은 1.29에서 alpha(기본 꺼짐), 1.30부터 beta(기본 켜짐), 1.34에서 GA가 됐다.
+# 1.29 이하에서는 이 필드가 무시되거나 거부돼서, 대기 없이 곧바로 SIGTERM이 가거나 배포가 실패한다. 조용히 어긋나는 배포를 미리 막으려고 설치 자체를 막는다.
+kubeVersion: ">=1.30.0"
+home: https://github.com/seongj-un/dev-ops-study
+sources:
+  - https://github.com/seongj-un/dev-ops-study

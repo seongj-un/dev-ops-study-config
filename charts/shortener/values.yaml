@@ -1,0 +1,149 @@
+# shortener 차트 기본값. 로컬 k3d 클러스터(Docker VM 메모리 2.84GiB)에 앱과 클러스터 안의 PostgreSQL·Redis를 함께 올리는 것에 맞춰 잡았다.
+#
+# 설치할 때 반드시 채워야 하는 값 두 가지 (비어 있으면 템플릿이 안내 메시지와 함께 실패한다):
+#   - image.tag                                   배포할 이미지의 커밋 SHA 40자
+#   - database.existingSecret 또는 database.password   DB 비밀번호 (existingSecret 권장)
+
+# 리소스 이름을 바꾸고 싶을 때만 쓴다. 비워 두면 릴리스 이름이 모든 리소스 이름의 접두사가 된다.
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/seongj-un/dev-ops-study
+  # 필수. CI가 main 푸시마다 올리는 이미지의 태그, 곧 커밋 SHA 전체 40자다 (latest 태그는 만들지 않는다).
+  #   --set image.tag=<커밋 SHA 40자>
+  tag: ""
+  # 커밋 SHA 태그는 한 번 올리면 다시 덮어쓰지 않는다는 전제로 쓰므로(CI가 SHA마다 한 번만 푸시한다), 노드에 이미 있는 이미지를 다시 받지 않는 IfNotPresent로 충분하다.
+  # latest처럼 가리키는 이미지가 바뀌는 태그를 쓴다면 파드를 시작할 때마다 레지스트리를 확인하는 Always가 필요하다.
+  pullPolicy: IfNotPresent
+
+# 파드 수. autoscaling.enabled가 true이면 이 값은 쓰이지 않는다(Deployment에 replicas를 아예 적지 않고 HPA가 정한다).
+replicaCount: 1
+
+# 응답의 shortUrl 앞에 붙는 공개 주소 → 환경 변수 SHORTENER_BASE_URL.
+# Ingress로 들어오는 주소와 같아야 응답으로 받은 링크가 실제로 열린다.
+# k3d 클러스터는 맥의 8090 포트를 Traefik(80)에 이어 준다 (deploy/k3d/cluster.yaml).
+baseUrl: http://shortener.localhost:8090
+
+# 리다이렉트 캐시(Redis)의 유효 시간 → 환경 변수 SHORTENER_CACHE_TTL
+cacheTtl: 24h
+
+# 앱 컨테이너의 리소스 (Docker VM 메모리 2.84GiB에 맞춘 값)
+resources:
+  requests:
+    # 스케줄러가 노드에 확보해 두는 양이고, 노드가 바쁠 때 CPU를 나누는 가중치이기도 하다(상한이 아니다).
+    # HPA의 CPU 사용률(%)도 이 값이 분모다: 100m에 목표 70%이면 목표 사용량은 파드당 평균 70m다.
+    # HPA 컨트롤러는 목표와의 차이가 10% 이내면 파드 수를 바꾸지 않으므로(기본 허용 오차), 실제로는 평균이 약 77m를 넘어야 파드를 늘린다.
+    cpu: 100m
+    memory: 384Mi
+  limits:
+    # CPU 한도는 일부러 두지 않는다. CPU 한도는 CFS 쿼터로 강제된다: 100ms 주기마다 한도만큼만 실행하게 하고, 쿼터를 다 쓰면 노드가 놀고 있어도
+    # 그 주기가 끝날 때까지 컨테이너의 모든 스레드를 멈춘다(스로틀링). JVM은 시작할 때와 GC·JIT 컴파일 때 여러 스레드가 짧게 몰려서 CPU를 쓰므로,
+    # 평균 사용량이 낮아도 한도에 걸려 시작이 느려지고 응답 지연이 튄다. requests.cpu만 두면 노드에 여유가 있는 동안은 요청보다 더 쓸 수 있다.
+    # 메모리는 반대다. 압축할 수 없는 자원이라 한도가 없으면 한 파드가 노드 전체(이 환경에서는 같은 Docker VM의 다른 컨테이너까지)의 메모리를 삼킬 수 있으므로 한도를 두고,
+    # 넘으면 그 컨테이너만 OOMKilled(exit 137)로 죽는다.
+    # JVM 최대 힙은 이 한도의 75%(Dockerfile의 -XX:MaxRAMPercentage=75.0)라서 512Mi에서는 384Mi이고, 나머지 128Mi에
+    # 메타스페이스·스레드 스택·코드 캐시·다이렉트 버퍼가 들어간다. 부하 때 OOMKilled가 보이면 한도를 올리거나 힙 비율을 낮춘다.
+    memory: 512Mi
+
+ingress:
+  enabled: true
+  # k3s가 기본으로 깔아 두는 Ingress 컨트롤러(Traefik)의 IngressClass 이름
+  className: traefik
+  # *.localhost는 RFC 6761이 루프백(127.0.0.1)으로 해석하라고 권고하는 이름이라, 브라우저와 curl 대부분이 /etc/hosts를 고치지 않아도 로컬로 보낸다.
+  # Traefik은 이 호스트 이름(Host 헤더)으로 요청을 이 릴리스의 Service로 나눈다.
+  host: shortener.localhost
+
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  # 2로 둔 것은 메모리 예산 때문이다. Docker VM이 약 2.84GiB이고, 그중 사용자의 다른 컨테이너가 약 600MiB, 빈 클러스터가 약 770MiB를 써서 여유가 약 1.5GiB다.
+  # 파드 3개면 메모리 한도 합이 약 1.9GiB(앱 512Mi × 3 + PostgreSQL 256Mi + Redis 128Mi)라 여유를 넘고, 롤링 업데이트 중에는 파드가 하나 더 뜬다(maxSurge 1).
+  # 스케줄러는 이것을 막지 못한다: 자리 계산은 한도보다 작은 requests로 하고 k3s는 노드에 따로 떼어 두는 메모리가 없어서, 넘치면 VM 전체가 메모리 부족에 빠져
+  # 이 클러스터와 상관없는 컨테이너까지 죽을 수 있다. 메모리가 넉넉한 VM이나 클라우드에서만 올린다.
+  maxReplicas: 2
+  # 파드들의 평균 CPU 사용률(requests.cpu 대비 %)의 목표. 이 목표를 10% 넘게 웃돌면 파드를 늘리고, 10% 넘게 밑돌면 줄인다(기본 허용 오차).
+  # k3s에는 사용량을 재는 metrics-server가 기본으로 들어 있다.
+  targetCPUUtilizationPercentage: 70
+
+# 앱이 접속하는 PostgreSQL. 값은 앱의 환경 변수 DB_HOST·DB_PORT·DB_NAME·DB_USERNAME·DB_PASSWORD가 된다.
+# name·username·비밀번호는 클러스터 안의 PostgreSQL을 처음 만들 때(빈 데이터 디렉터리를 초기화할 때) 그 DB와 계정을 만드는 데도 쓰인다.
+# 이미 데이터가 있는 볼륨에는 적용되지 않으므로, 나중에 값을 바꿔도 DB 안의 계정은 그대로다.
+database:
+  # 비어 있으면 이 릴리스의 클러스터 내부 PostgreSQL Service(<릴리스>-postgresql)로 간다.
+  # postgresql.enabled=false로 내부 DB를 끄면 외부 DB 주소를 여기에 반드시 넣어야 한다.
+  host: ""
+  # 앱이 접속하는 포트. 내부 PostgreSQL을 쓸 때는 그 Service가 이 포트로 열린다(컨테이너 안에서는 항상 5432).
+  port: 5432
+  name: shortener
+  username: shortener
+  # 비밀번호가 든 기존 Secret의 이름 (키 이름은 password). 이쪽을 권장한다. 비밀번호가 Git에도 Helm 릴리스 기록에도 남지 않는다.
+  #   kubectl -n <네임스페이스> create secret generic shortener-db --from-literal=password=<값>
+  # 차트는 이 Secret의 내용으로 체크섬 어노테이션을 만들지 않는다. Helm의 lookup 함수는 실제 클러스터에 대고 install·upgrade할 때만 기존 Secret을 읽을 수 있고,
+  # helm template이나 클라이언트 쪽 dry-run, 3단계에서 쓸 ArgoCD 같은 GitOps 도구의 렌더링에서는 빈 값을 돌려줘서 결과가 매번 달라지기 때문이다.
+  # 그래서 Secret의 값을 바꿔도 앱 파드는 저절로 재시작되지 않는다(kubectl rollout restart로 다시 띄운다).
+  existingSecret: ""
+  # existingSecret이 비어 있을 때만 쓴다: 차트가 이 값으로 Secret(<릴리스>-database)을 만든다. existingSecret이 있으면 이 값은 무시된다. 둘 다 비면 템플릿이 실패한다.
+  # 연습용이다. 값이 셸 히스토리와 Helm 릴리스 기록(클러스터의 Secret)에 평문으로 남고, SHA-256 해시가 파드 어노테이션(checksum/secret)에 남는다.
+  password: ""
+
+# 클러스터 안의 PostgreSQL (StatefulSet 1개). 이미지는 compose.yaml과 같은 postgres 18 alpine이다.
+postgresql:
+  # false이면 만들지 않는다 (외부 DB를 쓸 때). 그때는 database.host를 넣어야 한다.
+  enabled: true
+  # 이미지는 "태그@다이제스트" 한 줄로 고정한다(Dockerfile의 베이스 이미지와 같은 방식). 실제로 이미지를 찾는 것은 다이제스트고, 태그는 사람이 읽으라고 남긴 표시다.
+  # 다이제스트는 태그가 가리키는 이미지의 해시라서, 누가 태그를 다른 이미지로 옮겨도 이 릴리스가 받는 이미지는 바뀌지 않는다.
+  # 이 다이제스트는 아키텍처별 이미지가 아니라 멀티 아키텍처 이미지 인덱스의 것이라서 arm64(맥)와 amd64 어디서나 통한다
+  # (docker buildx imagetools inspect postgres:18.6-alpine3.24로 확인했다). 한 줄로 두어서 버전을 올릴 때 태그와 다이제스트를 함께 바꾸게 한다.
+  # 내용이 바뀌지 않는 이미지라서 파드 템플릿의 imagePullPolicy는 IfNotPresent로 고정했다.
+  image: postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+  persistence:
+    # k3s의 기본 StorageClass. 노드의 로컬 디렉터리(/var/lib/rancher/k3s/storage)에 볼륨을 만든다.
+    # k3d에서는 그 노드가 Docker 컨테이너라서, 클러스터를 지우면(k3d cluster delete) 데이터도 함께 사라진다.
+    # 비우면(storageClass: "") 클러스터의 기본 StorageClass를 쓴다.
+    storageClass: local-path
+    # StatefulSet의 volumeClaimTemplates에 들어가는 값이라 StatefulSet을 만든 뒤에는 helm upgrade로 바꿀 수 없다(쿠버네티스가 거부한다).
+    size: 1Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  # PostgreSQL 서버 설정(postgres -c 이름=값으로 넘긴다). initdb의 기본값(shared_buffers 128MB, max_connections 100)은 위 256Mi 한도에 비해 크다.
+  #   - shared_buffers: PostgreSQL이 데이터 페이지를 캐시하는 공유 메모리. 이 앱의 데이터는 작아서 32MB면 충분하다.
+  #   - max_connections: 접속 수 상한. 연결마다 백엔드 프로세스가 하나씩 떠서 메모리를 쓴다.
+  #     앱 파드 하나의 커넥션 풀 최대 10개 × 파드 최대 2개(autoscaling.maxReplicas) = 20에, psql·마이그레이션 등을 위한 여유를 더했다.
+  args:
+    - -c
+    - shared_buffers=32MB
+    - -c
+    - max_connections=30
+
+# 클러스터 안의 Redis (Deployment 1개). 리다이렉트 캐시로만 쓰므로 디스크에 저장하지 않는다: 파드가 다시 뜨면 캐시는 비고, 앱은 그동안 PostgreSQL에서 읽는다.
+redis:
+  # false이면 만들지 않는다 (외부 Redis를 쓸 때). 그때는 host를 넣어야 한다.
+  enabled: true
+  # 앱이 접속하는 Redis 주소. 비어 있으면 이 릴리스의 클러스터 내부 Redis Service(<릴리스>-redis)로 간다.
+  host: ""
+  # 앱이 접속하는 포트. 내부 Redis를 쓸 때는 그 Service가 이 포트로 열린다(컨테이너 안에서는 항상 6379).
+  port: 6379
+  # 태그@다이제스트로 고정하는 방식은 postgresql.image와 같다 (docker buildx imagetools inspect redis:8.10.2-alpine3.23으로 확인했다).
+  image: redis:8.10.2-alpine3.23@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+  # Redis가 데이터에 쓸 수 있는 메모리 상한. 이를 넘기려 하면 allkeys-lru 정책(모든 키 중 가장 오래 안 쓴 것부터)으로 키를 쫓아낸다.
+  # 컨테이너 메모리 한도(resources.limits.memory)보다 충분히 작게 둬야 한다. 한도는 프로세스가 실제로 차지하는 메모리를 기준으로 걸리는데,
+  # 여기에는 Redis가 maxmemory로 세는 데이터 메모리 말고도 메모리 단편화와 프로세스 기본 메모리가 더해진다.
+  # maxmemory를 한도와 같게 두면 Redis가 키를 쫓아내기 전에 커널이 컨테이너를 OOMKilled로 죽인다. 여기서는 한도의 절반이다.
+  # (로컬에서 512바이트 값을 40만 개 넣어 본 결과: 데이터 메모리는 64MB에서 멈추고 키 약 29만 개가 쫓겨났으며, 프로세스가 차지한 메모리는 약 86MB(단편화 비율 1.34)였다.)
+  maxmemory: 64mb
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+# helm test가 띄우는 검사 파드의 이미지. readiness 엔드포인트를 wget으로 한 번 호출할 뿐이라 작은 busybox면 된다.
+# 태그@다이제스트로 고정하는 방식은 postgresql.image와 같다 (docker buildx imagetools inspect busybox:1.38.0으로 확인했다).
+test:
+  image: busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e

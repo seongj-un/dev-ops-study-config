@@ -1,0 +1,27 @@
+{{- /*
+HorizontalPodAutoscaler: metrics-server가 재는 CPU 사용률에 맞춰 Deployment의 파드 수를 minReplicas~maxReplicas 사이에서 조절한다.
+사용률은 파드의 실제 CPU 사용량을 resources.requests.cpu로 나눈 값의 평균이라서, 요청이 없으면 계산할 수 없다(CPU 한도가 없어도 요청 기준이라 100%를 넘을 수 있다).
+autoscaling.enabled가 true이면 Deployment에는 replicas를 적지 않는다(deployment.yaml 참고).
+*/ -}}
+{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "shortener.fullname" . }}
+  labels:
+    {{- include "shortener.labels" (dict "ctx" . "component" "app" "version" .Values.image.tag) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "shortener.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

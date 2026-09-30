@@ -1,0 +1,30 @@
+{{ include "shortener.fullname" . }} 릴리스를 배포했다 (네임스페이스: {{ .Release.Namespace }}, 이미지: {{ include "shortener.appImage" . }}).
+
+[1] 파드가 Ready가 될 때까지 기다린다.
+    첫 배포는 이미지 풀과 DB 초기화 때문에 몇 분 걸릴 수 있다. 앱이 DB보다 먼저 뜨면 시작에 실패해서 재시작(CrashLoopBackOff)을 몇 번 거친 뒤 자리를 잡는데, 정상이다.
+
+    kubectl -n {{ .Release.Namespace }} get pods
+    kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "shortener.fullname" . }}
+
+[2] 접속한다.
+{{- if .Values.ingress.enabled }}
+
+    Ingress(Traefik) 경유: Host 헤더가 {{ .Values.ingress.host }}인 요청만 이 릴리스로 라우팅된다.
+    k3d 클러스터(deploy/k3d/cluster.yaml)에서는 맥의 8090 포트가 Traefik의 80 포트로 이어진다.
+
+    curl -i -X POST {{ .Values.baseUrl }}/api/v1/urls -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
+{{- end }}
+
+    port-forward 경유 (Ingress 없이 앱 Service의 80 포트로 바로):
+
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "shortener.fullname" . }} 8080:80
+    curl -i -X POST localhost:8080/api/v1/urls -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
+
+[3] 운영 엔드포인트(actuator)는 Ingress로 열려 있지 않다. 클러스터 안의 management 포트(8081)로만 닿는다.
+
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "shortener.fullname" . }} 8081:8081
+    curl localhost:8081/actuator/health/readiness
+
+[4] 배포가 잘 됐는지 helm test로 확인한다 (readiness 엔드포인트를 Service의 management 포트로 호출한다).
+
+    helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

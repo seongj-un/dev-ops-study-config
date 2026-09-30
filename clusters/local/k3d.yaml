@@ -1,0 +1,24 @@
+# 로컬 Kubernetes 클러스터 정의 (k3d: k3s를 Docker 컨테이너 안에서 띄우는 도구)
+#   만들기: k3d cluster create --config deploy/k3d/cluster.yaml
+#   지우기: k3d cluster delete devops-study
+# 6단계 EC2에서도 같은 k3s를 쓰므로 Ingress(Traefik)·metrics-server·로컬 볼륨(local-path)이 같은 방식으로 동작한다.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: devops-study
+# Docker VM 메모리가 작아서(약 2.8GB) 서버 노드 하나로 컨트롤 플레인과 워크로드를 함께 돌린다
+servers: 1
+agents: 0
+# k3s 버전을 고정한다. 버전을 올릴 때는 이 줄을 바꾸고 클러스터를 다시 만든다
+image: rancher/k3s:v1.35.5-k3s1
+ports:
+  # 맥의 8090 포트 → k3d 로드밸런서 → 노드의 80 포트(Traefik). docker compose 스택(8080)과 겹치지 않게 8090을 쓴다
+  - port: 8090:80
+    nodeFilters:
+      - loadbalancer
+options:
+  k3d:
+    wait: true
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: true

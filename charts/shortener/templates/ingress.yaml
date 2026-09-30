@@ -1,0 +1,26 @@
+{{- /*
+Ingress: 클러스터 밖의 HTTP 요청을 Service로 이어 주는 규칙이다. 규칙을 실제로 처리하는 것은 Ingress 컨트롤러(k3s에서는 Traefik)다.
+호스트 이름(Host 헤더)이 ingress.host와 같고 경로가 /로 시작하는 요청(Prefix)을 앱 Service의 80번 포트(http)로 보낸다.
+management 포트(8081)는 라우팅하지 않으므로 actuator 엔드포인트는 클러스터 밖에서 닿지 않는다.
+*/ -}}
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "shortener.fullname" . }}
+  labels:
+    {{- include "shortener.labels" (dict "ctx" . "component" "app" "version" .Values.image.tag) | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "shortener.fullname" . }}
+                port:
+                  number: 80
+{{- end }}
