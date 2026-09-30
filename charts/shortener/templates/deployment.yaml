@@ -10,8 +10,9 @@ metadata:
     {{- include "shortener.labels" (dict "ctx" . "component" "app" "version" .Values.image.tag) | nindent 4 }}
 spec:
   {{- /*
-  autoscaling이 켜져 있으면 replicas를 적지 않는다. 적으면 helm upgrade(또는 kubectl apply)를 할 때마다 그 값(기본 1)으로 되돌려서
-  HPA가 늘려 놓은 파드 수를 덮어쓴다. 필드를 빼 두면 처음 만들 때만 기본값 1이 들어가고, 그 뒤로는 HPA만 이 값을 바꾼다.
+  autoscaling이 켜져 있으면 replicas를 적지 않는다. 적으면 helm upgrade·kubectl apply·ArgoCD 동기화를 할 때마다 그 값(기본 1)으로 되돌려서
+  HPA가 늘려 놓은 파드 수를 덮어쓴다. 특히 ArgoCD는 selfHeal이 켜져 있으면 HPA가 바꾼 replicas를 Git과 어긋난 상태로 보고 되돌리려 하므로, HPA와 서로 값을 되돌리는 다툼이 된다.
+  필드를 빼 두면 처음 만들 때만 기본값 1이 들어가고, 그 뒤로는 HPA만 이 값을 바꾼다.
   */}}
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
@@ -43,7 +44,7 @@ spec:
         {{- end }}
       {{- /*
       파드 레이블: 셀렉터 레이블에 이미지 태그(커밋 SHA)를 version 레이블로 더한다. 셀렉터(위 spec.selector)에는 넣지 않는다.
-      셀렉터는 만든 뒤에 바꿀 수 없어서, 배포마다 바뀌는 값을 넣으면 다음 helm upgrade가 거부된다. 파드 레이블은 바뀌어도 되므로 여기에만 둔다.
+      셀렉터는 만든 뒤에 바꿀 수 없어서, 배포마다 바뀌는 값을 넣으면 다음 helm upgrade(ArgoCD에서는 동기화)가 거부된다. 파드 레이블은 바뀌어도 되므로 여기에만 둔다.
       그래서 kubectl get pods -L app.kubernetes.io/version으로 파드마다 실제로 어느 커밋이 떠 있는지 보인다(롤링 업데이트 중에는 두 SHA가 섞여 보인다).
       레이블 값은 63자를 넘을 수 없는데, 커밋 SHA는 40자라 그대로 들어간다.
       */}}

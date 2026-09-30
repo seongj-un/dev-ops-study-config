@@ -1,16 +1,20 @@
 # shortener 차트 기본값. 로컬 k3d 클러스터(Docker VM 메모리 2.84GiB)에 앱과 클러스터 안의 PostgreSQL·Redis를 함께 올리는 것에 맞춰 잡았다.
+# 이 차트는 ArgoCD가 이 저장소에서 읽어 배포한다(argocd/apps/shortener-<환경>.yaml). 환경마다 다른 값은 environments/<환경>/values.yaml이 이 파일 위에 덮어쓴다.
 #
-# 설치할 때 반드시 채워야 하는 값 두 가지 (비어 있으면 템플릿이 안내 메시지와 함께 실패한다):
+# 배포할 때 반드시 채워야 하는 값 두 가지 (비어 있으면 템플릿이 안내 메시지와 함께 실패한다). 이 저장소에서는 둘 다 환경별 값 파일이 채운다:
 #   - image.tag                                   배포할 이미지의 커밋 SHA 40자
 #   - database.existingSecret 또는 database.password   DB 비밀번호 (existingSecret 권장)
 
 # 리소스 이름을 바꾸고 싶을 때만 쓴다. 비워 두면 릴리스 이름이 모든 리소스 이름의 접두사가 된다.
+# ArgoCD가 배포하면 릴리스 이름은 Application 이름이라서(기본 동작) 리소스 이름이 shortener-dev·shortener-prod로 시작한다.
 nameOverride: ""
 fullnameOverride: ""
 
 image:
   repository: ghcr.io/seongj-un/dev-ops-study
   # 필수. CI가 main 푸시마다 올리는 이미지의 태그, 곧 커밋 SHA 전체 40자다 (latest 태그는 만들지 않는다).
+  # 이 저장소에서는 environments/<환경>/values.yaml이 정한다: dev는 앱 저장소의 CI가 main 푸시마다 고치고, prod는 사람이 PR로 올린다.
+  # 클러스터 없이 렌더링해 볼 때(helm template·helm lint)는 이렇게 넘긴다:
   #   --set image.tag=<커밋 SHA 40자>
   tag: ""
   # 커밋 SHA 태그는 한 번 올리면 다시 덮어쓰지 않는다는 전제로 쓰므로(CI가 SHA마다 한 번만 푸시한다), 노드에 이미 있는 이미지를 다시 받지 않는 IfNotPresent로 충분하다.
@@ -22,7 +26,7 @@ replicaCount: 1
 
 # 응답의 shortUrl 앞에 붙는 공개 주소 → 환경 변수 SHORTENER_BASE_URL.
 # Ingress로 들어오는 주소와 같아야 응답으로 받은 링크가 실제로 열린다.
-# k3d 클러스터는 맥의 8090 포트를 Traefik(80)에 이어 준다 (deploy/k3d/cluster.yaml).
+# k3d 클러스터는 맥의 8090 포트를 Traefik(80)에 이어 준다 (clusters/local/k3d.yaml).
 baseUrl: http://shortener.localhost:8090
 
 # 리다이렉트 캐시(Redis)의 유효 시간 → 환경 변수 SHORTENER_CACHE_TTL
@@ -80,14 +84,14 @@ database:
   # 비밀번호가 든 기존 Secret의 이름 (키 이름은 password). 이쪽을 권장한다. 비밀번호가 Git에도 Helm 릴리스 기록에도 남지 않는다.
   #   kubectl -n <네임스페이스> create secret generic shortener-db --from-literal=password=<값>
   # 차트는 이 Secret의 내용으로 체크섬 어노테이션을 만들지 않는다. Helm의 lookup 함수는 실제 클러스터에 대고 install·upgrade할 때만 기존 Secret을 읽을 수 있고,
-  # helm template이나 클라이언트 쪽 dry-run, 3단계에서 쓸 ArgoCD 같은 GitOps 도구의 렌더링에서는 빈 값을 돌려줘서 결과가 매번 달라지기 때문이다.
+  # helm template이나 클라이언트 쪽 dry-run, 이 저장소를 배포하는 ArgoCD 같은 GitOps 도구의 렌더링에서는 빈 값을 돌려줘서 결과가 매번 달라지기 때문이다.
   # 그래서 Secret의 값을 바꿔도 앱 파드는 저절로 재시작되지 않는다(kubectl rollout restart로 다시 띄운다).
   existingSecret: ""
   # existingSecret이 비어 있을 때만 쓴다: 차트가 이 값으로 Secret(<릴리스>-database)을 만든다. existingSecret이 있으면 이 값은 무시된다. 둘 다 비면 템플릿이 실패한다.
   # 연습용이다. 값이 셸 히스토리와 Helm 릴리스 기록(클러스터의 Secret)에 평문으로 남고, SHA-256 해시가 파드 어노테이션(checksum/secret)에 남는다.
   password: ""
 
-# 클러스터 안의 PostgreSQL (StatefulSet 1개). 이미지는 compose.yaml과 같은 postgres 18 alpine이다.
+# 클러스터 안의 PostgreSQL (StatefulSet 1개). 이미지는 앱 저장소의 compose.yaml과 같은 postgres 18 alpine이다.
 postgresql:
   # false이면 만들지 않는다 (외부 DB를 쓸 때). 그때는 database.host를 넣어야 한다.
   enabled: true
@@ -102,7 +106,7 @@ postgresql:
     # k3d에서는 그 노드가 Docker 컨테이너라서, 클러스터를 지우면(k3d cluster delete) 데이터도 함께 사라진다.
     # 비우면(storageClass: "") 클러스터의 기본 StorageClass를 쓴다.
     storageClass: local-path
-    # StatefulSet의 volumeClaimTemplates에 들어가는 값이라 StatefulSet을 만든 뒤에는 helm upgrade로 바꿀 수 없다(쿠버네티스가 거부한다).
+    # StatefulSet의 volumeClaimTemplates에 들어가는 값이라 StatefulSet을 만든 뒤에는 바꿀 수 없다(helm upgrade든 ArgoCD 동기화든 쿠버네티스가 거부한다).
     size: 1Gi
   resources:
     requests:

@@ -6,6 +6,9 @@ helm test가 실행하는 검사 파드: 이 릴리스의 앱 Service를 managem
 busybox의 wget은 HTTP 4xx·5xx 응답과 연결 실패에 0이 아닌 종료 코드를 돌려준다(그때 파드가 Failed가 되어 테스트가 실패한다).
 성공하면 응답 본문이 로그에 남지만, 실패했을 때는 "server returned error: HTTP/1.1 503" 한 줄만 남고 본문은 찍지 않는다.
 어느 구성요소가 DOWN인지 보려면 kubectl -n <네임스페이스> port-forward svc/<릴리스> 8081:8081로 연 뒤 curl localhost:8081/actuator/health/readiness로 본문을 확인한다.
+이 파드는 ArgoCD가 배포한 릴리스에서는 쓸 수 없다. ArgoCD는 helm template으로 렌더링만 하고 Helm 릴리스를 만들지 않아서 helm test가 찾을 릴리스가 없고,
+helm.sh/hook: test는 ArgoCD가 실행하는 훅 종류(PreSync·Sync·PostSync·SyncFail)에 대응하지 않아서 ArgoCD는 이 파드를 클러스터에 만들지 않고 건너뛴다.
+helm install로 직접 설치한 클러스터에서만 helm test로 쓴다. helm template의 출력에는 이 파드도 들어가므로 저장소의 검증(kubeconform 스키마 검사)은 받는다.
 */ -}}
 apiVersion: v1
 kind: Pod

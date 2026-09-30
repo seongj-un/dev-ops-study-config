@@ -10,7 +10,7 @@
 {{- if .Values.ingress.enabled }}
 
     Ingress(Traefik) 경유: Host 헤더가 {{ .Values.ingress.host }}인 요청만 이 릴리스로 라우팅된다.
-    k3d 클러스터(deploy/k3d/cluster.yaml)에서는 맥의 8090 포트가 Traefik의 80 포트로 이어진다.
+    k3d 클러스터(clusters/local/k3d.yaml)에서는 맥의 8090 포트가 Traefik의 80 포트로 이어진다.
 
     curl -i -X POST {{ .Values.baseUrl }}/api/v1/urls -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
 {{- end }}
@@ -25,6 +25,8 @@
     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "shortener.fullname" . }} 8081:8081
     curl localhost:8081/actuator/health/readiness
 
-[4] 배포가 잘 됐는지 helm test로 확인한다 (readiness 엔드포인트를 Service의 management 포트로 호출한다).
+[4] helm install로 직접 설치했다면 helm test로 배포가 잘 됐는지 확인할 수 있다 (readiness 엔드포인트를 Service의 management 포트로 호출한다).
 
     helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+    ArgoCD로 배포한 경우에는 쓸 수 없다: ArgoCD는 Helm 릴리스를 만들지 않고 이 테스트 파드도 배포하지 않는다. 그때는 ArgoCD가 보여 주는 Application 상태를 본다.
