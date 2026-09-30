@@ -29,7 +29,7 @@ write_files:
   content: |
     #!/bin/bash
     # <sub>.duckdns.org를 이 인스턴스의 지금 공인 IPv4로 맞춘다. Elastic IP가 없어서 멈췄다 켜면 공인 IP가 바뀐다.
-    # duckdns-update.timer가 부팅 30초 뒤와 그 뒤 5분마다 돌린다. DuckDNS는 dev.·argocd. 같은 하위 이름에도 같은 IP로 답한다.
+    # duckdns-update.timer가 부팅 30초 뒤와 그 뒤 5분마다 돌린다. DuckDNS는 dev. 같은 하위 이름에도 같은 IP로 답한다.
     set -euo pipefail
     . /etc/devops/bootstrap.env
     imds=http://169.254.169.254/latest
@@ -127,9 +127,13 @@ write_files:
       install -m 0755 "$WORK/linux-amd64/helm" /usr/local/bin/helm
     fi
 
-    # 6. ArgoCD: 로컬과 같은 차트 버전·값으로 설치하고 호스트에 딸린 두 값만 바꾼다. 값 파일은 Ingress 호스트를 server.ingress.hostname이
-    # 아니라 그 기본값인 global.domain으로 정하므로 global.domain을 바꾼다. configs.cm.url(ArgoCD의 외부 주소)은 값 파일에
-    # http://argocd.localhost:8090으로 적혀 있어 여기 주소(80 포트, HTTP)로 함께 바꾼다.
+    # 6. ArgoCD: 로컬과 같은 차트 버전·값으로 설치하되 두 값만 바꾼다.
+    # server.ingress.enabled=false: HTTPS(cert-manager)가 생기기 전에는 Ingress를 만들지 않는다. 80 포트는 인터넷에 열려 있어서 만들면
+    # admin 비밀번호가 HTTP 평문으로 인터넷을 지나간다. Ingress가 없으면 argocd-server는 ClusterIP라 밖에서 닿지 않는다(그래서 공개 환경에
+    # 쓰면 안 되는 server.insecure: true도 그대로 둔다).
+    # UI는 맥에서 kubectl -n argocd port-forward svc/argocd-server 8080:80 을 띄우고 http://localhost:8080으로 본다. 인터넷을 건너는 구간은
+    # k3s API(6443)의 TLS뿐이다(4단계 --tls-san으로 붙고, 6443은 보안 그룹이 관리자 IP에만 연다).
+    # configs.cm.url(ArgoCD의 외부 주소): 값 파일의 로컬 Ingress 주소 대신 위 port-forward 주소로 맞춘다.
     # deployed이면 건너뛴다: 값이 바뀌면 user data가 바뀌어 인스턴스를 새로 만들므로 같은 인스턴스에서는 값이 그대로다.
     if helm list -n argocd --deployed -q 2>/dev/null | grep -x argocd >/dev/null; then
       log "건너뜀: ArgoCD 설치됨"
@@ -137,8 +141,8 @@ write_files:
       log "ArgoCD 설치 (argo-cd $ARGOCD_CHART_VERSION)"
       helm upgrade --install argocd argo-cd --repo https://argoproj.github.io/argo-helm --version "$ARGOCD_CHART_VERSION" \
         -n argocd --create-namespace -f /etc/devops/argocd-values.yaml \
-        --set "global.domain=argocd.$DUCKDNS_SUBDOMAIN.duckdns.org" \
-        --set "configs.cm.url=http://argocd.$DUCKDNS_SUBDOMAIN.duckdns.org" \
+        --set server.ingress.enabled=false \
+        --set configs.cm.url=http://localhost:8080 \
         --wait --timeout 10m
     fi
 
@@ -164,7 +168,7 @@ write_files:
     fi
 
     date -u +%FT%TZ >/var/lib/devops-bootstrap.done
-    log "완료($(( $(date +%s) - START ))초). ArgoCD http://argocd.$DUCKDNS_SUBDOMAIN.duckdns.org, prod http://$DUCKDNS_SUBDOMAIN.duckdns.org, dev http://dev.$DUCKDNS_SUBDOMAIN.duckdns.org. 앱은 ArgoCD가 이어서 배포한다(kubectl -n argocd get applications)"
+    log "완료($(( $(date +%s) - START ))초). prod http://$DUCKDNS_SUBDOMAIN.duckdns.org, dev http://dev.$DUCKDNS_SUBDOMAIN.duckdns.org. ArgoCD UI는 port-forward로 본다(6단계 주석). 앱은 ArgoCD가 이어서 배포한다(kubectl -n argocd get applications)"
 # DuckDNS 갱신: 서비스는 한 번 돌고 끝나는 oneshot이고, 타이머가 부팅 30초 뒤와 마지막 실행 5분 뒤마다 서비스를 다시 시작한다.
 - path: /etc/systemd/system/duckdns-update.service
   content: |
