@@ -1,0 +1,102 @@
+# 검증: PR과 main 푸시마다 차트를 lint하고, dev·prod 값으로 렌더링한 매니페스트와 ArgoCD Application 매니페스트를 스키마로 검사한다.
+# 클러스터 없이 하는 정적 검증이다. 이 저장소의 main은 곧 클러스터에 배포될 상태라서, 깨진 커밋이 main에 들어가기 전에 여기서 걸러 낸다.
+# main 푸시에서도 돈다: 앱 저장소의 CI가 dev 이미지 태그를 직접 커밋하는 경우(PR 없이 main에 들어간다)에도 그 결과를 한 번 더 검사한다.
+#
+# 잡 표시 이름(validate)은 브랜치 룰셋이 필수 상태 검사로 지정할 수 있는 이름이라 바꾸면 안 된다.
+# 같은 이유로 paths 필터도 두지 않는다. 필터로 워크플로가 건너뛰어지면 그 검사는 "Pending"으로 남고, 필수 검사를 요구하는 PR은 머지할 수 없게 된다.
+# 환경마다 잡을 나누는 matrix도 쓰지 않는다: 그러면 표시 이름이 "validate (dev)"처럼 바뀌어 필수 검사 이름과 맞지 않는다. 한 잡 안에서 dev와 prod를 차례로 돈다.
+name: validate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# 기본 권한은 저장소 읽기뿐이다 (permissions에 적지 않은 권한은 모두 none이 된다). 이 워크플로는 쓰기가 필요한 일이 없다.
+permissions:
+  contents: read
+
+# 같은 ref(브랜치 또는 PR)에서 새 실행이 시작되면 이전 실행을 취소한다. 취소는 PR에서만 한다. main에서는 진행 중인 검사를 끊지 않는다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    name: validate
+    # ubuntu-latest는 GitHub가 가리키는 이미지를 새 LTS로 옮기면 워크플로를 고치지 않아도 환경이 바뀐다(곧 26.04로 바뀐다고 공지됐다). 버전을 고정해 환경을 예측 가능하게 둔다.
+    runs-on: ubuntu-24.04
+    # 기본 타임아웃은 360분이다. 멈춘 잡(예: 스키마 내려받기 대기)이 러너를 오래 붙잡지 않게 상한을 둔다.
+    timeout-minutes: 10
+    env:
+      # 검증 기준이 되는 쿠버네티스 버전. 클러스터의 k3s(v1.35.5)와 같은 마이너 버전이다. helm이 .Capabilities와 차트의 kubeVersion 조건을 평가할 때와
+      # kubeconform이 스키마를 고를 때 같은 값을 쓰게 한다(ArgoCD도 helm template에 클러스터의 버전을 넘긴다).
+      KUBERNETES_VERSION: 1.35.0
+      # kubeconform 이미지: 태그@다이제스트로 고정한다(다이제스트가 실제로 가리키는 이미지이고, 태그는 사람이 읽으라고 남긴 표시다). 멀티 아키텍처 인덱스의 다이제스트다.
+      # 이 값은 액션이 아니라 셸 명령에서 쓰여서 Dependabot이 갱신해 주지 않는다. 올릴 때는 docker buildx imagetools inspect ghcr.io/yannh/kubeconform:<태그>로 다이제스트를 확인해 함께 바꾼다.
+      KUBECONFORM_IMAGE: ghcr.io/yannh/kubeconform:v0.8.0@sha256:faffaf43f95aa6425306e1ab8d6fcad72acb9049158f38e574c085ea1ec0f64e
+      # ArgoCD의 Application은 쿠버네티스 내장 리소스가 아니라 CRD라서 kubeconform의 기본 스키마에 없다. datreeio의 CRD 스키마 모음(Argo CD 3.5.0 CRD 기준)에서 받는다.
+      # 모음의 main 브랜치는 거의 매일 바뀌어서 브랜치 이름이 아니라 커밋 SHA로 고정했다: 남이 스키마를 바꿔도 이 저장소의 검증 결과가 어느 날 갑자기 달라지지 않는다.
+      # Dependabot이 갱신해 주지 않으니 ArgoCD의 CRD가 바뀌는 버전으로 올릴 때 손으로 새 커밋 SHA로 바꾼다.
+      CRD_SCHEMA_LOCATION: https://raw.githubusercontent.com/datreeio/CRDs-catalog/d373c2da9702bc9509a004db83e57263fe3bdfc1/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
+    steps:
+      # 이 파일의 액션은 태그(v5 등)가 아니라 전체 커밋 SHA로 고정하고, 뒤에 버전을 주석으로 남긴다.
+      # 태그는 저장소 소유자(또는 계정을 탈취한 공격자)가 다른 커밋으로 옮길 수 있는 이름이라, 태그로 참조하면 그 시점의 코드가 그대로 실행된다.
+      # 커밋 SHA는 내용의 해시라서 가리키는 코드가 바뀔 수 없다. 주석의 버전은 사람이 읽으라고 남긴 것이고, Dependabot이 SHA와 주석을 함께 올려 준다(dependabot.yml 참고).
+      - name: 소스 체크아웃
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # 체크아웃에 쓴 토큰을 러너에 남기지 않는다. 이 워크플로는 git push 같은 인증된 git 작업을 하지 않는다.
+          persist-credentials: false
+
+      # 러너 이미지에는 Helm 3이 미리 깔려 있다(3.22.0, 2026-09 기준). 그대로 쓰면 로컬(4.3.0)과 다른 메이저 버전으로 검증하게 되므로 Helm 4를 직접 설치한다.
+      # 4.3.0은 로컬에서 쓰는 버전과 같다. ArgoCD v3.5.3의 repo-server가 실제로 렌더링에 쓰는 Helm은 4.2.1(ArgoCD 저장소의 hack/tool-versions.sh)이고,
+      # 이 차트를 두 버전으로 렌더링해 비교하면 문서 사이의 빈 줄 하나만 다르고 나머지는 같다.
+      - name: Helm 설치 (v4.3.0)
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.0
+
+      - name: Helm 버전 확인
+        run: helm version
+
+      # --strict: 경고도 실패로 취급한다. 값 파일(environments/<환경>/values.yaml)을 넘기는 이유는 image.tag와 DB Secret 이름이 차트의 필수 값이라
+      # 값 없이 lint하면 템플릿이 안내 메시지와 함께 실패하기 때문이다. 그 값 파일이 차트 검증(태그가 커밋 SHA 40자인가 등)을 통과하는지도 함께 확인된다.
+      - name: 차트 lint (dev, prod)
+        run: |
+          for environment in dev prod; do
+            echo "::group::helm lint ($environment)"
+            helm lint charts/shortener --strict --kube-version "$KUBERNETES_VERSION" -f "environments/$environment/values.yaml"
+            echo "::endgroup::"
+          done
+
+      # ArgoCD가 렌더링하는 것과 같은 방식으로 렌더링한다: 릴리스 이름은 Application 이름(shortener-dev, shortener-prod), 네임스페이스는 대상 네임스페이스,
+      # 값은 차트 기본값 위에 환경별 파일이다. 그래서 리소스 이름까지 실제 배포와 같다.
+      # 결과는 파일로 받아 kubeconform의 표준 입력(-)에 넣는다. helm이 실패하면 그 자리에서 잡이 실패한다.
+      # kubeconform 옵션: -strict는 스키마에 없는 필드와 중복된 키를 오류로 본다(오타를 잡는다). -kubernetes-version은 그 버전의 스키마로 검사한다.
+      # 렌더링 결과에는 helm test용 파드도 들어 있어서 함께 검사된다(ArgoCD는 그 파드를 배포하지 않는다).
+      - name: 렌더링 + 쿠버네티스 스키마 검사 (dev, prod)
+        run: |
+          for environment in dev prod; do
+            echo "::group::helm template + kubeconform ($environment)"
+            helm template "shortener-$environment" charts/shortener \
+              --namespace "shortener-$environment" \
+              --kube-version "$KUBERNETES_VERSION" \
+              -f "environments/$environment/values.yaml" > "$RUNNER_TEMP/$environment.yaml"
+            docker run -i --rm "$KUBECONFORM_IMAGE" \
+              -strict -summary -kubernetes-version "$KUBERNETES_VERSION" - < "$RUNNER_TEMP/$environment.yaml"
+            echo "::endgroup::"
+          done
+
+      # argocd/ 아래의 Application 매니페스트(루트와 dev·prod)를 스키마로 검사한다. 내장 리소스는 기본 스키마(default)에서,
+      # Application은 위 CRD 스키마 모음에서 찾는다. 찾지 못하면 통과시키지 않고 실패한다(-ignore-missing-schemas를 쓰지 않았다).
+      # -strict 덕분에 필드 이름의 오타(예: selfHeall)나 잘못된 위치의 필드가 여기서 걸린다. 디렉터리를 넘기면 하위 디렉터리까지 검사한다.
+      - name: ArgoCD Application 스키마 검사
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/work:ro" -w /work "$KUBECONFORM_IMAGE" \
+            -strict -summary \
+            -schema-location default \
+            -schema-location "$CRD_SCHEMA_LOCATION" \
+            -kubernetes-version "$KUBERNETES_VERSION" \
+            argocd/
