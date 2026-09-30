@@ -1,0 +1,21 @@
+# Terraform이 init 때 내려받는 프로바이더 바이너리와 백엔드 설정의 캐시. init으로 다시 만들 수 있고 용량이 크다(수백 MB).
+# 같은 디렉터리의 .terraform.lock.hcl은 이 패턴에 걸리지 않고, 커밋한다(프로바이더 버전과 해시를 고정하는 파일이다).
+.terraform/
+
+# 상태 파일은 S3에 둔다(backend.tf). 로컬에 .tfstate가 보인다면 예외 상황의 잔재이고, 상태에는 리소스의 속성 값이 평문으로 들어 있으므로 커밋하지 않는다.
+*.tfstate
+*.tfstate.*
+
+# terraform plan -out으로 저장한 계획 파일: 변수 값과 리소스 속성 전체가 들어 있다.
+*.tfplan
+
+# 로컬 변수 파일: 내 공인 IP와 서브도메인이 들어가므로 저장소에 올리지 않는다(값은 -var로 넘긴다).
+*.tfvars
+*.tfvars.json
+
+# Terraform이 비정상 종료할 때 남기는 로그(상태와 변수 값 일부를 담을 수 있다).
+crash.log
+crash.*.log
+
+# README의 방법으로 받은 kubeconfig는 클러스터 관리자(cluster-admin) 자격 증명이다. 실수로 이 폴더에 저장해도 커밋되지 않게 한다.
+kubeconfig*
