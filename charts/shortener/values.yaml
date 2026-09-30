@@ -32,7 +32,7 @@ baseUrl: http://shortener.localhost:8090
 # 리다이렉트 캐시(Redis)의 유효 시간 → 환경 변수 SHORTENER_CACHE_TTL
 cacheTtl: 24h
 
-# 앱 컨테이너의 리소스 (Docker VM 메모리 2.84GiB에 맞춘 값)
+# 앱 컨테이너의 리소스 (Docker VM 메모리 2.84GiB에 맞춘 값). 이것은 차트 기본값이고, 이 저장소의 환경 값 파일은 앱 메모리를 더 줄여 덮어쓴다(요청 256Mi·한도 384Mi).
 resources:
   requests:
     # 스케줄러가 노드에 확보해 두는 양이고, 노드가 바쁠 때 CPU를 나누는 가중치이기도 하다(상한이 아니다).
@@ -65,6 +65,7 @@ autoscaling:
   # 파드 3개면 메모리 한도 합이 약 1.9GiB(앱 512Mi × 3 + PostgreSQL 256Mi + Redis 128Mi)라 여유를 넘고, 롤링 업데이트 중에는 파드가 하나 더 뜬다(maxSurge 1).
   # 스케줄러는 이것을 막지 못한다: 자리 계산은 한도보다 작은 requests로 하고 k3s는 노드에 따로 떼어 두는 메모리가 없어서, 넘치면 VM 전체가 메모리 부족에 빠져
   # 이 클러스터와 상관없는 컨테이너까지 죽을 수 있다. 메모리가 넉넉한 VM이나 클라우드에서만 올린다.
+  # 이 계산은 릴리스 하나가 VM을 쓴다는 가정이다. 이 저장소의 로컬 클러스터에는 dev와 prod 두 릴리스가 ArgoCD와 함께 뜨므로, 환경 값 파일이 이 기본값을 덮어써서 둘 다 HPA를 끄고 파드 1개로 둔다(environments/*/values.yaml).
   maxReplicas: 2
   # 파드들의 평균 CPU 사용률(requests.cpu 대비 %)의 목표. 이 목표를 10% 넘게 웃돌면 파드를 늘리고, 10% 넘게 밑돌면 줄인다(기본 허용 오차).
   # k3s에는 사용량을 재는 metrics-server가 기본으로 들어 있다.
