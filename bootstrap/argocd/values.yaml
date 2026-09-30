@@ -1,0 +1,127 @@
+# ArgoCD 설치 값: Helm 차트 argo/argo-cd 10.9.4 (ArgoCD v3.5.3).
+# helm search repo argo/argo-cd로 찾은 최신 정식 버전이고, 이 파일에 적지 않은 값은 그 차트 버전의 기본값이다.
+#
+# 이 파일은 ArgoCD 자신을 클러스터에 처음 설치할 때 쓴다. ArgoCD가 ArgoCD를 배포하지는 않는다: 처음 하나는 손으로 helm으로 설치하고
+# (ArgoCD가 없으면 Application을 읽어 줄 주체도 없다), 그 뒤부터는 ArgoCD가 이 저장소의 argocd/ 아래 Application을 읽어 앱을 배포한다.
+#   helm repo add argo https://argoproj.github.io/argo-helm
+#   helm upgrade --install argocd argo/argo-cd --version 10.9.4 -n argocd --create-namespace -f bootstrap/argocd/values.yaml --wait --timeout 10m
+# 처음 설치와 이후의 값 변경에 같은 명령을 쓴다. 차트 버전을 올릴 때는 위 --version과 README의 버전 표기를 함께 바꾸고,
+# 올리기 전에 차트 README의 변경 이력(특히 메이저 버전)과 helm template 결과의 차이를 확인한다.
+#
+# 목표는 2.84GiB짜리 Docker VM에서 앱(dev·prod)과 함께 돌 수 있는 최소 구성이다: 컴포넌트마다 파드 1개, 안 쓰는 컴포넌트는 끄고, 메모리에 한도를 둔다.
+# 살아 있는 파드는 application-controller, repo-server, server, redis 넷이다.
+
+global:
+  # ArgoCD 서버 Ingress의 호스트 이름(server.ingress.hostname의 기본값)이다. *.localhost는 루프백으로 해석되므로 /etc/hosts를 고치지 않아도 된다.
+  # 맥의 8090 포트가 Traefik(80)에 이어져 있어서(clusters/local/k3d.yaml) 주소는 http://argocd.localhost:8090이다.
+  domain: argocd.localhost
+
+configs:
+  params:
+    # 서버가 TLS 없이 HTTP로만 받게 한다(argocd-cmd-params-cm의 server.insecure). 기본은 서버가 자체 서명 인증서로 HTTPS를 직접 처리하는 것이다.
+    # 로컬 전용이라 TLS를 끝내는 곳이 없다: 브라우저 → Traefik → 서버 전 구간이 평문 HTTP다. 외부에 공개하는 환경에서는 쓰면 안 된다.
+    # 차트는 이 값을 보고 Ingress의 백엔드 포트를 고른다: true이면 서비스의 http 포트(80), 아니면 https 포트(443).
+    # 로그인 쿠키에 Secure 속성을 붙이는 조건도 "insecure가 아닐 때"라서(ArgoCD 서버 코드), true여야 HTTP로 접속해도 브라우저가 로그인 쿠키를 보낸다.
+    server.insecure: true
+    # repo-server가 동시에 처리하는 매니페스트 생성(helm template) 요청을 1개로 제한한다. 생성마다 helm·git 프로세스가 뜨는데,
+    # Application 셋(root, dev, prod)이 같은 시각에 새로고침되면 프로세스가 한꺼번에 떠서 repo-server 메모리가 순간적으로 튀고 아래 한도(256Mi)에 걸릴 수 있다.
+    # 한 번에 하나씩 처리하면 순간 최대치가 낮아져 OOMKilled를 피하는 데 도움이 된다(ArgoCD 고가용성 문서의 --parallelismlimit). 차트가 작아서 대기가 길지는 않다.
+    reposerver.parallelism.limit: 1
+  cm:
+    # ArgoCD의 외부 접속 주소(argocd-cm의 url). 차트는 global.domain으로 https://argocd.localhost를 채워 주지만, 여기에는 HTTPS가 없고 8090 포트로 접속하므로 실제 주소로 덮어쓴다.
+    # ArgoCD 문서상 SSO를 붙일 때 필요한 값이고 이 구성은 SSO를 쓰지 않는다. 그래도 틀린 주소가 남지 않게 맞춰 둔다.
+    url: http://argocd.localhost:8090
+    # Git 저장소의 변경을 확인하는 주기. GitHub 웹훅은 맥의 로컬 클러스터에 닿을 수 없어서 이 폴링이 변경을 알아채는 유일한 수단이다.
+    # 기본값은 120s에 지터(무작위 지연) 최대 60s를 더한 값이라 최대 3분마다 확인한다. 60s로 줄인다.
+    # 이 값은 repo-server에도 전달되어 "main이 가리키는 커밋" 조회 결과를 캐시하는 시간으로 쓰인다(argocd-cm 문서). 새 커밋은 그 캐시가 만료된 뒤에야 보이므로,
+    # 컨트롤러의 확인 시점과 캐시 만료 시점이 어긋나면 푸시에서 반영까지 1분을 넘겨 2분 가까이 걸릴 수 있다. 바로 반영하려면 Application을 새로고침한다(README).
+    timeout.reconciliation: 60s
+    # 지터는 끈다. 지터는 저장소와 Application이 많을 때 확인이 한꺼번에 몰리지 않게 흩어 놓는 장치인데, 여기서는 저장소 1개에 Application 3개(root, dev, prod)뿐이다.
+    # 지터를 그대로 두면 확인 주기가 60~120초로 늘어난다(ArgoCD 문서: 지터는 timeout에 더해지는 최대 지연이다).
+    timeout.reconciliation.jitter: 0s
+
+# --- 끄는 컴포넌트 ---
+
+dex:
+  # Dex는 GitHub·LDAP 같은 외부 계정으로 로그인(SSO)하게 해 주는 컴포넌트다. 로컬 admin 계정(admin.enabled의 기본값 true)으로만 로그인하므로 필요 없다.
+  # 끄면 dex-server 파드가 없어지고, 서버가 Dex로 보내던 로그인 요청 경로(server.dex.server)도 설정되지 않는다.
+  enabled: false
+
+notifications:
+  # 알림 컨트롤러는 동기화 성공·실패를 Slack·이메일 등으로 보내는 컴포넌트다. 보낼 곳이 없다. 끄면 파드와 알림용 ConfigMap·Secret이 함께 없어진다.
+  enabled: false
+
+applicationSet:
+  # ApplicationSet 컨트롤러는 템플릿 하나로 Application 여러 개를 찍어 내는 ApplicationSet 리소스를 처리한다. 이 저장소는 Application 둘을 argocd/apps에 직접 적으므로 쓸 일이 없다.
+  # 다만 이 차트에는 ApplicationSet 컨트롤러를 끄는 스위치가 없고 Deployment를 항상 만든다(6.9.0부터, 차트 README의 변경 이력).
+  # 그래서 Deployment를 없애는 대신 replicas를 0으로 두어 파드가 뜨지 않게 한다: 메모리를 쓰는 것이 없고, Application·app-of-apps 동작에는 영향이 없다.
+  replicas: 0
+
+# --- 살아 있는 컴포넌트의 리소스 ---
+# CPU 한도는 두지 않고 요청만 둔다(메모리 한도는 둔다). 이유는 앱 차트(charts/shortener/values.yaml)의 resources 주석과 같다:
+# CPU 한도는 CFS 쿼터로 강제되어 평균 사용량이 낮아도 순간적으로 몰리면 스로틀링되는데, ArgoCD 컴포넌트(Go)도 동기화·GC 때 여러 스레드가 순간적으로 CPU를 쓴다.
+# 메모리는 압축할 수 없는 자원이라 한도를 둔다. 한도를 넘긴 컨테이너만 OOMKilled(exit 137)로 죽고 재시작된다.
+# 값은 클러스터에 올려 측정한 것이 아니라, Application 3개에 작은 저장소라는 작은 규모를 가정한 추정이다. 배포한 뒤 kubectl top pods -n argocd로 확인하고 조정한다.
+# 요청을 평소 사용량 가까이 잡은 이유: 노드의 메모리가 부족해지면 kubelet은 요청을 넘게 쓰는 파드부터 내쫓는다. 요청이 너무 작으면 ArgoCD가 앱보다 먼저 축출될 수 있다.
+
+controller:
+  # 감시하는 클러스터의 리소스를 메모리에 캐시하고, Git의 매니페스트와 비교해 동기화하는 ArgoCD의 중심 컴포넌트다. 메모리는 그 클러스터의 리소스 수에 따라 늘어난다.
+  # 이 클러스터는 작아서 캐시가 작다. 파드는 StatefulSet 1개(replicas 1)다.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+repoServer:
+  # Git 저장소를 복제해 두고 helm template으로 매니페스트를 만들어 컨트롤러에 돌려준다. git·helm 프로세스를 띄울 때 메모리가 잠깐 튄다(위 reposerver.parallelism.limit).
+  resources:
+    requests:
+      cpu: 25m
+      memory: 96Mi
+    limits:
+      memory: 256Mi
+  copyutil:
+    # repo-server 파드가 시작할 때 도는 초기화 컨테이너다. ArgoCD 실행 파일을 공유 볼륨에 복사하고 끝난다(설정 관리 플러그인 사이드카가 쓰는 것이라 이 구성에서는 쓰이지 않는다).
+    # 큰 파일을 복사하는 동안의 페이지 캐시도 컨테이너 메모리로 세어지므로 한도를 너무 작게 잡지 않는다(차트 values.yaml의 예시와 같은 128Mi).
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        memory: 128Mi
+
+server:
+  # 웹 UI와 API를 제공한다. 앱 상태는 컨트롤러가 Redis에 올려 둔 것을 읽으므로 가볍다.
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+  ingress:
+    # Traefik으로 http://argocd.localhost:8090 을 서버의 http 포트(80)에 잇는다. 호스트 이름은 위 global.domain이다.
+    enabled: true
+    # k3s가 기본으로 깔아 두는 Ingress 컨트롤러(Traefik)의 IngressClass 이름 (앱 차트의 ingress.className과 같다)
+    ingressClassName: traefik
+
+redis:
+  # ArgoCD의 캐시(매니페스트 생성 결과, 앱 상태, 리소스 트리)다. 디스크에 저장하지 않으므로(차트가 --save "" --appendonly no로 띄운다) 파드가 다시 뜨면 캐시가 비고
+  # ArgoCD가 다시 채운다. 잃어버려도 되는 데이터라 PVC가 없다. 이 규모의 캐시는 작아서 한도를 64Mi로 둔다.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      memory: 64Mi
+
+redisSecretInit:
+  # 설치·업그레이드 때 Helm 훅(pre-install, pre-upgrade)으로 한 번 도는 Job이다. Redis 비밀번호가 든 Secret(argocd-redis)을 만들고 끝나며(60초 뒤 Job이 지워진다),
+  # 이 Secret이 있어야 나머지 파드가 Redis에 붙는다. 살아 있는 파드가 아니라서 위 합계에는 넣지 않았고, 도는 동안만 잠깐 메모리를 쓴다.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
