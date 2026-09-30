@@ -1,0 +1,40 @@
+# dev 환경 값. ArgoCD의 shortener-dev Application(argocd/apps/shortener-dev.yaml)이 차트 기본값(charts/shortener/values.yaml) 위에
+# 이 파일을 얹어 shortener-dev 네임스페이스에 배포한다. Helm은 값 파일을 나중에 나온 것이 앞선 것을 덮어쓰게 합치고, 맵은 키 단위로 합치므로
+# (리스트는 통째로 바뀐다) 여기에는 차트 기본값과 다른 것만 적는다.
+#
+# dev와 prod(environments/prod/values.yaml)의 차이
+#   - 이미지 태그를 올리는 방법: dev는 앱 저장소의 CI가 main에 머지될 때마다 자동으로 바꾼다(아래 image.tag). prod는 사람이 PR로만 바꾼다(승격).
+#   - 호스트 이름: dev는 shortener-dev.localhost, prod는 shortener.localhost
+#   - 파드 수: dev는 오토스케일링 없이 1개, prod는 차트 기본값(HPA로 1~2개)
+#   - 메모리 요청: dev는 256Mi로 줄였다 (prod는 차트 기본값 384Mi)
+#
+# 이 파일에는 빈 줄이 하나도 없고, 설명은 모두 그 설명이 붙는 키 바로 위 줄에 있다. CI가 쓰는 yq는 값을 고쳐 다시 쓸 때 키 사이의 빈 줄을 지운다(yq 4.53.6에서 확인).
+# 빈 줄이 있는 파일을 커밋해 두면 첫 자동 커밋이 태그 한 줄만이 아니라 파일 곳곳의 빈 줄까지 바꾸게 된다. 처음부터 yq가 쓰는 모양(yq -i '.'를 돌려도 그대로다)으로
+# 커밋해 두었으므로 자동 커밋마다 바뀌는 줄은 태그 하나뿐이다. 새 설정을 추가할 때도 빈 줄로 구역을 나누지 말고 이 모양을 지킨다.
+image:
+  # 배포할 앱 이미지의 태그, 곧 앱 저장소 main 커밋 SHA 전체 40자다 (차트가 이 형식이 아니면 렌더링을 거부한다).
+  # 이 줄은 CI가 고친다: 앱 저장소의 deploy-dev 잡이 main 푸시마다 아래 명령으로 태그를 바꾸고 이 저장소 main에 직접 커밋한다.
+  #   yq -i '.image.tag = "<커밋 SHA>"' environments/dev/values.yaml
+  # 그래서 image: 아래에 tag 키를 한 줄로 유지해야 하고(위 yq 식이 이 위치를 가리킨다), 손으로는 고치지 않는다.
+  # 값은 따옴표로 감싼다: 40자 16진수가 우연히 숫자(예: 1234...)나 지수 표기(예: 1234e5...)처럼 생겨도 YAML이 숫자가 아닌 문자열로 읽게 하려는 것이다.
+  tag: "3d911e42d788f0021a82e8e973b1335a412220f2"
+# 응답의 shortUrl 앞에 붙는 공개 주소. Ingress로 들어오는 주소와 같아야 한다 (k3d가 맥의 8090 포트를 Traefik에 이어 준다: clusters/local/k3d.yaml).
+baseUrl: http://shortener-dev.localhost:8090
+ingress:
+  # *.localhost는 루프백으로 해석되므로 /etc/hosts를 고치지 않아도 된다. prod(shortener.localhost)와 다른 이름이어야 Traefik이 요청을 나눈다.
+  host: shortener-dev.localhost
+# dev는 파드 1개로 고정한다. autoscaling.enabled가 false이면 차트가 HPA를 만들지 않고 Deployment에 replicas를 적으므로(replicaCount) 그 값이 쓰인다.
+# 메모리가 빠듯한 Docker VM에서 dev의 파드가 늘어나 prod의 자리를 뺏지 않게 하려는 것이다.
+autoscaling:
+  enabled: false
+replicaCount: 1
+# 앱 컨테이너의 메모리 요청만 줄인다 (기본 384Mi → 256Mi). 요청은 스케줄러가 자리를 계산하는 값일 뿐 사용량의 상한이 아니라서 OOM 동작은 그대로다.
+# 한도(limits.memory 512Mi)는 기본값 그대로 두므로 JVM의 최대 힙도 그대로다: JVM은 요청이 아니라 컨테이너의 메모리 한도를 기준으로 힙 크기를 정한다.
+# 요청이 작은 대가로, VM의 메모리가 바닥나는 상황에서는 dev의 앱 파드가 prod의 것보다 먼저 걸린다: kubelet은 요청을 넘게 쓰는 파드부터 내쫓고,
+# 커널 OOM killer가 보는 점수(oom_score_adj)도 메모리 요청이 작은 파드일수록 높다. dev이니 감수한다.
+resources:
+  requests:
+    memory: 256Mi
+database:
+  # DB 비밀번호가 든 Secret의 이름 (키는 password). Secret은 Git에 없다: 클러스터의 shortener-dev 네임스페이스에 손으로 만든다 (README의 부트스트랩).
+  existingSecret: shortener-db
