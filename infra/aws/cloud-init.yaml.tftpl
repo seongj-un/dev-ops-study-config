@@ -1,0 +1,210 @@
+#cloud-config
+# 새 Ubuntu 24.04 EC2를 GitOps 노드(DuckDNS → k3s → ArgoCD → app-of-apps)로 만든다. ec2.tf가 templatefile로 렌더링해 user data로 넘긴다.
+# write_files·runcmd는 인스턴스의 첫 부팅에만 돈다. 그래서 설치는 부팅마다 도는 devops-bootstrap.service가 하고, 이미 된 단계는 건너뛴다.
+# Terraform 템플릿에서 "$${"와 "%%{"는 보간·지시문의 시작이다(이 원본에서는 겹쳐 써서 글자 그대로 내보낸다). 그래서 Terraform 값은
+# bootstrap.env와 argocd-values.yaml에만 넣고, 스크립트·유닛에는 이 조합을 쓰지 않는다(셸 변수는 $VAR 모양만). Terraform이 스크립트를 바꾸지 않는다.
+# EC2 user data는 원문이 16KB(16384바이트)까지라 주석을 짧게 둔다. test/render.sh가 크기와 "스크립트가 렌더링 전후로 같은지"를 검사한다.
+write_files:
+# Terraform이 넘긴 값(스크립트가 source 한다). 비밀은 없다: DuckDNS 토큰은 SSM 파라미터 이름만 적고 값은 부팅 때 읽는다.
+# regex()는 값 전체가 패턴에 맞으면 그 값을, 아니면 plan에서 오류를 낸다: root가 source 하는 파일에 셸 문법이 끼어들지 못한다.
+# ROOT_APP_URL: https://github.com/<owner>/<repo>[.git]의 raw 주소 https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<경로>
+- path: /etc/devops/bootstrap.env
+  permissions: "0644"
+  content: |
+    AWS_REGION=${regex("^[a-z0-9-]+$", aws_region)}
+    SSM_PARAMETER_NAME=${regex("^[A-Za-z0-9_./-]+$", ssm_parameter_name)}
+    DUCKDNS_SUBDOMAIN=${regex("^[a-z0-9-]+$", duckdns_subdomain)}
+    K3S_VERSION=${regex("^v[0-9]+[.][0-9]+[.][0-9]+[+]k3s[0-9]+$", k3s_version)}
+    HELM_VERSION=${regex("^v[0-9]+[.][0-9]+[.][0-9]+$", helm_version)}
+    ARGOCD_CHART_VERSION=${regex("^[0-9]+[.][0-9]+[.][0-9]+$", argocd_chart_version)}
+    ROOT_APP_URL=https://raw.githubusercontent.com/${regex("^https://github[.]com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:[.]git)?$", config_repo_url)[0]}/${regex("^[A-Za-z0-9_./-]+$", config_repo_ref)}/argocd/root.yaml
+# ArgoCD 값: bootstrap/argocd/values.yaml에서 주석 줄과 빈 줄만 뺀다(원문 그대로면 16KB를 넘는다). render.sh가 두 YAML의 값이 같은지 비교한다.
+# 주석·빈 줄만 고친 커밋은 렌더링 결과를 바꾸지 않아서 인스턴스를 다시 만들지도 않는다(user_data_replace_on_change).
+- path: /etc/devops/argocd-values.yaml
+  permissions: "0644"
+  content: |
+    ${indent(4, join("\n", [for l in split("\n", argocd_values) : l if trimspace(l) != "" && !startswith(trimspace(l), "#")]))}
+- path: /usr/local/bin/duckdns-update
+  permissions: "0755"
+  content: |
+    #!/bin/bash
+    # <sub>.duckdns.org를 이 인스턴스의 지금 공인 IPv4로 맞춘다. Elastic IP가 없어서 멈췄다 켜면 공인 IP가 바뀐다.
+    # duckdns-update.timer가 부팅 30초 뒤와 그 뒤 5분마다 돌린다. DuckDNS는 dev.·argocd. 같은 하위 이름에도 같은 IP로 답한다.
+    set -euo pipefail
+    . /etc/devops/bootstrap.env
+    imds=http://169.254.169.254/latest
+    # IMDSv2: PUT으로 받은 세션 토큰을 헤더에 실어야 메타데이터를 준다(http_tokens=required라서 토큰 없는 v1 요청은 401).
+    t=$(curl -fsS --max-time 5 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' "$imds/api/token")
+    ip=$(curl -fsS --max-time 5 -H "X-aws-ec2-metadata-token: $t" "$imds/meta-data/public-ipv4")
+    # 토큰은 인스턴스 역할로 SSM에서 읽는다(user data·Terraform 상태에 남기지 않으려고). SecureString이라 --with-decryption이 KMS로 푼다.
+    token=$(aws ssm get-parameter --with-decryption --region "$AWS_REGION" --name "$SSM_PARAMETER_NAME" --query Parameter.Value --output text)
+    # 아래 curl 설정 한 줄을 깨뜨리는 글자가 없는지 본다(DuckDNS 토큰은 UUID). 틀려도 값은 출력하지 않는다.
+    case $token in ''|*[!0-9a-fA-F-]*) echo "SSM의 DuckDNS 토큰 모양이 이상하다(값은 출력하지 않는다)" >&2; exit 1 ;; esac
+    # 토큰이 든 URL을 명령줄 인자로 주지 않는다: 인자는 /proc/<pid>/cmdline(ps)으로 다른 사용자도 읽는다. printf는 bash 내장 명령이라
+    # exec되지 않아 인자가 프로세스 목록에 나타나지 않고, curl은 설정을 표준 입력(-K -)으로 받는다. set -x도 쓰지 않는다.
+    res=$(printf 'url = "https://www.duckdns.org/update?domains=%s&token=%s&ip=%s"\n' "$DUCKDNS_SUBDOMAIN" "$token" "$ip" | curl -fsS --max-time 30 --retry 3 -K -)
+    case $res in
+      OK) echo "DuckDNS: $DUCKDNS_SUBDOMAIN.duckdns.org -> $ip" ;;
+      KO) echo "DuckDNS가 KO를 돌려줬다: 토큰이나 서브도메인이 틀렸다" >&2; exit 1 ;;
+      *) echo "DuckDNS 응답이 OK/KO가 아니다(본문은 출력하지 않는다)" >&2; exit 1 ;;
+    esac
+- path: /usr/local/sbin/devops-bootstrap
+  permissions: "0755"
+  content: |
+    #!/bin/bash
+    # 이 인스턴스를 GitOps 노드로 만든다: AWS CLI → DuckDNS → k3s → Helm → ArgoCD → DB Secret → 루트 Application.
+    # devops-bootstrap.service가 부팅마다 돌린다. 단계마다 결과가 이미 있으면 건너뛰므로 손으로 다시 돌려도 된다.
+    set -euo pipefail
+    # 손으로 돌린 것과 서비스가 겹치면 helm 설치가 두 번 돌 수 있어서 한 번에 하나만 돌게 한다.
+    exec 9>/run/devops-bootstrap.lock
+    flock -n 9 || { echo "이미 실행 중이다" >&2; exit 1; }
+    LOG=/var/log/devops-bootstrap.log
+    echo "로그: $LOG"
+    exec >>"$LOG" 2>&1
+    . /etc/devops/bootstrap.env
+    # systemd는 User=가 없는 서비스에 HOME을 주지 않는데, helm은 캐시·설정 경로를 HOME에서 찾는다.
+    export HOME=/root KUBECONFIG=/etc/rancher/k3s/k3s.yaml DEBIAN_FRONTEND=noninteractive
+    START=$(date +%s)
+    WORK=$(mktemp -d)
+    trap 'rm -rf "$WORK"' EXIT
+    log() { echo "$(date -u +%FT%TZ) $*"; }
+    fail() { log "실패: $*"; exit 1; }
+    # retry <설명> <제한 초> <명령...>: 성공할 때까지 5초마다 다시 한다. 제한을 넘기면 한 번 더 돌려 오류를 로그에 남기고 실패한다.
+    retry() {
+      local what=$1 limit=$2 t=0
+      shift 2
+      until "$@" >/dev/null 2>&1; do
+        [ "$t" -lt "$limit" ] || { "$@" || true; fail "$what: $limit초 안에 성공하지 못했다"; }
+        sleep 5
+        t=$((t + 5))
+      done
+      log "확인: $what"
+    }
+    [ "$(uname -m)" = x86_64 ] || fail "x86_64 전용이다(AWS CLI zip·Helm tarball이 amd64용)"
+    log "시작 (이전 완료: $(cat /var/lib/devops-bootstrap.done 2>/dev/null || echo 없음))"
+
+    # 1. unzip(AWS CLI zip용). 첫 부팅에는 apt-daily·unattended-upgrades가 apt 잠금을 쥐고 있을 수 있어서 잠금을 기다리고 다시 한다.
+    if ! command -v unzip >/dev/null; then
+      retry "apt-get update" 600 apt-get -o DPkg::Lock::Timeout=60 update
+      apt-get -o DPkg::Lock::Timeout=600 install -y -q unzip
+    fi
+
+    # 2. AWS CLI v2(SSM에서 DuckDNS 토큰을 읽는다): AWS가 배포하는 zip의 설치 스크립트가 /usr/local/aws-cli에 풀고 /usr/local/bin/aws를 만든다.
+    if ! aws --version >/dev/null 2>&1; then
+      log "AWS CLI v2 설치"
+      curl -fsSL --retry 5 -o "$WORK/awscliv2.zip" https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+      unzip -q "$WORK/awscliv2.zip" -d "$WORK"
+      "$WORK/aws/install" --update
+    fi
+    log "$(aws --version)"
+
+    # 3. DuckDNS를 k3s보다 먼저 맞춰 새 공인 IP가 DNS에 일찍 반영되게 한다. 실패해도 계속한다: 클러스터 설치는 DNS와 무관하고
+    # 타이머가 5분마다 다시 한다(journalctl -u duckdns-update). 타이머는 AWS CLI가 생긴 뒤에 켜야 첫 실행이 헛돌지 않는다.
+    /usr/local/bin/duckdns-update || log "경고: DuckDNS 갱신 실패. 타이머가 다시 한다"
+    systemctl enable --now duckdns-update.timer
+
+    # 4. k3s: 설치 스크립트를 파일로 받아 실행한다(sh로 바로 파이프하면 받다 끊긴 스크립트가 반쯤 실행될 수 있다). 스크립트는 고정한
+    # 버전의 바이너리를 받아 같은 릴리스의 sha256 목록으로 검사한다. 이미 그 버전이면 건너뛴다(다시 돌리면 k3s를 재시작한다).
+    # --tls-san: API 서버 인증서에 DuckDNS 이름을 넣어 맥에서 https://<sub>.duckdns.org:6443 으로 붙게 한다. 공인 IP는 넣지 않는다:
+    # 멈췄다 켤 때마다 바뀌어 인증서의 IP가 곧 틀려지지만, 이름은 DuckDNS가 새 IP로 옮겨 주므로 계속 맞는다.
+    # --write-kubeconfig-mode 0600: 관리자 자격 증명(/etc/rancher/k3s/k3s.yaml)을 root만 읽는다. Traefik·metrics-server·local-path는 켜 둔다(로컬과 같다).
+    if [ "$(k3s --version 2>/dev/null | awk 'NR==1 {print $3}')" != "$K3S_VERSION" ]; then
+      log "k3s $K3S_VERSION 설치"
+      curl -fsSL --retry 5 -o "$WORK/k3s-install.sh" https://get.k3s.io
+      INSTALL_K3S_VERSION=$K3S_VERSION sh "$WORK/k3s-install.sh" server --tls-san "$DUCKDNS_SUBDOMAIN.duckdns.org" --write-kubeconfig-mode 0600
+    fi
+    retry "k3s 노드 Ready" 300 kubectl wait --for=condition=Ready node --all --timeout=5s
+
+    # 5. Helm: 고정한 버전의 공식 tarball을 get.helm.sh의 .sha256sum으로 검사한다. 같은 곳에서 받은 체크섬이라
+    # 전송 중 깨지거나 잘린 파일은 잡지만, 배포 서버의 파일이 통째로 바뀐 경우까지 막지는 못한다.
+    if [ "$(helm version --template '{{.Version}}' 2>/dev/null)" != "$HELM_VERSION" ]; then
+      log "Helm $HELM_VERSION 설치"
+      f=helm-$HELM_VERSION-linux-amd64.tar.gz
+      curl -fsSL --retry 5 -o "$WORK/$f" "https://get.helm.sh/$f"
+      curl -fsSL --retry 5 -o "$WORK/$f.sha256sum" "https://get.helm.sh/$f.sha256sum"
+      (cd "$WORK" && sha256sum --check --strict "$f.sha256sum")
+      tar -xzf "$WORK/$f" -C "$WORK" linux-amd64/helm
+      install -m 0755 "$WORK/linux-amd64/helm" /usr/local/bin/helm
+    fi
+
+    # 6. ArgoCD: 로컬과 같은 차트 버전·값으로 설치하고 호스트에 딸린 두 값만 바꾼다. 값 파일은 Ingress 호스트를 server.ingress.hostname이
+    # 아니라 그 기본값인 global.domain으로 정하므로 global.domain을 바꾼다. configs.cm.url(ArgoCD의 외부 주소)은 값 파일에
+    # http://argocd.localhost:8090으로 적혀 있어 여기 주소(80 포트, HTTP)로 함께 바꾼다.
+    # deployed이면 건너뛴다: 값이 바뀌면 user data가 바뀌어 인스턴스를 새로 만들므로 같은 인스턴스에서는 값이 그대로다.
+    if helm list -n argocd --deployed -q 2>/dev/null | grep -x argocd >/dev/null; then
+      log "건너뜀: ArgoCD 설치됨"
+    else
+      log "ArgoCD 설치 (argo-cd $ARGOCD_CHART_VERSION)"
+      helm upgrade --install argocd argo-cd --repo https://argoproj.github.io/argo-helm --version "$ARGOCD_CHART_VERSION" \
+        -n argocd --create-namespace -f /etc/devops/argocd-values.yaml \
+        --set "global.domain=argocd.$DUCKDNS_SUBDOMAIN.duckdns.org" \
+        --set "configs.cm.url=http://argocd.$DUCKDNS_SUBDOMAIN.duckdns.org" \
+        --wait --timeout 10m
+    fi
+
+    # 7. DB 비밀번호 Secret: 없을 때만 만든다. 있는 것을 새 값으로 바꾸면 PostgreSQL 데이터(PVC)에 이미 들어간 비밀번호와 어긋난다.
+    # 비밀번호는 파이프로만 흐른다: 명령줄 인자(ps)·로그·디스크에 남지 않는다. tr은 openssl이 끝에 붙이는 줄바꿈을 뺀다.
+    # 네임스페이스를 미리 만드는 것은 ArgoCD가 앱을 띄우기 전에 Secret을 넣어 두려는 것이다(CreateNamespace=true는 있는 것을 건드리지 않는다).
+    for ns in shortener-dev shortener-prod; do
+      kubectl get namespace "$ns" >/dev/null 2>&1 || kubectl create namespace "$ns"
+      if kubectl -n "$ns" get secret shortener-db >/dev/null 2>&1; then
+        log "건너뜀: $ns/shortener-db 있음"
+      else
+        openssl rand -hex 16 | tr -d '\n' | kubectl -n "$ns" create secret generic shortener-db --from-file=password=/dev/stdin
+      fi
+    done
+
+    # 8. 루트 Application: ArgoCD가 이것을 읽어 argocd/apps의 dev·prod Application을 만들고, 그 뒤 배포는 모두 ArgoCD가 한다.
+    # CRD가 Established가 되기 전에 적용하면 "no matches for kind Application"으로 실패해서 먼저 기다린다.
+    retry "Application CRD" 300 kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=5s
+    if kubectl -n argocd get application root >/dev/null 2>&1; then
+      log "건너뜀: 루트 Application 있음"
+    else
+      retry "루트 Application 적용 ($ROOT_APP_URL)" 300 kubectl apply -f "$ROOT_APP_URL"
+    fi
+
+    date -u +%FT%TZ >/var/lib/devops-bootstrap.done
+    log "완료($(( $(date +%s) - START ))초). ArgoCD http://argocd.$DUCKDNS_SUBDOMAIN.duckdns.org, prod http://$DUCKDNS_SUBDOMAIN.duckdns.org, dev http://dev.$DUCKDNS_SUBDOMAIN.duckdns.org. 앱은 ArgoCD가 이어서 배포한다(kubectl -n argocd get applications)"
+# DuckDNS 갱신: 서비스는 한 번 돌고 끝나는 oneshot이고, 타이머가 부팅 30초 뒤와 마지막 실행 5분 뒤마다 서비스를 다시 시작한다.
+- path: /etc/systemd/system/duckdns-update.service
+  content: |
+    [Unit]
+    Description=Point the DuckDNS name at this instance's public IPv4
+    Wants=network-online.target
+    After=network-online.target
+    [Service]
+    Type=oneshot
+    ExecStart=/usr/local/bin/duckdns-update
+- path: /etc/systemd/system/duckdns-update.timer
+  content: |
+    [Unit]
+    Description=Run duckdns-update at boot and every 5 minutes
+    [Timer]
+    OnBootSec=30s
+    OnUnitActiveSec=5min
+    [Install]
+    WantedBy=timers.target
+# 부트스트랩: 부팅마다 돈다. 실패하면 60초 뒤 다시 하되 2시간에 3번까지만 시작한다(그 뒤로는 로그를 보고 systemctl start로 다시 돌린다).
+# oneshot은 시작 제한 시간이 기본으로 꺼져 있어서 45분으로 묶는다(helm --wait의 10분과 이미지 내려받기를 넉넉히 넘는 값).
+- path: /etc/systemd/system/devops-bootstrap.service
+  content: |
+    [Unit]
+    Description=Bootstrap k3s, ArgoCD and the app-of-apps (idempotent, every boot)
+    Wants=network-online.target
+    After=network-online.target
+    StartLimitIntervalSec=2h
+    StartLimitBurst=3
+    [Service]
+    Type=oneshot
+    ExecStart=/usr/local/sbin/devops-bootstrap
+    TimeoutStartSec=45min
+    Restart=on-failure
+    RestartSec=60s
+    [Install]
+    WantedBy=multi-user.target
+# 첫 부팅에 한 번: 새 유닛 파일을 읽히고(daemon-reload) 부트스트랩을 켜서(enable) 다음 부팅부터는 systemd가 돌리게 한다.
+# --no-block: 10분 가까운 설치를 cloud-init 안에서 붙잡고 기다리지 않는다. 진행은 로그로 보고, 실패하면 재시도는 systemd가 한다.
+runcmd:
+- [systemctl, daemon-reload]
+- [systemctl, enable, devops-bootstrap.service]
+- [systemctl, start, --no-block, devops-bootstrap.service]
