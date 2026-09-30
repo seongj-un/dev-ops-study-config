@@ -2,9 +2,10 @@
 # 클러스터 없이 하는 정적 검증이다. 이 저장소의 main은 곧 클러스터에 배포될 상태라서, 깨진 커밋이 main에 들어가기 전에 여기서 걸러 낸다.
 # main 푸시에서도 돈다: 앱 저장소의 CI가 dev 이미지 태그를 직접 커밋하는 경우(PR 없이 main에 들어간다)에도 그 결과를 한 번 더 검사한다.
 #
-# 잡 표시 이름(validate)은 브랜치 룰셋이 필수 상태 검사로 지정할 수 있는 이름이라 바꾸면 안 된다.
+# 잡 표시 이름(validate)은 룰셋 "PR 필수"가 필수 상태 검사로 요구하는 이름이라 바꾸면 안 된다(룰셋은 이름으로 검사를 찾는다).
 # 같은 이유로 paths 필터도 두지 않는다. 필터로 워크플로가 건너뛰어지면 그 검사는 "Pending"으로 남고, 필수 검사를 요구하는 PR은 머지할 수 없게 된다.
 # 환경마다 잡을 나누는 matrix도 쓰지 않는다: 그러면 표시 이름이 "validate (dev)"처럼 바뀌어 필수 검사 이름과 맞지 않는다. 한 잡 안에서 dev와 prod를 차례로 돈다.
+# (앱 저장소 CI의 deploy key는 그 룰셋을 우회하므로 CI의 dev 태그 직접 커밋은 이 검사를 기다리지 않는다. 그 커밋에는 푸시된 뒤에 위 push 이벤트로 검사가 돈다.)
 name: validate
 
 on:
@@ -36,7 +37,15 @@ jobs:
       # kubeconform 이미지: 태그@다이제스트로 고정한다(다이제스트가 실제로 가리키는 이미지이고, 태그는 사람이 읽으라고 남긴 표시다). 멀티 아키텍처 인덱스의 다이제스트다.
       # 이 값은 액션이 아니라 셸 명령에서 쓰여서 Dependabot이 갱신해 주지 않는다. 올릴 때는 docker buildx imagetools inspect ghcr.io/yannh/kubeconform:<태그>로 다이제스트를 확인해 함께 바꾼다.
       KUBECONFORM_IMAGE: ghcr.io/yannh/kubeconform:v0.8.0@sha256:faffaf43f95aa6425306e1ab8d6fcad72acb9049158f38e574c085ea1ec0f64e
-      # ArgoCD의 Application은 쿠버네티스 내장 리소스가 아니라 CRD라서 kubeconform의 기본 스키마에 없다. datreeio의 CRD 스키마 모음(Argo CD 3.5.0 CRD 기준)에서 받는다.
+      # 쿠버네티스 내장 리소스(Deployment, Service 등)의 스키마 위치. kubeconform이 -schema-location 없이 실행될 때 쓰는 기본값
+      # (https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json)에서
+      # master만 커밋 SHA로 바꾼 것이다. 이 master는 스키마 저장소의 브랜치 이름이라 며칠마다 새 커밋이 쌓인다(최근 커밋은 쿠버네티스 master의 스키마를 갱신하거나 새 패치 버전의 스키마를 추가한 것이다).
+      # 우리가 쓰는 v1.35.0 디렉터리는 2025-12-19에 추가된 뒤 바뀐 적이 없지만 앞으로도 그렇다는 보장은 없다. 브랜치 이름 대신 커밋 SHA로 고정하면 남의 저장소가 바뀌어도
+      # 이 저장소의 검증 결과가 어느 날 갑자기 달라지지 않는다(아래 CRD 스키마 모음과 같은 이유). 고른 SHA는 2026-09-29의 최신 커밋이다.
+      # 자리표시자는 kubeconform이 채운다: {{.NormalizedKubernetesVersion}}은 -kubernetes-version 값(1.35.0)에 v를 붙인 v1.35.0, {{.StrictSuffix}}는 -strict를 줄 때만 -strict다.
+      # Dependabot이 갱신해 주지 않으니 쿠버네티스 마이너 버전을 올려 새 스키마가 필요할 때 손으로 새 커밋 SHA로 바꾼다.
+      K8S_SCHEMA_LOCATION: https://raw.githubusercontent.com/yannh/kubernetes-json-schema/8df8a883b68a24a104b4a9e43c1288090ae60b3b/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json
+      # ArgoCD의 Application은 쿠버네티스 내장 리소스가 아니라 CRD라서 위 내장 리소스 스키마에 없다. datreeio의 CRD 스키마 모음(Argo CD 3.5.0 CRD 기준)에서 받는다.
       # 모음의 main 브랜치는 거의 매일 바뀌어서 브랜치 이름이 아니라 커밋 SHA로 고정했다: 남이 스키마를 바꿔도 이 저장소의 검증 결과가 어느 날 갑자기 달라지지 않는다.
       # Dependabot이 갱신해 주지 않으니 ArgoCD의 CRD가 바뀌는 버전으로 올릴 때 손으로 새 커밋 SHA로 바꾼다.
       CRD_SCHEMA_LOCATION: https://raw.githubusercontent.com/datreeio/CRDs-catalog/d373c2da9702bc9509a004db83e57263fe3bdfc1/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
@@ -49,6 +58,27 @@ jobs:
         with:
           # 체크아웃에 쓴 토큰을 러너에 남기지 않는다. 이 워크플로는 git push 같은 인증된 git 작업을 하지 않는다.
           persist-credentials: false
+
+      # 값 파일이 "yq가 쓰는 모양" 그대로인지 확인한다. 앱 저장소 CI(deploy-dev 잡)는 dev의 image.tag를 yq -i로 고쳐 커밋하는데, yq는 파일을 다시 쓰면서
+      # 키 사이의 빈 줄을 지우고 들여쓰기를 2칸으로, 줄 끝 주석 앞 공백을 한 칸으로 정리한다. 파일이 이미 그 모양이 아니면 첫 자동 커밋이 태그 한 줄이 아니라 파일 곳곳을 바꾼다.
+      # `yq '.'`는 파일을 고치지 않고 yq가 쓸 모양으로 출력만 한다. 그 출력이 파일과 같아야(diff가 비어야) 자동 커밋이 언제나 태그 한 줄만 바꾼다는 불변식이 지켜진다.
+      # 사람이 PR로 값 파일에 빈 줄을 넣는 식의 변경을 머지 전에 걸러 내는 것이 목적이다. prod 파일도 같은 모양이어야 승격 PR(yq로 태그만 옮긴다)의 diff가 한 줄이다.
+      # yq(mikefarah v4)는 ubuntu-24.04 러너 이미지에 미리 깔려 있다. deploy-dev 잡도 같은 러너 이미지의 yq를 쓰므로 실제로 파일을 고쳐 쓰는 바로 그 yq로 검사하는 셈이고,
+      # 러너 이미지가 갱신되어 yq의 출력 모양이 바뀌면 이 검사가 먼저 알려 준다. diff의 < 줄은 yq가 쓸 모양, > 줄은 지금 파일이다.
+      - name: 값 파일이 yq가 쓰는 모양인지 확인 (dev, prod)
+        run: |
+          yq --version
+          status=0
+          for environment in dev prod; do
+            file="environments/$environment/values.yaml"
+            if diff <(yq '.' "$file") "$file"; then
+              echo "$file: yq가 다시 써도 바뀌지 않는다"
+            else
+              echo "::error file=$file::yq가 다시 쓰면 이 파일이 바뀐다. yq -i '.' $file 로 정규화해서 커밋한다"
+              status=1
+            fi
+          done
+          exit "$status"
 
       # 러너 이미지에는 Helm 3이 미리 깔려 있다(3.22.0, 2026-09 기준). 그대로 쓰면 로컬(4.3.0)과 다른 메이저 버전으로 검증하게 되므로 Helm 4를 직접 설치한다.
       # 4.3.0은 로컬에서 쓰는 버전과 같다. ArgoCD v3.5.3의 repo-server가 실제로 렌더링에 쓰는 Helm은 4.2.1(ArgoCD 저장소의 hack/tool-versions.sh)이고,
@@ -75,6 +105,7 @@ jobs:
       # 값은 차트 기본값 위에 환경별 파일이다. 그래서 리소스 이름까지 실제 배포와 같다.
       # 결과는 파일로 받아 kubeconform의 표준 입력(-)에 넣는다. helm이 실패하면 그 자리에서 잡이 실패한다.
       # kubeconform 옵션: -strict는 스키마에 없는 필드와 중복된 키를 오류로 본다(오타를 잡는다). -kubernetes-version은 그 버전의 스키마로 검사한다.
+      # -schema-location은 위에서 커밋 SHA로 고정한 내장 리소스 스키마 위치(K8S_SCHEMA_LOCATION)다. 이 옵션을 주면 기본 위치(master 브랜치)는 쓰이지 않는다.
       # 렌더링 결과에는 helm test용 파드도 들어 있어서 함께 검사된다(ArgoCD는 그 파드를 배포하지 않는다).
       - name: 렌더링 + 쿠버네티스 스키마 검사 (dev, prod)
         run: |
@@ -85,18 +116,20 @@ jobs:
               --kube-version "$KUBERNETES_VERSION" \
               -f "environments/$environment/values.yaml" > "$RUNNER_TEMP/$environment.yaml"
             docker run -i --rm "$KUBECONFORM_IMAGE" \
-              -strict -summary -kubernetes-version "$KUBERNETES_VERSION" - < "$RUNNER_TEMP/$environment.yaml"
+              -strict -summary \
+              -schema-location "$K8S_SCHEMA_LOCATION" \
+              -kubernetes-version "$KUBERNETES_VERSION" - < "$RUNNER_TEMP/$environment.yaml"
             echo "::endgroup::"
           done
 
-      # argocd/ 아래의 Application 매니페스트(루트와 dev·prod)를 스키마로 검사한다. 내장 리소스는 기본 스키마(default)에서,
+      # argocd/ 아래의 Application 매니페스트(루트와 dev·prod)를 스키마로 검사한다. 내장 리소스는 위 K8S_SCHEMA_LOCATION(고정한 기본 스키마)에서,
       # Application은 위 CRD 스키마 모음에서 찾는다. 찾지 못하면 통과시키지 않고 실패한다(-ignore-missing-schemas를 쓰지 않았다).
       # -strict 덕분에 필드 이름의 오타(예: selfHeall)나 잘못된 위치의 필드가 여기서 걸린다. 디렉터리를 넘기면 하위 디렉터리까지 검사한다.
       - name: ArgoCD Application 스키마 검사
         run: |
           docker run --rm -v "$GITHUB_WORKSPACE:/work:ro" -w /work "$KUBECONFORM_IMAGE" \
             -strict -summary \
-            -schema-location default \
+            -schema-location "$K8S_SCHEMA_LOCATION" \
             -schema-location "$CRD_SCHEMA_LOCATION" \
             -kubernetes-version "$KUBERNETES_VERSION" \
             argocd/
