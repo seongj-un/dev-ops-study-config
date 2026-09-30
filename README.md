@@ -7,12 +7,19 @@ Helm 차트, 환경별 값, ArgoCD 정의가 여기에 있고, 클러스터에�
 
 ## 왜 앱 저장소와 분리했나
 
-- **Git 로그가 곧 배포 이력이다.** 이 저장소의 커밋 하나는 "어느 환경에 어느 이미지를 올렸다(또는 설정을 바꿨다)"는 변경 하나다. 앱 코드 커밋과 섞이지 않아서
+- **Git 로그가 곧 배포 이력이다.** 이 저장소의 커밋 하나는 "어느 환경에 어느 이미지를 올렸다(또는 설정을 바꿨다)"는 변경 하나다.
   "지금 무엇이 떠 있나, 언제 바뀌었나, 어디로 되돌리나"를 이 저장소의 로그와 `git revert`로 답할 수 있다.
-- **보호 규칙이 다르다.** 앱 저장소의 `main`은 PR과 테스트·이미지 검사를 요구한다. 이 저장소의 `main`도 PR을 요구하되, 앱 저장소 CI가 쓰는 deploy key만 예외로 두어
-  dev 이미지 태그를 직접 커밋하게 하고 prod는 사람의 PR로만 바꾼다(GitHub 룰셋은 저장소 설정에 있고 이 저장소의 파일에는 없다).
-- **CI가 스스로를 다시 돌리지 않는다.** 앱 CI가 배포 태그를 앱 저장소 `main`에 커밋하면 그 푸시가 다시 CI를 돌려서(이미지 빌드 → 태그 커밋 → 이미지 빌드 …) 고리가 생기므로 끊으려면 paths 필터 같은 별도 장치가 필요하다.
-  태그를 다른 저장소에 커밋하면 이 저장소의 검증(`validate`)만 돌고 앱 CI는 깨지 않는다.
+- **권한과 보호 규칙을 따로 둔다.** 앱 저장소의 `main`은 PR과 테스트·이미지 검사를 요구한다. 이 저장소의 `main`도 PR을 요구하고(필수 상태 검사는 `validate`),
+  사람은 이 룰셋 때문에 prod를 PR로만 바꿀 수 있다. 앱 저장소 CI가 쓰는 deploy key는 이 룰셋을 우회(bypass)하도록 등록해서 dev 이미지 태그를 직접 커밋하게 한다.
+  다만 우회는 저장소 전체에 미치므로 기술적으로는 이 키로 prod 파일도 직접 커밋할 수 있다. prod가 그대로인 것은 룰셋이 막아서가 아니라
+  CI 스크립트가 dev 파일만 고치기 때문이다(GitHub 룰셋은 저장소 설정에 있고 이 저장소의 파일에는 없다).
+- **앱 이력과 배포 이력이 섞이지 않는다.** 배포마다 생기는 태그 커밋이 앱 저장소 로그에 끼어들면 기능 변경을 찾는 `git log`·`git blame`·`git bisect`가 배포 커밋으로 어수선해진다.
+  반대로 앱 코드 커밋이 이 저장소에 끼어들면 "무엇이 언제 배포됐나"가 흐려진다.
+- **"태그 커밋이 CI를 다시 돌린다"는 이유는 아니다.** 흔히 앱 CI가 배포 태그를 앱 저장소 `main`에 커밋하면 그 푸시가 다시 CI를 돌려 고리가 생긴다고 하지만, 늘 그런 것은 아니다.
+  워크플로의 `GITHUB_TOKEN`으로 한 푸시는 새 워크플로 실행을 시작시키지 않는다(GitHub가 재귀 실행을 막으려고 정한 규칙이다. `workflow_dispatch`·`repository_dispatch` 등 몇 가지만 예외:
+  GitHub 문서의 "Triggering a workflow from a workflow"). 고리가 생기는 것은 워크플로를 시작시키는 자격 증명(개인 액세스 토큰, deploy key, GitHub App 토큰)으로 푸시할 때이고,
+  PR을 요구하는 보호된 `main`에 직접 커밋하려면 룰셋을 우회할 수 있는 그런 자격 증명이 필요하다. 그때는 paths 필터 같은 별도 장치로 고리를 끊어야 한다.
+  분리한 진짜 이유는 위의 배포 이력, 권한 분리, 이력 분리다.
 - **ArgoCD가 배포와 무관한 커밋에 반응하지 않는다.** ArgoCD는 `main`이 가리키는 커밋이 바뀌면 그 커밋으로 매니페스트를 다시 만든다.
   앱 코드 커밋이 잦은 저장소를 읽으면 배포와 무관한 커밋마다 렌더링이 다시 돈다(Application에 `manifest-generate-paths` 어노테이션을 달면 줄일 수는 있다).
 
@@ -21,13 +28,13 @@ Helm 차트, 환경별 값, ArgoCD 정의가 여기에 있고, 클러스터에�
 ```
 charts/shortener/                Helm 차트: 앱 + 클러스터 안의 PostgreSQL·Redis (앱 저장소의 deploy/helm/shortener를 옮겨 온 것)
 environments/dev/values.yaml     dev 값. image.tag는 앱 저장소 CI가 고친다
-environments/prod/values.yaml    prod 값. image.tag는 PR로만 바꾼다(승격)
+environments/prod/values.yaml    prod 값. image.tag는 사람이 PR로 바꾼다(승격)
 clusters/local/k3d.yaml          로컬 k3d 클러스터 정의 (맥의 8090 포트 → Traefik 80)
 bootstrap/argocd/values.yaml     ArgoCD를 처음 설치할 때 쓰는 Helm 값 (최소 구성)
 argocd/root.yaml                 app-of-apps 루트 Application. ArgoCD를 설치한 뒤 손으로 한 번만 적용한다
 argocd/apps/shortener-dev.yaml   dev Application
 argocd/apps/shortener-prod.yaml  prod Application
-.github/workflows/validate.yml   PR·main 푸시 검증 (helm lint, 렌더링, 스키마 검사)
+.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링, 스키마 검사)
 .github/dependabot.yml           GitHub Actions 주간 갱신
 ```
 
@@ -36,8 +43,8 @@ argocd/apps/shortener-prod.yaml  prod Application
 | 네임스페이스 | `shortener-dev` | `shortener-prod` |
 | 주소 | http://shortener-dev.localhost:8090 | http://shortener.localhost:8090 |
 | 이미지 태그를 바꾸는 방법 | 앱 저장소 CI가 자동으로 커밋 | 사람이 PR로 승격 |
-| 파드 | 1개 고정 | HPA로 1~2개 |
-| 앱 메모리 요청 / 한도 | 256Mi / 512Mi | 384Mi / 512Mi |
+| 파드 | 1개 고정 | 1개 고정 (HPA는 끔. 아래 메모리 메모) |
+| 앱 메모리 요청 / 한도 | 256Mi / 384Mi | 256Mi / 384Mi |
 | ArgoCD Application | `shortener-dev` | `shortener-prod` |
 
 - DB 비밀번호 Secret `shortener-db`(키 `password`)는 **Git에 없다.** 각 네임스페이스에 손으로 만든다(아래 부트스트랩).
@@ -63,20 +70,21 @@ argocd/apps/shortener-prod.yaml  prod Application
 
 ## 승격: dev에서 prod로
 
-prod의 이미지 태그는 사람이 PR로만 바꾼다. dev에서 확인한 SHA를 prod 파일에 그대로 옮기는 PR이다(`yq`가 필요하다: `brew install yq`. 없으면 값을 손으로 옮겨도 된다).
+prod의 이미지 태그는 사람이 PR로 바꾼다(룰셋이 사람의 `main` 직접 푸시를 막는다). dev에서 확인한 SHA를 prod 파일에 그대로 옮기는 PR이다(`yq`가 필요하다: `brew install yq`. 없으면 값을 손으로 옮겨도 된다).
+`yq` 식은 CI가 dev 태그를 고칠 때와 같은 `strenv` 형태다(이유는 아래 "이 저장소를 고칠 때 지킬 것").
 
 ```bash
 git switch main && git pull
-git switch -c promote/prod-<짧은 SHA>
-SHA=$(yq '.image.tag' environments/dev/values.yaml)
-yq -i ".image.tag = \"$SHA\"" environments/prod/values.yaml
+export SHA=$(yq '.image.tag' environments/dev/values.yaml)
+git switch -c "promote/prod-${SHA:0:7}"
+yq -i '.image.tag = strenv(SHA)' environments/prod/values.yaml
 git diff                                   # 태그 한 줄만 바뀌어야 한다
 git commit -am "deploy(prod): shortener ${SHA:0:7}"
 git push -u origin HEAD
 gh pr create --fill
 ```
 
-`validate` 검사가 통과한 PR을 머지하면 ArgoCD가 다음 폴링에서 prod에 반영한다. 승격의 관문은 이미지 태그에만 있다는 점에 유의한다:
+PR은 `validate` 검사(룰셋 "PR 필수"의 필수 상태 검사)가 통과해야 머지된다. 머지하면 ArgoCD가 다음 폴링에서 prod에 반영한다. 승격의 관문은 이미지 태그에만 있다는 점에 유의한다:
 `charts/shortener`의 템플릿이나 기본값을 고치면 dev와 prod가 같은 `main`을 읽으므로 **머지되는 순간 두 환경에 함께 반영된다.**
 
 ## 롤백
@@ -84,6 +92,7 @@ gh pr create --fill
 Git에서 배포 커밋을 되돌린다. 태그가 이전 값으로 돌아가는 새 커밋이 생기고(이력은 지우지 않는다) ArgoCD가 그것을 새 배포로 반영한다.
 
 ```bash
+git switch main && git pull
 git log --oneline -- environments/prod/values.yaml     # 되돌릴 배포 커밋 찾기 (dev는 environments/dev/values.yaml)
 git switch -c revert/<이름>
 git revert <커밋 SHA>
@@ -131,13 +140,12 @@ kubectl apply -f argocd/root.yaml
 ```bash
 kubectl -n argocd get applications          # root, shortener-dev, shortener-prod가 Synced·Healthy가 될 때까지 몇 분 걸린다
 kubectl -n shortener-dev get pods
-kubectl -n shortener-prod get pods,hpa
+kubectl -n shortener-prod get pods
 curl -i -X POST http://shortener-dev.localhost:8090/api/v1/urls -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
 curl -i -X POST http://shortener.localhost:8090/api/v1/urls     -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
 ```
 
-첫 배포에서 앱이 DB보다 먼저 뜨면 몇 번 재시작한 뒤 자리를 잡는다(정상). prod의 HPA는 파드의 첫 CPU 메트릭이 들어오기 전까지
-ArgoCD가 Degraded(`FailedGetResourceMetric`)나 Progressing으로 보여 줄 수 있고, 메트릭이 들어오면 저절로 Healthy가 된다.
+첫 배포에서 앱이 DB보다 먼저 뜨면 몇 번 재시작한 뒤 자리를 잡는다(정상).
 
 **ArgoCD UI**: http://argocd.localhost:8090 , 사용자 `admin`. 초기 비밀번호는 ArgoCD 서버가 처음 시작할 때 Secret에 만들어 둔다.
 
@@ -198,21 +206,29 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 
 ## 메모리 메모
 
-Docker VM은 2.84GiB이고, 그중 사용자의 다른 컨테이너가 약 600MiB, 빈 클러스터(k3s·Traefik 등)가 약 770MiB를 써서 이 클러스터의 워크로드에 쓸 여유가 약 1.5GiB다.
-이전 단계는 앱 한 벌이었는데 이제 앱 두 벌(dev·prod)과 ArgoCD가 함께 뜬다.
+Docker VM은 2.84GiB(약 2908MiB)이고, 그중 사용자의 다른 컨테이너가 약 600MiB, 빈 클러스터(k3s·Traefik 등)가 약 770MiB를 써서 이 클러스터의 워크로드에 쓸 여유가 약 1.5GiB(약 1538MiB)다.
+이전 단계는 앱 한 벌이었는데 이제 앱 두 벌(dev·prod)과 ArgoCD가 함께 뜬다. 그래서 두 환경 모두 파드 1개(HPA 끔), 앱 메모리 요청 256Mi·한도 384Mi로 잡았다.
+JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 `-XX:MaxRAMPercentage=75.0`)라서 한도 384Mi에서는 288Mi다(차트 기본값 한도 512Mi에서는 384Mi).
 
 | | 요청 합 | 한도 합 |
 |---|---|---|
 | ArgoCD (파드 4개) | 304Mi | 768Mi |
-| dev (앱 + PostgreSQL + Redis) | 416Mi | 896Mi |
-| prod (앱 1개일 때, 최대 2개면 한도 1408Mi) | 544Mi | 896Mi |
-| 합계 | 1264Mi | 2560Mi |
+| dev (앱 256Mi/384Mi + PostgreSQL 128Mi/256Mi + Redis 32Mi/128Mi) | 416Mi | 768Mi |
+| prod (같은 구성, 앱 1개) | 416Mi | 768Mi |
+| 합계 | 1136Mi | 2304Mi |
+| 롤링 업데이트 중 환경마다 앱 파드 하나 추가 (maxSurge 1) | +256Mi | +384Mi |
 
-- **한도 합은 여유(1.5GiB)를 넘는다.** 한도는 상한일 뿐 평소 사용량은 훨씬 작지만, 실제 사용량이 VM 메모리를 넘으면 이 클러스터와 상관없는 컨테이너까지 죽을 수 있다(스케줄러는 이것을 막지 못한다).
+- **한도 합(2304Mi)은 여유(약 1538Mi)를 넘는다.** 한도는 상한일 뿐 평소 사용량은 훨씬 작지만, 실제 사용량이 VM 메모리를 넘으면 이 클러스터와 상관없는 컨테이너까지 죽을 수 있다(스케줄러는 이것을 막지 못한다).
   띄운 뒤 실제 값을 확인한다: `kubectl top pods -A --sort-by=memory`, `docker stats --no-stream`.
+- 요청 합(1136Mi)은 여유 안이다. 롤링 업데이트로 앱 파드가 하나 더 뜨면 1392Mi이고, **차트의 파드 템플릿을 고쳐 dev와 prod가 함께 롤링되면 1648Mi로 여유를 넘는다**(두 환경이 같은 `main`의 차트를 읽는다). 그 순간이 가장 빠듯하다.
+  실제 사용량은 요청과 다르다: 2단계에서 한도 512Mi로 띄웠을 때 유휴 상태의 앱 파드는 약 320Mi, PostgreSQL은 약 55Mi, Redis는 약 15Mi였다(`kubectl top`). 앱 한도를 384Mi로 줄인 뒤의 값은 재지 않았다.
+- **prod의 HPA를 끈 이유가 이 예산이다.** HPA가 prod를 2개로 늘려 둔 채 롤링 업데이트를 하면 prod의 앱 JVM만 3개가 된다. 2단계에서는 새 파드가 뜬 직후 HPA가 앱을 1개에서 2개로 늘렸다가
+  5분쯤 뒤에 줄이는 일이 여러 번 있었다(콜드 JVM의 CPU 급증 때문으로 추정하지만 그 순간의 CPU는 재지 않았다). HPA는 prod를 EC2로 옮기는 6단계에서 다시 켠다. HPA 자체는 2단계에서 이미 연습했다.
+  차트의 기본값(HPA 1~2개, 앱 요청 384Mi·한도 512Mi)은 그대로 두었고 환경 값 파일이 덮어쓴다.
 - 클러스터가 떠 있는 동안에는 로컬 이미지 빌드를 피한다. 쓰지 않을 때는 `k3d cluster stop devops-study`로 멈추고(데이터는 남는다), 다시 켤 때는 `k3d cluster start devops-study`.
-- dev를 잠시 끄고 싶다면 `kubectl scale`이 아니라 Git에서 `environments/dev/values.yaml`의 `replicaCount`를 0으로 바꾼다. selfHeal이 손으로 바꾼 파드 수를 되돌리기 때문이다.
-- OOMKilled(exit 137)가 보이면 그 컨테이너의 메모리 한도를 올린다(ArgoCD는 `bootstrap/argocd/values.yaml`을 고치고 `helm upgrade --install`을 다시 실행, 앱은 차트 기본값이나 환경 값).
+- dev나 prod를 잠시 끄고 싶다면 `kubectl scale`이 아니라 Git에서 그 환경의 `environments/<환경>/values.yaml`의 `replicaCount`를 0으로 바꾼다. 두 환경 모두 HPA가 없어 selfHeal이 손으로 바꾼 파드 수를 되돌리기 때문이다.
+- OOMKilled(exit 137)가 보이면 그 컨테이너의 메모리 한도를 올린다(ArgoCD는 `bootstrap/argocd/values.yaml`을 고치고 `helm upgrade --install`을 다시 실행, 앱은 `environments/<환경>/values.yaml`의 `resources.limits.memory`).
+  앱은 한도를 384Mi로 줄였으므로 힙 밖 몫이 128Mi에서 96Mi로 줄어 가장 먼저 의심할 곳이다. 한도를 올리면 힙 상한도 한도의 75%로 따라 오른다.
 
 ## 로컬에서 검증하기
 
@@ -221,16 +237,18 @@ CI(`validate.yml`)가 하는 일을 클러스터 없이 그대로 해 볼 수 �
 ```bash
 KUBERNETES_VERSION=$(yq '.jobs.validate.env.KUBERNETES_VERSION' .github/workflows/validate.yml)
 KUBECONFORM_IMAGE=$(yq '.jobs.validate.env.KUBECONFORM_IMAGE' .github/workflows/validate.yml)
+K8S_SCHEMA_LOCATION=$(yq '.jobs.validate.env.K8S_SCHEMA_LOCATION' .github/workflows/validate.yml)
 CRD_SCHEMA_LOCATION=$(yq '.jobs.validate.env.CRD_SCHEMA_LOCATION' .github/workflows/validate.yml)
 
 for env in dev prod; do
+  diff <(yq '.' environments/$env/values.yaml) environments/$env/values.yaml     # 값 파일이 yq가 쓰는 모양인가 (출력이 없어야 한다)
   helm lint charts/shortener --strict --kube-version $KUBERNETES_VERSION -f environments/$env/values.yaml
   helm template shortener-$env charts/shortener --namespace shortener-$env --kube-version $KUBERNETES_VERSION -f environments/$env/values.yaml \
-    | docker run -i --rm $KUBECONFORM_IMAGE -strict -summary -kubernetes-version $KUBERNETES_VERSION -
+    | docker run -i --rm $KUBECONFORM_IMAGE -strict -summary -schema-location "$K8S_SCHEMA_LOCATION" -kubernetes-version $KUBERNETES_VERSION -
 done
 
 docker run --rm -v "$PWD":/work:ro -w /work $KUBECONFORM_IMAGE -strict -summary \
-  -schema-location default -schema-location "$CRD_SCHEMA_LOCATION" -kubernetes-version $KUBERNETES_VERSION argocd/
+  -schema-location "$K8S_SCHEMA_LOCATION" -schema-location "$CRD_SCHEMA_LOCATION" -kubernetes-version $KUBERNETES_VERSION argocd/
 ```
 
 `helm template`은 ArgoCD가 하는 것과 같이 릴리스 이름(`shortener-dev`)과 네임스페이스를 주고 환경 값 파일을 얹어 렌더링한다. `image.tag`가 커밋 SHA 40자가 아니거나 DB Secret 이름이 없으면
@@ -254,6 +272,7 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | `actions/checkout` | v7.0.1 (커밋 SHA로 고정) | `validate.yml` |
 | `azure/setup-helm` | v5.0.1 (커밋 SHA로 고정) | `validate.yml` |
 | kubeconform | v0.8.0 (태그@다이제스트) | `validate.yml`의 `KUBECONFORM_IMAGE` |
+| 쿠버네티스 내장 리소스 스키마 | yannh/kubernetes-json-schema 커밋 `8df8a88`(2026-09-29의 최신 커밋) | `validate.yml`의 `K8S_SCHEMA_LOCATION` |
 | Argo CRD 스키마 | datreeio/CRDs-catalog 커밋 `d373c2d`(Argo CD 3.5.0 CRD 기준) | `validate.yml`의 `CRD_SCHEMA_LOCATION` |
 | 검증 기준 쿠버네티스 | 1.35.0 (클러스터는 k3s v1.35.5) | `validate.yml`의 `KUBERNETES_VERSION`, `clusters/local/k3d.yaml` |
 
@@ -261,9 +280,13 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 
 ## 이 저장소를 고칠 때 지킬 것
 
-- `environments/dev/values.yaml`의 `image.tag`는 `image:` 아래 한 줄로 둔다. 앱 저장소 CI가 `yq -i '.image.tag = "<SHA>"' environments/dev/values.yaml`로 고친다.
+- `environments/dev/values.yaml`의 `image.tag`는 `image:` 아래 한 줄로 둔다. 앱 저장소 CI(`deploy-dev` 잡)가 커밋 SHA를 환경 변수 `IMAGE_TAG`로 주고
+  `yq -i '.image.tag = strenv(IMAGE_TAG)' environments/dev/values.yaml`로 고친다. `strenv`를 쓰는 이유: 값이 yq 식에 글자로 끼워 넣어지지 않고 환경 변수로 들어가며 항상 문자열로 남는다
+  (`env()`는 값을 YAML로 해석해서 숫자처럼 생긴 값을 숫자로 읽을 수 있다).
   이 파일들은 빈 줄이 없는 모양으로 커밋되어 있다(yq가 고쳐 쓸 때 빈 줄을 지우므로). 새 설정을 추가할 때도 이 모양을 지킨다.
-- `validate` 잡의 이름은 브랜치 룰셋의 필수 검사 이름이라 바꾸지 않는다.
+  `validate`가 `diff <(yq '.' 파일) 파일`로 이 모양을 검사하므로 어긋난 PR은 머지 전에 걸린다.
+- `validate` 잡은 룰셋 "PR 필수"의 필수 상태 검사다(저장소 설정). 룰셋이 잡 이름으로 검사를 찾으므로 이름을 바꾸지 않는다. deploy key는 그 룰셋을 우회하므로 CI의 dev 태그 직접 커밋은
+  이 검사를 기다리지 않고, 푸시된 뒤에 `push` 이벤트로 검사가 돈다(결과를 알려 줄 뿐 막지는 못한다. ArgoCD는 GitHub의 검사 결과를 보지 않는다).
 - Application을 지우면(루트의 prune 포함) 그것이 배포한 리소스는 클러스터에 남는다(삭제 finalizer를 붙이지 않았다). 네임스페이스와 PostgreSQL의 PVC도 남는다.
 
 ## 막혔을 때
@@ -272,7 +295,7 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 |---|---|
 | Application이 `Unknown`이거나 `ComparisonError` | ArgoCD가 저장소를 읽지 못한다. 저장소가 GitHub에 올라가 있고 공개인지, `targetRevision: main`이 있는지 본다 |
 | 앱·PostgreSQL 파드가 `CreateContainerConfigError` | 그 네임스페이스에 `shortener-db` Secret이 없다. 부트스트랩 3번대로 만든다 |
-| 동기화가 `Failed`인데 다시 시도하지 않는다 | 자동 동기화는 같은 커밋으로 실패했으면 그 커밋으로 다시 시도하지 않는다. 원인을 고친 커밋을 올리거나 UI에서 직접 Sync한다 |
+| 동기화가 `Failed`로 멈춘 채 그대로다 | `syncPolicy.retry`를 두지 않아도 자동 동기화는 실패하면 ArgoCD의 기본 재시도를 한다(ArgoCD v3.5.3 소스 기준 최대 5번, 대기는 5초에서 시작해 2배씩 늘고 최대 3분. 진행 중에는 상태 메시지에 `Retrying attempt #N`이 보인다). 이 재시도까지 모두 실패하면 같은 커밋으로는 새 동기화를 시작하지 않는다(selfHeal이 켜져 있어도 같다). 상태 메시지에서 원인을 읽고, 원인을 고친 커밋을 올리거나 UI에서 직접 Sync한다 |
 | Application이 오래 `Progressing` | ArgoCD는 Ingress의 `status.loadBalancer.ingress`가 채워져야 Healthy로 본다. `kubectl -n shortener-dev get ingress`의 ADDRESS를 확인한다 |
 | 앱이 DB 인증에 실패한다 | Secret을 다시 만들었는데 PostgreSQL 볼륨이 옛 비밀번호로 이미 초기화되어 있다. `POSTGRES_PASSWORD`는 빈 볼륨을 처음 만들 때만 쓰인다. 데이터를 버려도 되면 PVC(`data-shortener-<환경>-postgresql-0`)를 지우고 파드를 다시 띄운다 |
 | 커밋했는데 반영이 안 된다 | 폴링을 기다린다(60초 안팎, 길면 2분 가까이). 바로 보려면 위의 `argocd.argoproj.io/refresh` 어노테이션으로 새로고침한다 |
