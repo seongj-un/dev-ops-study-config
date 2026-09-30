@@ -18,7 +18,7 @@ image:
   # strenv를 쓰는 이유: 값이 yq 식에 글자로 끼워 넣어지지 않고 환경 변수로 들어가며, 항상 문자열로 남는다(env()는 값을 YAML로 해석해 숫자처럼 생긴 값을 숫자로 읽을 수 있다).
   # 이 식이 image.tag 위치를 가리키므로 image: 아래에 tag 키를 한 줄로 유지해야 하고, 손으로는 고치지 않는다.
   # 값은 따옴표로 감싼다: 40자 16진수가 우연히 숫자(예: 1234...)나 지수 표기(예: 1234e5...)처럼 생겨도 YAML이 숫자가 아닌 문자열로 읽게 하려는 것이다.
-  tag: "3d911e42d788f0021a82e8e973b1335a412220f2"
+  tag: "b3e7d17fc986e40f4bff44d751e88deeb4eae340"
 # 응답의 shortUrl 앞에 붙는 공개 주소. Ingress로 들어오는 주소와 같아야 한다 (k3d가 맥의 8090 포트를 Traefik에 이어 준다: clusters/local/k3d.yaml).
 baseUrl: http://shortener-dev.localhost:8090
 ingress:
