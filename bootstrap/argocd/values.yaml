@@ -62,22 +62,30 @@ applicationSet:
 # CPU 한도는 두지 않고 요청만 둔다(메모리 한도는 둔다). 이유는 앱 차트(charts/shortener/values.yaml)의 resources 주석과 같다:
 # CPU 한도는 CFS 쿼터로 강제되어 평균 사용량이 낮아도 순간적으로 몰리면 스로틀링되는데, ArgoCD 컴포넌트(Go)도 동기화·GC 때 여러 스레드가 순간적으로 CPU를 쓴다.
 # 메모리는 압축할 수 없는 자원이라 한도를 둔다. 한도를 넘긴 컨테이너만 OOMKilled(exit 137)로 죽고 재시작된다.
-# 값은 클러스터에 올려 측정한 것이 아니라, Application 몇 개에 작은 저장소라는 작은 규모를 가정한 추정이다. 배포한 뒤 kubectl top pods -n argocd로 확인하고 조정한다.
-# (application-controller·repo-server의 메모리 한도는 4단계에서 kube-prometheus-stack을 더하며 올렸다. 근거는 각 컴포넌트의 주석에 있다.)
+# 값은 대부분 클러스터에 올려 측정한 것이 아니라, Application 몇 개에 작은 저장소라는 작은 규모를 가정한 추정이다. 배포한 뒤 kubectl top pods -n argocd로 확인하고 조정한다.
+# 예외는 application-controller(요청·한도)와 repo-server의 copyutil(한도)이다. 새 EC2 인스턴스의 첫 부팅에서 둘 다 OOM을 겪은 뒤(컨트롤러는 kube-prometheus-stack을 처음 동기화하는 동안) 그때 잰 값으로 고쳤다. 근거는 각 컴포넌트의 주석에 있다.
+# (repo-server 본체의 한도는 4단계에서 kube-prometheus-stack을 더하며 올린 추정이다. 같은 부팅에서 잰 최고 사용량이 172MiB로 한도의 34%라 그대로 둔다.)
 # 요청을 평소 사용량 가까이 잡은 이유: 노드의 메모리가 부족해지면 kubelet은 요청을 넘게 쓰는 파드부터 내쫓는다. 요청이 너무 작으면 ArgoCD가 앱보다 먼저 축출될 수 있다.
 
 controller:
   # 감시하는 클러스터의 리소스를 메모리에 캐시하고, Git의 매니페스트와 비교해 동기화하는 ArgoCD의 중심 컴포넌트다. 메모리는 그 클러스터의 리소스 수에 따라 늘어난다.
   # 파드는 StatefulSet 1개(replicas 1)다.
-  # 한도 512Mi = 앱만 있을 때 잡은 256Mi + kube-prometheus-stack 몫 256Mi(4단계에서 올렸다. 추정). 컨트롤러는 Application이 관리하는 리소스와 클러스터의
-  # 모든 CRD를 매니페스트째 캐시에 들고 있고, 비교할 때는 Git 쪽 매니페스트도 함께 메모리에 올린다. 이 차트 하나가 객체 106개, JSON으로 약 3.0MiB를 더하는데
-  # 그중 2.4MiB가 CRD 10개다(가장 큰 prometheuses CRD가 약 486KiB). Go 객체(map)로 풀면 JSON 텍스트보다 몇 배 커지고 비교 중에는 사본이 더 생긴다.
+  # 요청 384Mi·한도 1Gi는 EC2에서 잰 값이다. 처음에는 요청 128Mi·한도 512Mi로 잡았다(한도는 앱만 있을 때 잡은 256Mi + kube-prometheus-stack 몫 256Mi. 추정).
+  # 새 인스턴스에서 kube-prometheus-stack을 처음 동기화하는 동안 컨트롤러가 OOMKilled(exit 137)로 3번 죽었다(커널 로그의 anon-rss 519,396~521,736kB, 약 507~510MiB로 한도 512Mi 직전).
+  # 4번째로 뜬 인스턴스는 버텼지만 기동 중 최고(cgroup memory.peak)가 509.3MiB로 한도의 99%였다. 그 뒤 평소 사용량(working set)은 294~421MiB였다(기동 직후 4분은 412~421, 이후 369 → 348 → 294).
+  # 요청 384Mi: 평소 사용량 가까이에 맞췄다(위 요청 주석). 128Mi일 때는 평소에도 요청의 2.3~3.3배를 써서, 노드 메모리가 부족해지면 kubelet이 앱보다 먼저 내쫓을 후보였다.
+  # 384Mi면 평소에는 요청 안이고 기동 직후 몇 분만 조금 넘는다.
+  # 한도 1Gi: 첫 동기화의 정점에 여유를 둔 것이다. 컨트롤러는 Application이 관리하는 리소스와 클러스터의 모든 CRD를 매니페스트째 캐시에 들고 있고,
+  # 비교할 때는 Git 쪽 매니페스트도 함께 메모리에 올린다. 이 차트 하나가 객체 106개, JSON으로 약 3.0MiB를 더하는데 그중 2.4MiB가 CRD 10개다(가장 큰 prometheuses CRD가 약 486KiB).
+  # Go 객체(map)로 풀면 JSON 텍스트보다 몇 배 커지고 비교 중에는 사본이 더 생긴다. 큰 차트를 처음 동기화할 때는 이 캐시가 한꺼번에 채워져서 정점이 생긴다.
+  # 죽은 3개는 죽는 순간까지 한도에 막혀 있었으니 진짜 정점은 509MiB보다 높고 재지 못했다. 그래서 잰 최고치의 두 배인 1Gi로 잡았다. 한도는 상한일 뿐 평소 사용량은 그대로다.
+  # Loki·Alloy를 더한 첫 동기화나 차트 버전을 올린 뒤에도 OOMKilled가 나면 새 인스턴스에서 memory.peak를 다시 재서 고친다.
   resources:
     requests:
       cpu: 50m
-      memory: 128Mi
+      memory: 384Mi
     limits:
-      memory: 512Mi
+      memory: 1Gi
 
 repoServer:
   # Git 저장소를 복제해 두고 helm template으로 매니페스트를 만들어 컨트롤러에 돌려준다. git·helm 프로세스를 띄울 때 메모리가 잠깐 튄다(위 reposerver.parallelism.limit).
@@ -93,14 +101,20 @@ repoServer:
     limits:
       memory: 512Mi
   copyutil:
-    # repo-server 파드가 시작할 때 도는 초기화 컨테이너다. ArgoCD 실행 파일을 공유 볼륨에 복사하고 끝난다(설정 관리 플러그인 사이드카가 쓰는 것이라 이 구성에서는 쓰이지 않는다).
-    # 큰 파일을 복사하는 동안의 페이지 캐시도 컨테이너 메모리로 세어지므로 한도를 너무 작게 잡지 않는다(차트 values.yaml의 예시와 같은 128Mi).
+    # repo-server 파드가 시작할 때 도는 초기화 컨테이너다. ArgoCD 실행 파일(/usr/local/bin/argocd. v3.5.3 amd64는 249,540,227바이트, 약 238MiB)을
+    # 공유 볼륨(emptyDir var-files)에 복사하고 끝난다(설정 관리 플러그인 사이드카가 쓰는 것이라 이 구성에서는 쓰이지 않는다).
+    # 한도 512Mi: 복사하는 동안의 페이지 캐시도 컨테이너 메모리로 세어진다. 쓰는 쪽은 디스크에 내려 쓰기 전까지 회수할 수 없고 읽는 쪽 캐시도 이 컨테이너 몫으로 세어질 수 있어서, 한도가 파일 크기보다 작으면 디스크가 느릴 때 OOM으로 죽을 수 있다.
+    # 차트 values.yaml의 예시 값 128Mi는 모자랐다: 새 EC2 인스턴스의 첫 부팅에서 cp가 cgroup OOM으로 죽고 init 컨테이너가 한 번 다시 시작했다.
+    # 다시 시작한 쪽은 차트의 명령이 cp --update=none이라 반쯤 쓰인 대상 파일이 있으면 아무것도 복사하지 않고 성공으로 끝난다(로컬에서 확인했다). 이 구성은 그 파일을 쓰지 않아 영향이 없다.
+    # 같은 cp를 로컬(Docker, cgroup v2, amd64 이미지)에서 한도만 바꿔 돌려 봤다. 디스크 볼륨으로 복사하면 128m·256m·512m 모두 성공하고 memory.peak가 128·247·319MiB다(한도에 닿으면 커널이 캐시를 회수하며 버틴다).
+    # tmpfs로 복사하면(회수할 수 없는 최악) 128m는 OOM(exit 137), 256m는 한도에 딱 닿아(256MiB) 성공하고, 512m는 여유 있게 성공한다(443MiB). 그래서 파일 크기의 두 배가 조금 넘는 512Mi로 잡았다.
+    # 이 컨테이너는 앱 컨테이너보다 먼저 돌고 몇 초 만에 끝나서 파드의 메모리 요청·한도 합(README의 ArgoCD 표)에는 들어가지 않는다.
     resources:
       requests:
         cpu: 10m
         memory: 16Mi
       limits:
-        memory: 128Mi
+        memory: 512Mi
 
 server:
   # 웹 UI와 API를 제공한다. 앱 상태는 컨트롤러가 Redis에 올려 둔 것을 읽으므로 가볍다.
