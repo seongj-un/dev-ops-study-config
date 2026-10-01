@@ -24,8 +24,9 @@ configs:
     # 로그인 쿠키에 Secure 속성을 붙이는 조건도 "insecure가 아닐 때"라서(ArgoCD 서버 코드), true여야 HTTP로 접속해도 브라우저가 로그인 쿠키를 보낸다.
     server.insecure: true
     # repo-server가 동시에 처리하는 매니페스트 생성(helm template) 요청을 1개로 제한한다. 생성마다 helm·git 프로세스가 뜨는데,
-    # Application 셋(root, dev, prod)이 같은 시각에 새로고침되면 프로세스가 한꺼번에 떠서 repo-server 메모리가 순간적으로 튀고 아래 한도(256Mi)에 걸릴 수 있다.
-    # 한 번에 하나씩 처리하면 순간 최대치가 낮아져 OOMKilled를 피하는 데 도움이 된다(ArgoCD 고가용성 문서의 --parallelismlimit). 차트가 작아서 대기가 길지는 않다.
+    # 여러 Application(root, dev, prod, 모니터링)이 같은 시각에 새로고침되면 프로세스가 한꺼번에 떠서 repo-server 메모리가 순간적으로 튀고 아래 한도에 걸릴 수 있다.
+    # 한 번에 하나씩 처리하면 순간 최대치가 낮아져 OOMKilled를 피하는 데 도움이 된다(ArgoCD 고가용성 문서의 --parallelismlimit).
+    # 한 번은 길어야 몇 초라(kube-prometheus-stack도 로컬에서 처음 받는 helm pull이 2~3초, helm template이 1초 미만) 줄을 서도 대기가 길지 않다.
     reposerver.parallelism.limit: 1
   cm:
     # ArgoCD의 외부 접속 주소(argocd-cm의 url). 차트는 global.domain으로 https://argocd.localhost를 채워 주지만, 여기에는 HTTPS가 없고 8090 포트로 접속하므로 실제 주소로 덮어쓴다.
@@ -36,7 +37,7 @@ configs:
     # 이 값은 repo-server에도 전달되어 "main이 가리키는 커밋" 조회 결과를 캐시하는 시간으로 쓰인다(argocd-cm 문서). 새 커밋은 그 캐시가 만료된 뒤에야 보이므로,
     # 컨트롤러의 확인 시점과 캐시 만료 시점이 어긋나면 푸시에서 반영까지 1분을 넘겨 2분 가까이 걸릴 수 있다. 바로 반영하려면 Application을 새로고침한다(README).
     timeout.reconciliation: 60s
-    # 지터는 끈다. 지터는 저장소와 Application이 많을 때 확인이 한꺼번에 몰리지 않게 흩어 놓는 장치인데, 여기서는 저장소 1개에 Application 3개(root, dev, prod)뿐이다.
+    # 지터는 끈다. 지터는 저장소와 Application이 많을 때 확인이 한꺼번에 몰리지 않게 흩어 놓는 장치인데, 여기서는 Git 저장소 1개에 Application이 몇 개뿐이다(root, dev, prod, 모니터링).
     # 지터를 그대로 두면 확인 주기가 60~120초로 늘어난다(ArgoCD 문서: 지터는 timeout에 더해지는 최대 지연이다).
     timeout.reconciliation.jitter: 0s
 
@@ -52,7 +53,7 @@ notifications:
   enabled: false
 
 applicationSet:
-  # ApplicationSet 컨트롤러는 템플릿 하나로 Application 여러 개를 찍어 내는 ApplicationSet 리소스를 처리한다. 이 저장소는 Application 둘을 argocd/apps에 직접 적으므로 쓸 일이 없다.
+  # ApplicationSet 컨트롤러는 템플릿 하나로 Application 여러 개를 찍어 내는 ApplicationSet 리소스를 처리한다. 이 저장소는 Application을 argocd/apps에 하나씩 직접 적으므로 쓸 일이 없다.
   # 다만 이 차트에는 ApplicationSet 컨트롤러를 끄는 스위치가 없고 Deployment를 항상 만든다(6.9.0부터, 차트 README의 변경 이력).
   # 그래서 Deployment를 없애는 대신 replicas를 0으로 두어 파드가 뜨지 않게 한다: 메모리를 쓰는 것이 없고, Application·app-of-apps 동작에는 영향이 없다.
   replicas: 0
@@ -61,27 +62,36 @@ applicationSet:
 # CPU 한도는 두지 않고 요청만 둔다(메모리 한도는 둔다). 이유는 앱 차트(charts/shortener/values.yaml)의 resources 주석과 같다:
 # CPU 한도는 CFS 쿼터로 강제되어 평균 사용량이 낮아도 순간적으로 몰리면 스로틀링되는데, ArgoCD 컴포넌트(Go)도 동기화·GC 때 여러 스레드가 순간적으로 CPU를 쓴다.
 # 메모리는 압축할 수 없는 자원이라 한도를 둔다. 한도를 넘긴 컨테이너만 OOMKilled(exit 137)로 죽고 재시작된다.
-# 값은 클러스터에 올려 측정한 것이 아니라, Application 3개에 작은 저장소라는 작은 규모를 가정한 추정이다. 배포한 뒤 kubectl top pods -n argocd로 확인하고 조정한다.
+# 값은 클러스터에 올려 측정한 것이 아니라, Application 몇 개에 작은 저장소라는 작은 규모를 가정한 추정이다. 배포한 뒤 kubectl top pods -n argocd로 확인하고 조정한다.
+# (application-controller·repo-server의 메모리 한도는 4단계에서 kube-prometheus-stack을 더하며 올렸다. 근거는 각 컴포넌트의 주석에 있다.)
 # 요청을 평소 사용량 가까이 잡은 이유: 노드의 메모리가 부족해지면 kubelet은 요청을 넘게 쓰는 파드부터 내쫓는다. 요청이 너무 작으면 ArgoCD가 앱보다 먼저 축출될 수 있다.
 
 controller:
   # 감시하는 클러스터의 리소스를 메모리에 캐시하고, Git의 매니페스트와 비교해 동기화하는 ArgoCD의 중심 컴포넌트다. 메모리는 그 클러스터의 리소스 수에 따라 늘어난다.
-  # 이 클러스터는 작아서 캐시가 작다. 파드는 StatefulSet 1개(replicas 1)다.
+  # 파드는 StatefulSet 1개(replicas 1)다.
+  # 한도 512Mi = 앱만 있을 때 잡은 256Mi + kube-prometheus-stack 몫 256Mi(4단계에서 올렸다. 추정). 컨트롤러는 Application이 관리하는 리소스와 클러스터의
+  # 모든 CRD를 매니페스트째 캐시에 들고 있고, 비교할 때는 Git 쪽 매니페스트도 함께 메모리에 올린다. 이 차트 하나가 객체 106개, JSON으로 약 3.0MiB를 더하는데
+  # 그중 2.4MiB가 CRD 10개다(가장 큰 prometheuses CRD가 약 486KiB). Go 객체(map)로 풀면 JSON 텍스트보다 몇 배 커지고 비교 중에는 사본이 더 생긴다.
   resources:
     requests:
       cpu: 50m
       memory: 128Mi
     limits:
-      memory: 256Mi
+      memory: 512Mi
 
 repoServer:
   # Git 저장소를 복제해 두고 helm template으로 매니페스트를 만들어 컨트롤러에 돌려준다. git·helm 프로세스를 띄울 때 메모리가 잠깐 튄다(위 reposerver.parallelism.limit).
+  # 한도 512Mi = 작은 차트(shortener)만 렌더링할 때 잡은 256Mi + kube-prometheus-stack 몫 256Mi(4단계에서 올렸다). repo-server는 차트 저장소의 차트를
+  # helm pull로 받아 두고 helm template으로 렌더링하는데, 둘 다 이 컨테이너 안의 자식 프로세스라 그 메모리가 이 한도에 함께 세어진다.
+  # 이 차트로 ArgoCD와 같은 명령을 돌려 잰 helm 프로세스의 최대 RSS(로컬 맥, Helm 4.3.0, /usr/bin/time -l로 각 5번):
+  #   helm pull --repo(차트 저장소의 index.yaml 약 6.3MB를 읽는다) 173~193MiB, helm template --include-crds(이 저장소의 값) 116~134MiB.
+  # 256Mi에서는 helm pull 하나만으로 repo-server 자신에게 60Mi 남짓만 남고, helm template 뒤에는 repo-server가 그 출력(YAML 5.0MiB)을 객체로 푼다(이 몫은 재지 못했다).
   resources:
     requests:
       cpu: 25m
       memory: 96Mi
     limits:
-      memory: 256Mi
+      memory: 512Mi
   copyutil:
     # repo-server 파드가 시작할 때 도는 초기화 컨테이너다. ArgoCD 실행 파일을 공유 볼륨에 복사하고 끝난다(설정 관리 플러그인 사이드카가 쓰는 것이라 이 구성에서는 쓰이지 않는다).
     # 큰 파일을 복사하는 동안의 페이지 캐시도 컨테이너 메모리로 세어지므로 한도를 너무 작게 잡지 않는다(차트 values.yaml의 예시와 같은 128Mi).
