@@ -21,7 +21,7 @@ image:
   # strenv를 쓰는 이유: 값이 yq 식에 글자로 끼워 넣어지지 않고 환경 변수로 들어가며, 항상 문자열로 남는다(env()는 값을 YAML로 해석해 숫자처럼 생긴 값을 숫자로 읽을 수 있다).
   # 이 식이 image.tag 위치를 가리키므로 image: 아래에 tag 키를 한 줄로 유지해야 하고, 손으로는 고치지 않는다.
   # 값은 따옴표로 감싼다: 40자 16진수가 우연히 숫자(예: 1234...)나 지수 표기(예: 1234e5...)처럼 생겨도 YAML이 숫자가 아닌 문자열로 읽게 하려는 것이다.
-  tag: "95bc45ab177e666e5ce8287de051aeab985efa8c"
+  tag: "b4d2c4de5accaed34cbd4d1b12fbec037402ba97"
 # 응답의 shortUrl 앞에 붙는 공개 주소. Ingress로 들어오는 주소와 같아야 한다. DuckDNS 이름 dev-ops-study가 EC2 노드의 IP를 가리키고, DuckDNS가 그 아래의 하위 이름(dev.dev-ops-study.duckdns.org)도 같은 IP로 해석한다.
 # 그 노드의 80 포트로 들어온 요청을 k3s 기본 Traefik이 받는다. 평문 HTTP의 기본 포트(80)라서 주소에 포트 번호가 없다. HTTPS는 나중에 cert-manager로 붙인다(붙이면 이 주소도 https로 바꾼다).
 baseUrl: http://dev.dev-ops-study.duckdns.org
