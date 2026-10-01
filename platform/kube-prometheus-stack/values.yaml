@@ -219,14 +219,20 @@ kube-state-metrics:
       memory: 64Mi
     limits:
       memory: 128Mi
-# 노드의 CPU·메모리·디스크·파일시스템을 지표로 내놓는다(DaemonSet이라 노드마다 하나. 네트워크 지표는 아래 hostNetwork 참고).
+# 노드의 CPU·메모리·디스크·파일시스템·네트워크를 지표로 내놓는다(DaemonSet이라 노드마다 하나. 네트워크 지표의 일부는 아래 hostNetwork 참고).
 prometheus-node-exporter:
   # 하위 차트 기본값(true)은 파드가 노드의 네트워크 네임스페이스를 같이 쓰게 한다. 그러면 IMDSv2의 홉 제한 1(파드 네트워크에서는 토큰 응답이 한 홉 더 건너야 해서
   # 닿지 못한다)이 이 파드를 막지 못하고, 인스턴스 메타데이터에서 인스턴스 역할의 자격 증명을 얻어 SSM의 DuckDNS 토큰과 Discord 웹훅 주소를 읽을 수 있게 된다.
   # 이 클러스터는 hostNetwork 파드를 띄우지 않는다는 전제로 지켜진다(infra/aws/ec2.tf의 metadata_options). 그래서 끈다.
-  # 대가: 네트워크 지표가 노드가 아니라 이 파드의 네트워크 네임스페이스(eth0, lo)를 보여 준다. node_exporter의 netdev 수집기는 기본으로 자기 네임스페이스에서
-  # netlink로 인터페이스를 읽고(--collector.netdev.netlink 기본값 true), /proc/net 아래 파일(netstat·sockstat 수집기 등)도 읽는 프로세스의 네임스페이스를 보인다.
-  # 그래서 기본 대시보드의 노드 네트워크 패널은 이 파드의 트래픽만 보인다. 파드별 송수신은 kubelet(cAdvisor)의 container_network_* 지표로 본다.
+  # 대가는 네트워크 지표의 일부다. 수집기가 어디서 읽느냐에 따라 갈린다:
+  #   - 이 파드의 네트워크 네임스페이스(eth0, lo)를 보이게 되는 것: netdev 수집기의 송수신·오류 카운터(node_network_receive_bytes_total 등. 기본으로
+  #     자기 네임스페이스에서 netlink로 읽는다, --collector.netdev.netlink 기본값 true)와 /proc/net 아래를 읽는 수집기(netstat·sockstat).
+  #     /proc/net은 읽는 프로세스의 네임스페이스를 보인다. 그래서 기본 대시보드의 노드 트래픽 패널과 NodeNetworkReceiveErrs·TransmitErrs는 이 파드의 트래픽을 본다.
+  #     파드별 송수신은 kubelet(cAdvisor)의 container_network_* 지표로 본다.
+  #   - 그대로 노드를 보는 것: netclass 수집기(node_network_up·info·mtu_bytes·speed_bytes·carrier 등). /sys/class/net은 sysfs를 마운트한 쪽의
+  #     네트워크 네임스페이스를 따르고, --path.sysfs=/host/sys는 노드의 sysfs를 그대로 붙인 것이라 노드의 인터페이스가 나온다.
+  #     그래서 NodeNetworkInterfaceFlapping(changes(node_network_up[2m]))은 계속 노드의 인터페이스를 지켜본다.
+  #   자기 네트워크 네임스페이스에 노드의 /sys·/proc를 붙이고 --pid host로 띄운 일회용 node-exporter(v1.12.1) 컨테이너에서 이렇게 갈리는 것을 확인했다.
   # CPU·메모리·디스크·파일시스템 지표는 노드의 /proc·/sys·/를 마운트해(--path.procfs·sysfs·rootfs) 읽으므로 그대로다(hostPID도 차트 기본값 그대로 둔다).
   hostNetwork: false
   resources:

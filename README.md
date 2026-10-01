@@ -279,7 +279,7 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 
 | 경보 | 가는 곳 |
 |---|---|
-| `Watchdog`, `InfoInhibitor` (파이프라인 확인·info 억제용으로 늘 울리는 경보) | 보내지 않는다(`null`) |
+| `Watchdog`(경보 파이프라인이 살아 있음을 보이려고 늘 울리는 경보), `InfoInhibitor`(info 경보를 누르는 데만 쓰는 경보. 같은 네임스페이스에 info 경보가 있고 warning·critical 경보는 울리지 않을 때만 울린다) | 보내지 않는다(`null`) |
 | `service="shortener"` (앱의 SLO 경보) | Discord |
 | `severity="critical"` (그 밖의 critical 경보) | Discord |
 | 나머지(warning·info) | 보내지 않는다. Alertmanager UI에서 본다 |
@@ -299,7 +299,10 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 - **ServiceMonitor·PrometheusRule을 레이블 없이 모든 네임스페이스에서 고른다**(`*SelectorNilUsesHelmValues: false`): 앱 차트가 만드는 것에 이 릴리스의 `release` 레이블을 붙이지 않아도 된다.
 - **보존 3일·4GB**(PVC 5Gi, local-path): 인스턴스를 공부하는 동안만 띄우고 없애서 30일 오류 예산을 셀 만큼 쌓이지 않는다. 그래서 SLO는 소진 속도(burn rate)와 1h·6h·1d 가용성으로 본다.
 - **node-exporter도 hostNetwork 없이**: 노드의 네트워크를 같이 쓰는 파드는 IMDSv2의 홉 제한 1에 걸리지 않아 인스턴스 역할(SSM의 DuckDNS 토큰·Discord 웹훅 주소를 읽는다)을 얻을 수 있다.
-  이 클러스터는 hostNetwork 파드를 띄우지 않는다(`infra/aws/README.md`). 대가로 node-exporter의 네트워크 지표는 노드가 아니라 그 파드의 네트워크를 보인다(CPU·메모리·디스크는 그대로).
+  이 클러스터는 hostNetwork 파드를 띄우지 않는다(`infra/aws/README.md`). 대가는 네트워크 지표의 일부다: 송수신·오류 카운터(netdev 수집기, netlink)와 `/proc/net`을 읽는
+  수집기(netstat·sockstat)는 노드가 아니라 그 파드의 네트워크(eth0, lo)를 보인다. 그래서 노드 트래픽 패널과 `NodeNetworkReceiveErrs`·`TransmitErrs`는 그 파드의 트래픽을 본다.
+  인터페이스 상태(netclass 수집기: `node_network_up`·`_info`·`_mtu_bytes`·`_speed_bytes`·`_carrier` 등)는 노드의 sysfs(`/host/sys`)를 읽으므로 그대로 노드의 인터페이스이고,
+  `NodeNetworkInterfaceFlapping`도 노드를 본다. CPU·메모리·디스크·파일시스템도 그대로다.
 - 자세한 이유는 `platform/kube-prometheus-stack/values.yaml`과 `argocd/apps/kube-prometheus-stack.yaml`의 주석에 있다.
 
 ## 메모리 메모
@@ -421,7 +424,7 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | `azure/setup-helm` | v5.0.1 (커밋 SHA로 고정) | `validate.yml` |
 | kubeconform | v0.8.0 (태그@다이제스트) | `validate.yml`의 `KUBECONFORM_IMAGE` |
 | 쿠버네티스 내장 리소스 스키마 | yannh/kubernetes-json-schema 커밋 `8df8a88`(2026-09-29의 최신 커밋) | `validate.yml`의 `K8S_SCHEMA_LOCATION` |
-| CRD 스키마 (Argo CD, monitoring.coreos.com) | datreeio/CRDs-catalog 커밋 `d373c2d`(2026-09-29. Argo CD 3.5.0 CRD 기준이고 Prometheus Operator의 스키마도 들어 있다) | `validate.yml`의 `CRD_SCHEMA_LOCATION` |
+| CRD 스키마 (Argo CD, monitoring.coreos.com) | datreeio/CRDs-catalog 커밋 `d373c2d`(2026-09-29. Argo CD 3.5.0 CRD 기준. monitoring.coreos.com 스키마는 클러스터의 Prometheus Operator v0.94.1보다 오래됐다: `validate.yml`의 주석) | `validate.yml`의 `CRD_SCHEMA_LOCATION` |
 | Prometheus (promtool) | v3.15.0 (태그@다이제스트. kube-prometheus-stack 91.8.2가 띄우는 Prometheus와 같은 버전) | `validate.yml` "SLO 규칙 검사" 단계의 `PROMETHEUS_IMAGE` |
 | 검증 기준 쿠버네티스 | 1.35.0 (클러스터는 k3s v1.35.8) | `validate.yml`의 `KUBERNETES_VERSION`, `clusters/local/k3d.yaml` |
 | kube-prometheus-stack 차트 | 91.8.2 (Prometheus Operator v0.94.1. 이미지 태그도 이 차트 버전이 정한다) | `argocd/apps/kube-prometheus-stack.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
