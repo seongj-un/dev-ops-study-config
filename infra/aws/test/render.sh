@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # cloud-init.yaml.tftpl을 ec2.tf와 같은 방식(templatefile, 같은 변수 이름)으로 렌더링하고 검사한다. AWS에 접속하지 않고 아무것도 만들지 않는다.
 #   사용: infra/aws/test/render.sh [출력 디렉터리]   (기본은 임시 디렉터리)
-#   결과: <출력>/rendered.yaml(user data 원문), <출력>/files/<경로>(write_files를 풀어 놓은 것)
-#   NO_DOCKER=1이면 도커가 필요한 검사(shellcheck, cloud-init schema, systemd-analyze verify, DuckDNS 모의 실행)를 건너뛴다.
+#   결과: <출력>/rendered.yaml(user data 원문), <출력>/user-data.b64(ec2.tf가 넘기는 base64gzip 그대로),
+#         <출력>/user-data.gz(그 base64를 푼 gzip 바이트), <출력>/files/<경로>(write_files를 풀어 놓은 것)
+#   NO_DOCKER=1이면 도커가 필요한 검사(shellcheck, cloud-init schema·gzip 풀기, systemd-analyze verify, AWS CLI 키 지문,
+#   DuckDNS 모의 실행)를 건너뛴다. 크기·압축 왕복·내용 검사는 도커 없이도 한다.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -36,6 +38,10 @@ locals {
 output "rendered" {
   value = templatefile(local.tpl, local.vars)
 }
+# ec2.tf의 user_data_base64와 같은 식이다. Terraform이 EC2에 실제로 보내는 값이 이것이다.
+output "user_data_base64" {
+  value = base64gzip(templatefile(local.tpl, local.vars))
+}
 # 저장소 주소 끝에 .git이 붙어도 raw 주소는 같아야 한다.
 output "rendered_git_suffix" {
   value = templatefile(local.tpl, merge(local.vars, { config_repo_url = "https://github.com/seongj-un/dev-ops-study-config.git" }))
@@ -46,6 +52,7 @@ echo "== Terraform으로 렌더링 ($(terraform version | head -n1))"
 terraform -chdir="$tf" init -input=false -no-color >/dev/null
 terraform -chdir="$tf" apply -auto-approve -input=false -no-color >/dev/null
 terraform -chdir="$tf" output -raw rendered >"$out/rendered.yaml"
+terraform -chdir="$tf" output -raw user_data_base64 >"$out/user-data.b64"
 terraform -chdir="$tf" output -raw rendered_git_suffix >"$tf/git-suffix.yaml"
 cmp -s "$out/rendered.yaml" "$tf/git-suffix.yaml" || fail "config_repo_url 끝의 .git이 결과를 바꿨다"
 
@@ -61,10 +68,15 @@ for bad in 'duckdns_subdomain = "my.short"' 'duckdns_subdomain = "x;reboot"' 'aw
 done
 echo "잘못된 값 7개가 모두 렌더링에서 거부됐다"
 
-# EC2 user data는 base64로 바꾸기 전 원문이 16384바이트까지다.
-size=$(wc -c <"$out/rendered.yaml" | tr -d ' ')
-[ "$size" -le 16384 ] || fail "user data가 16384바이트를 넘는다: $size"
-echo "크기: $size / 16384 바이트 (gzip -9이면 $(gzip -9c "$out/rendered.yaml" | wc -c | tr -d ' ') 바이트)"
+# EC2 user data 한도는 base64로 바꾸기 전 바이트로 16384다. ec2.tf는 base64gzip을 넘기므로 그 바이트는 gzip 압축본이다:
+# Terraform이 만든 base64를 풀어 크기를 재고, 압축을 풀면 원문과 바이트까지 같은지 본다(cloud-init은 풀어서 원문을 읽는다).
+# 압축 전 원문의 크기는 한도와 상관없어서 참고로만 보여 준다.
+base64 --decode <"$out/user-data.b64" >"$out/user-data.gz"
+gz=$(wc -c <"$out/user-data.gz" | tr -d ' ')
+[ "$gz" -le 16384 ] || fail "압축한 user data가 16384바이트를 넘는다: $gz"
+gzip -dc <"$out/user-data.gz" | cmp -s - "$out/rendered.yaml" || fail "base64gzip을 풀어도 렌더링 원문과 같지 않다"
+echo "크기: 압축본 $gz / 16384 바이트(EC2 한도), base64 $(wc -c <"$out/user-data.b64" | tr -d ' ') 바이트, 압축을 풀면 원문과 같다"
+echo "참고: 압축 전 원문 $(wc -c <"$out/rendered.yaml" | tr -d ' ') 바이트(한도와 무관)"
 
 echo "== YAML·내용 검사"
 if python3 -c 'import yaml' 2>/dev/null; then
@@ -84,8 +96,8 @@ assert rf.keys() == tf.keys()
 templated = {"/etc/devops/bootstrap.env", "/etc/devops/argocd-values.yaml"}
 for p in rf:
     if p not in templated:
-        assert rf[p]["content"] == tf[p]["content"], p + ": Terraform이 내용을 바꿨다(스크립트·유닛에 Terraform 보간이 들어갔다)"
-print("스크립트·유닛", len(rf) - len(templated), "개는 렌더링 전후가 같다")
+        assert rf[p]["content"] == tf[p]["content"], p + ": Terraform이 내용을 바꿨다(스크립트·유닛·키에 Terraform 보간이 들어갔다)"
+print("스크립트·유닛·키", len(rf) - len(templated), "개는 렌더링 전후가 같다")
 
 orig = yaml.safe_load(open(values_path, encoding="utf-8"))
 emb = yaml.safe_load(rf["/etc/devops/argocd-values.yaml"]["content"])
@@ -117,9 +129,11 @@ fi
 
 echo "== shellcheck (koalaman/shellcheck:stable)"
 # bootstrap.env를 제자리에 두고 -x로 따라 읽게 해서, 거기서 오는 변수를 '정의되지 않음'으로 보지 않게 한다.
+# -f gcc: 경고를 "파일:줄:열: 내용 [SC번호]" 한 줄로 낸다. 기본 형식은 원본 줄을 함께 찍는데, 이 이미지에는 UTF-8 로캘이 없어서
+# 한글이 든 줄을 찍다가 출력이 깨진다(commitBuffer: invalid argument).
 docker run --rm -v "$out/files:/w:ro" -v "$here:/t:ro" \
   -v "$out/files/etc/devops/bootstrap.env:/etc/devops/bootstrap.env:ro" \
-  koalaman/shellcheck:stable -x \
+  koalaman/shellcheck:stable -x -f gcc \
   /w/usr/local/bin/duckdns-update /w/usr/local/sbin/devops-bootstrap /t/render.sh /t/container-checks.sh
 echo "shellcheck: 경고 없음"
 

@@ -3,7 +3,8 @@
 # write_files·runcmd는 인스턴스의 첫 부팅에만 돈다. 그래서 설치는 부팅마다 도는 devops-bootstrap.service가 하고, 이미 된 단계는 건너뛴다.
 # Terraform 템플릿에서 "$${"와 "%%{"는 보간·지시문의 시작이다(이 원본에서는 겹쳐 써서 글자 그대로 내보낸다). 그래서 Terraform 값은
 # bootstrap.env와 argocd-values.yaml에만 넣고, 스크립트·유닛에는 이 조합을 쓰지 않는다(셸 변수는 $VAR 모양만). Terraform이 스크립트를 바꾸지 않는다.
-# EC2 user data는 원문이 16KB(16384바이트)까지라 주석을 짧게 둔다. test/render.sh가 크기와 "스크립트가 렌더링 전후로 같은지"를 검사한다.
+# EC2 user data 한도(16384바이트)는 ec2.tf가 base64gzip으로 압축해 넘기는 gzip 바이트에 걸린다. 압축 전 원문은 16KB를 넘어도 된다.
+# test/render.sh가 Terraform과 같은 압축본을 만들어 그 크기와 압축을 푼 결과를 보고, 스크립트가 렌더링 전후로 같은지도 검사한다.
 write_files:
 # Terraform이 넘긴 값(스크립트가 source 한다). 비밀은 없다: DuckDNS 토큰은 SSM 파라미터 이름만 적고 값은 부팅 때 읽는다.
 # regex()는 값 전체가 패턴에 맞으면 그 값을, 아니면 plan에서 오류를 낸다: root가 source 하는 파일에 셸 문법이 끼어들지 못한다.
@@ -18,12 +19,48 @@ write_files:
     HELM_VERSION=${regex("^v[0-9]+[.][0-9]+[.][0-9]+$", helm_version)}
     ARGOCD_CHART_VERSION=${regex("^[0-9]+[.][0-9]+[.][0-9]+$", argocd_chart_version)}
     ROOT_APP_URL=https://raw.githubusercontent.com/${regex("^https://github[.]com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:[.]git)?$", config_repo_url)[0]}/${regex("^[A-Za-z0-9_./-]+$", config_repo_ref)}/argocd/root.yaml
-# ArgoCD 값: bootstrap/argocd/values.yaml에서 주석 줄과 빈 줄만 뺀다(원문 그대로면 16KB를 넘는다). render.sh가 두 YAML의 값이 같은지 비교한다.
+# ArgoCD 값: bootstrap/argocd/values.yaml에서 주석 줄과 빈 줄만 뺀다(9.7KB → 약 1KB). render.sh가 두 YAML의 값이 같은지 비교한다.
 # 주석·빈 줄만 고친 커밋은 렌더링 결과를 바꾸지 않아서 인스턴스를 다시 만들지도 않는다(user_data_replace_on_change).
 - path: /etc/devops/argocd-values.yaml
   permissions: "0644"
   content: |
     ${indent(4, join("\n", [for l in split("\n", argocd_values) : l if trimspace(l) != "" && !startswith(trimspace(l), "#")]))}
+# AWS CLI 팀의 PGP 공개 키. 2단계가 AWS CLI zip의 서명을 이 키로 검사한다. AWS CLI 설치 문서
+# (https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)의 블록 그대로다(2026-10-01 확인).
+# 지문 FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C(render.sh가 확인한다), 만료 2027-07-01. AWS가 키를 바꾸면 검사가 실패해
+# 2단계에서 멈추므로 문서의 새 블록으로 바꾼다. 만료일이 다가올 때도 문서에서 만료일을 늘린 블록을 받아 바꾼다.
+- path: /etc/devops/aws-cli.asc
+  permissions: "0644"
+  content: |
+    -----BEGIN PGP PUBLIC KEY BLOCK-----
+
+    mQINBF2Cr7UBEADJZHcgusOJl7ENSyumXh85z0TRV0xJorM2B/JL0kHOyigQluUG
+    ZMLhENaG0bYatdrKP+3H91lvK050pXwnO/R7fB/FSTouki4ciIx5OuLlnJZIxSzx
+    PqGl0mkxImLNbGWoi6Lto0LYxqHN2iQtzlwTVmq9733zd3XfcXrZ3+LblHAgEt5G
+    TfNxEKJ8soPLyWmwDH6HWCnjZ/aIQRBTIQ05uVeEoYxSh6wOai7ss/KveoSNBbYz
+    gbdzoqI2Y8cgH2nbfgp3DSasaLZEdCSsIsK1u05CinE7k2qZ7KgKAUIcT/cR/grk
+    C6VwsnDU0OUCideXcQ8WeHutqvgZH1JgKDbznoIzeQHJD238GEu+eKhRHcz8/jeG
+    94zkcgJOz3KbZGYMiTh277Fvj9zzvZsbMBCedV1BTg3TqgvdX4bdkhf5cH+7NtWO
+    lrFj6UwAsGukBTAOxC0l/dnSmZhJ7Z1KmEWilro/gOrjtOxqRQutlIqG22TaqoPG
+    fYVN+en3Zwbt97kcgZDwqbuykNt64oZWc4XKCa3mprEGC3IbJTBFqglXmZ7l9ywG
+    EEUJYOlb2XrSuPWml39beWdKM8kzr1OjnlOm6+lpTRCBfo0wa9F8YZRhHPAkwKkX
+    XDeOGpWRj4ohOx0d2GWkyV5xyN14p2tQOCdOODmz80yUTgRpPVQUtOEhXQARAQAB
+    tCFBV1MgQ0xJIFRlYW0gPGF3cy1jbGlAYW1hem9uLmNvbT6JAlQEEwEIAD4CGwMF
+    CwkIBwIGFQoJCAsCBBYCAwECHgECF4AWIQT7Xbd/1cEYuAURraimMQrMRnJHXAUC
+    akV0ygUJDqP4lQAKCRCmMQrMRnJHXFHjD/9eyZLYcKuQOlLvtqSDtUBiEZf6ZZjM
+    i3ygYH8rJNtuToUH+HvSpe819urJCquXhDrlK6N+aqW0hCLtNABJG/vsafIgvIYJ
+    hSGgpgtNnQyMV1jViRWqPjbouw8OkYKBThUfT1i2Y+wn58ifs6ODBCmTexWtXspA
+    Si+Gt49xDOW0APmbOPnI+a4HJW6tVEo6MWS0WjzpiBayR3d1A4pt4YrPfSdDgpLo
+    h2SLQqlRqvvVZJaWBjhkErNFpfsBA06sDcPEOb0G8LBUbR4WOcdvhe5LubJbZuxC
+    AG9kNPCVeQP1ixwjgjXKysaxeQ6rv0VzIQgRp6tLVLWhy6AKDNvLjFSsmXZ1Wl08
+    Y/RlOHXlzLuQMRE6sR1wOdRxc9TsrNWTGiBK65cvSWOy03JeBkQQ8pesqltiyxI9
+    U21kkgiXtTSKNGfKK8pO27D81YANhRqPK7iTp6kuFiY2WtOg90KTMNlIT+Ff85Y2
+    b1rHj6Z0SrCkJujhWk3IBPic/wJgz01LEc/OAdUPlby90RJZcIBhSlWhT7mXnXIO
+    c0HWlNQrns2s3CTyYwZSiSlYe9ApeLwhjDo8NhbFuCAy61l6O5UsR4AfZxx/rGKv
+    2wFb1/RN/P4gNe6vmxZAPjR0AQcwD3tc2McimOLr/22kmPz8IH3I0X7WoSFr0Biz
+    E91G7bb0hOb/cA==
+    =knv7
+    -----END PGP PUBLIC KEY BLOCK-----
 - path: /usr/local/bin/duckdns-update
   permissions: "0755"
   content: |
@@ -59,6 +96,7 @@ write_files:
     exec 9>/run/devops-bootstrap.lock
     flock -n 9 || { echo "이미 실행 중이다" >&2; exit 1; }
     LOG=/var/log/devops-bootstrap.log
+    DONE=/var/lib/devops-bootstrap.done
     echo "로그: $LOG"
     exec >>"$LOG" 2>&1
     . /etc/devops/bootstrap.env
@@ -69,38 +107,57 @@ write_files:
     trap 'rm -rf "$WORK"' EXIT
     log() { echo "$(date -u +%FT%TZ) $*"; }
     fail() { log "실패: $*"; exit 1; }
-    # retry <설명> <제한 초> <명령...>: 성공할 때까지 5초마다 다시 한다. 제한을 넘기면 한 번 더 돌려 오류를 로그에 남기고 실패한다.
+    # 단계마다 "STEP: 이름"을 남겨 로그 끝만 봐도 어디까지 왔는지 보이게 한다. set -e로 멈출 때는 ERR 트랩이 그 단계와
+    # 이 파일의 줄 번호·종료 코드·명령을 남긴다. fail로 끝낼 때는 fail이 이유를 남긴다(exit는 ERR 트랩을 부르지 않는다).
+    STEP=준비
+    step() { STEP=$1; log "STEP: $STEP"; }
+    trap 'log "실패: STEP $STEP, $LINENO번 줄, 종료 코드 $?: $BASH_COMMAND"' ERR
+    # retry <설명> <제한 초> <명령...>: 성공할 때까지 5초 간격으로 다시 한다. 제한은 첫 시도부터 잰 실제 경과 시간(date +%s)이라
+    # 시도 한 번이 오래 걸려도 늘어나지 않는다. 제한이 지난 뒤 실패하면 마지막 시도의 출력을 로그에 남기고 실패한다.
+    # 가장 오래 걸리는 경우는 제한 + 5초 + 시도 한 번이다(제한 직전에 시작한 시도는 끝날 때까지 기다린다).
     retry() {
-      local what=$1 limit=$2 t=0
+      local what=$1 limit=$2 end
       shift 2
-      until "$@" >/dev/null 2>&1; do
-        [ "$t" -lt "$limit" ] || { "$@" || true; fail "$what: $limit초 안에 성공하지 못했다"; }
+      end=$(($(date +%s) + limit))
+      until "$@" >"$WORK/retry.out" 2>&1; do
+        [ "$(date +%s)" -lt "$end" ] || { cat "$WORK/retry.out"; fail "$what: $limit초 안에 성공하지 못했다"; }
         sleep 5
-        t=$((t + 5))
       done
       log "확인: $what"
     }
     [ "$(uname -m)" = x86_64 ] || fail "x86_64 전용이다(AWS CLI zip·Helm tarball이 amd64용)"
-    log "시작 (이전 완료: $(cat /var/lib/devops-bootstrap.done 2>/dev/null || echo 없음))"
+    log "시작 (이전 완료: $(cat "$DONE" 2>/dev/null || echo 없음))"
+    # 완료 표시는 이번 실행이 끝까지 가야 다시 생긴다. 지우지 않으면 이번 부팅에서 실패해도 지난 완료 표시가 남아 성공처럼 보인다.
+    rm -f "$DONE"
 
     # 1. unzip(AWS CLI zip용). 첫 부팅에는 apt-daily·unattended-upgrades가 apt 잠금을 쥐고 있을 수 있어서 잠금을 기다리고 다시 한다.
+    step "1/8 unzip"
     if ! command -v unzip >/dev/null; then
-      retry "apt-get update" 600 apt-get -o DPkg::Lock::Timeout=60 update
-      apt-get -o DPkg::Lock::Timeout=600 install -y -q unzip
+      retry "apt-get update" 180 apt-get -o DPkg::Lock::Timeout=60 update
+      apt-get -o DPkg::Lock::Timeout=180 install -y -q unzip
     fi
 
     # 2. AWS CLI v2(SSM에서 DuckDNS 토큰을 읽는다): AWS가 배포하는 zip의 설치 스크립트가 /usr/local/aws-cli에 풀고 /usr/local/bin/aws를 만든다.
+    # 버전을 고정하지 않은 최신 zip이라, 같은 주소에 .sig를 붙인 PGP 서명을 AWS CLI 팀 키(/etc/devops/aws-cli.asc)로 검사하고 틀리면 풀기 전에 멈춘다.
+    # gpgv는 apt가 저장소 서명 검사에 쓰는 도구라 늘 있다. 키는 ASCII armor라서 머리줄(-----)·빈 줄·체크섬 줄(=)을 빼고 base64를 풀어 키링으로 만든다.
+    step "2/8 AWS CLI"
     if ! aws --version >/dev/null 2>&1; then
       log "AWS CLI v2 설치"
-      curl -fsSL --retry 5 -o "$WORK/awscliv2.zip" https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+      u=https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+      curl -fsSL --retry 5 -o "$WORK/awscliv2.zip" "$u"
+      curl -fsSL --retry 5 -o "$WORK/awscliv2.zip.sig" "$u.sig"
+      grep -v -e '^-----' -e '^=' -e '^$' /etc/devops/aws-cli.asc | base64 -d >"$WORK/aws-cli.gpg"
+      gpgv --keyring "$WORK/aws-cli.gpg" "$WORK/awscliv2.zip.sig" "$WORK/awscliv2.zip"
       unzip -q "$WORK/awscliv2.zip" -d "$WORK"
       "$WORK/aws/install" --update
     fi
     log "$(aws --version)"
 
     # 3. DuckDNS를 k3s보다 먼저 맞춰 새 공인 IP가 DNS에 일찍 반영되게 한다. 실패해도 계속한다: 클러스터 설치는 DNS와 무관하고
-    # 타이머가 5분마다 다시 한다(journalctl -u duckdns-update). 타이머는 AWS CLI가 생긴 뒤에 켜야 첫 실행이 헛돌지 않는다.
-    /usr/local/bin/duckdns-update || log "경고: DuckDNS 갱신 실패. 타이머가 다시 한다"
+    # 타이머가 5분마다 다시 한다(journalctl -u duckdns-update). timeout 120: SSM·DuckDNS가 응답하지 않아도 여기서 2분 넘게 붙잡히지 않는다.
+    # 타이머는 AWS CLI가 생긴 뒤에 켜야 첫 실행이 헛돌지 않는다.
+    step "3/8 DuckDNS"
+    timeout 120 /usr/local/bin/duckdns-update || log "경고: DuckDNS 갱신 실패. 타이머가 다시 한다"
     systemctl enable --now duckdns-update.timer
 
     # 4. k3s: 설치 스크립트를 파일로 받아 실행한다(sh로 바로 파이프하면 받다 끊긴 스크립트가 반쯤 실행될 수 있다). 스크립트는 고정한
@@ -108,6 +165,7 @@ write_files:
     # --tls-san: API 서버 인증서에 DuckDNS 이름을 넣어 맥에서 https://<sub>.duckdns.org:6443 으로 붙게 한다. 공인 IP는 넣지 않는다:
     # 멈췄다 켤 때마다 바뀌어 인증서의 IP가 곧 틀려지지만, 이름은 DuckDNS가 새 IP로 옮겨 주므로 계속 맞는다.
     # --write-kubeconfig-mode 0600: 관리자 자격 증명(/etc/rancher/k3s/k3s.yaml)을 root만 읽는다. Traefik·metrics-server·local-path는 켜 둔다(로컬과 같다).
+    step "4/8 k3s"
     if [ "$(k3s --version 2>/dev/null | awk 'NR==1 {print $3}')" != "$K3S_VERSION" ]; then
       log "k3s $K3S_VERSION 설치"
       curl -fsSL --retry 5 -o "$WORK/k3s-install.sh" https://get.k3s.io
@@ -117,6 +175,7 @@ write_files:
 
     # 5. Helm: 고정한 버전의 공식 tarball을 get.helm.sh의 .sha256sum으로 검사한다. 같은 곳에서 받은 체크섬이라
     # 전송 중 깨지거나 잘린 파일은 잡지만, 배포 서버의 파일이 통째로 바뀐 경우까지 막지는 못한다.
+    step "5/8 Helm"
     if [ "$(helm version --template '{{.Version}}' 2>/dev/null)" != "$HELM_VERSION" ]; then
       log "Helm $HELM_VERSION 설치"
       f=helm-$HELM_VERSION-linux-amd64.tar.gz
@@ -135,6 +194,7 @@ write_files:
     # k3s API(6443)의 TLS뿐이다(4단계 --tls-san으로 붙고, 6443은 보안 그룹이 관리자 IP에만 연다).
     # configs.cm.url(ArgoCD의 외부 주소): 값 파일의 로컬 Ingress 주소 대신 위 port-forward 주소로 맞춘다.
     # deployed이면 건너뛴다: 값이 바뀌면 user data가 바뀌어 인스턴스를 새로 만들므로 같은 인스턴스에서는 값이 그대로다.
+    step "6/8 ArgoCD"
     if helm list -n argocd --deployed -q 2>/dev/null | grep -x argocd >/dev/null; then
       log "건너뜀: ArgoCD 설치됨"
     else
@@ -147,8 +207,11 @@ write_files:
     fi
 
     # 7. DB 비밀번호 Secret: 없을 때만 만든다. 있는 것을 새 값으로 바꾸면 PostgreSQL 데이터(PVC)에 이미 들어간 비밀번호와 어긋난다.
-    # 비밀번호는 파이프로만 흐른다: 명령줄 인자(ps)·로그·디스크에 남지 않는다. tr은 openssl이 끝에 붙이는 줄바꿈을 뺀다.
+    # 비밀번호는 파이프로만 흐른다: 명령줄 인자(ps)·로그·임시 파일에 쓰지 않는다. tr은 openssl이 끝에 붙이는 줄바꿈을 뺀다.
+    # 저장은 된다: Secret은 k3s 데이터 저장소(/var/lib/rancher/k3s/server/db, 암호화된 EBS 볼륨)에 들어간다. k3s는 기본으로 Secret을
+    # 따로 암호화하지 않으므로(base64일 뿐이다) 이 값을 지키는 것은 EBS 암호화다.
     # 네임스페이스를 미리 만드는 것은 ArgoCD가 앱을 띄우기 전에 Secret을 넣어 두려는 것이다(CreateNamespace=true는 있는 것을 건드리지 않는다).
+    step "7/8 DB Secret"
     for ns in shortener-dev shortener-prod; do
       kubectl get namespace "$ns" >/dev/null 2>&1 || kubectl create namespace "$ns"
       if kubectl -n "$ns" get secret shortener-db >/dev/null 2>&1; then
@@ -160,14 +223,15 @@ write_files:
 
     # 8. 루트 Application: ArgoCD가 이것을 읽어 argocd/apps의 dev·prod Application을 만들고, 그 뒤 배포는 모두 ArgoCD가 한다.
     # CRD가 Established가 되기 전에 적용하면 "no matches for kind Application"으로 실패해서 먼저 기다린다.
-    retry "Application CRD" 300 kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=5s
+    step "8/8 루트 Application"
+    retry "Application CRD" 60 kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=5s
     if kubectl -n argocd get application root >/dev/null 2>&1; then
       log "건너뜀: 루트 Application 있음"
     else
-      retry "루트 Application 적용 ($ROOT_APP_URL)" 300 kubectl apply -f "$ROOT_APP_URL"
+      retry "루트 Application 적용 ($ROOT_APP_URL)" 120 kubectl apply -f "$ROOT_APP_URL"
     fi
 
-    date -u +%FT%TZ >/var/lib/devops-bootstrap.done
+    date -u +%FT%TZ >"$DONE"
     log "완료($(( $(date +%s) - START ))초). prod http://$DUCKDNS_SUBDOMAIN.duckdns.org, dev http://dev.$DUCKDNS_SUBDOMAIN.duckdns.org. ArgoCD UI는 port-forward로 본다(6단계 주석). 앱은 ArgoCD가 이어서 배포한다(kubectl -n argocd get applications)"
 # DuckDNS 갱신: 서비스는 한 번 돌고 끝나는 oneshot이고, 타이머가 부팅 30초 뒤와 마지막 실행 5분 뒤마다 서비스를 다시 시작한다.
 - path: /etc/systemd/system/duckdns-update.service
@@ -188,8 +252,13 @@ write_files:
     OnUnitActiveSec=5min
     [Install]
     WantedBy=timers.target
-# 부트스트랩: 부팅마다 돈다. 실패하면 60초 뒤 다시 하되 2시간에 3번까지만 시작한다(그 뒤로는 로그를 보고 systemctl start로 다시 돌린다).
-# oneshot은 시작 제한 시간이 기본으로 꺼져 있어서 45분으로 묶는다(helm --wait의 10분과 이미지 내려받기를 넉넉히 넘는 값).
+# 부트스트랩: 부팅마다 돈다. 실패하면 60초 뒤 다시 하되 2시간 안에 3번(첫 시작 포함)까지만 시작한다. 그 2시간 안에는 손으로 한
+# systemctl start도 시작 제한에 걸려 거부되므로, systemctl reset-failed devops-bootstrap으로 횟수를 지운 뒤 시작하거나
+# /usr/local/sbin/devops-bootstrap을 직접 돌린다. 진행은 /var/log/devops-bootstrap.log, 성공하면 /var/lib/devops-bootstrap.done이 생긴다.
+# oneshot은 시작 제한 시간이 기본으로 꺼져 있어서 45분으로 묶는다. 스크립트의 대기 상한(apt 잠금·retry 제한·DuckDNS 120초·
+# helm --wait 10분)을 다 더해도 30분이 안 되어 내려받기·설치 시간을 더해도 남는다. 45분에 끊기는 것은 상한이 없는 단계(내려받기,
+# k3s 설치 스크립트)가 멈췄을 때다. WantedBy=multi-user.target인 oneshot이라 재부팅마다 부팅 완료(multi-user.target)가 이 실행을
+# 기다린다(보통 30~60초). 의도한 것이고, k3s와 SSM 에이전트는 이 서비스를 기다리지 않고 함께 뜬다.
 - path: /etc/systemd/system/devops-bootstrap.service
   content: |
     [Unit]
@@ -207,7 +276,8 @@ write_files:
     [Install]
     WantedBy=multi-user.target
 # 첫 부팅에 한 번: 새 유닛 파일을 읽히고(daemon-reload) 부트스트랩을 켜서(enable) 다음 부팅부터는 systemd가 돌리게 한다.
-# --no-block: 10분 가까운 설치를 cloud-init 안에서 붙잡고 기다리지 않는다. 진행은 로그로 보고, 실패하면 재시도는 systemd가 한다.
+# --no-block: 10분 가까운 설치를 cloud-init 안에서 붙잡고 기다리지 않는다. 그래서 cloud-init status --wait는 설치가 끝나기 전에 done이 된다.
+# 진행은 위 로그와 완료 표시로 보고, 실패하면 재시도는 systemd가 한다.
 runcmd:
 - [systemctl, daemon-reload]
 - [systemctl, enable, devops-bootstrap.service]
