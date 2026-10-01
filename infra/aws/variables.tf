@@ -97,6 +97,20 @@ variable "duckdns_token_parameter" {
   }
 }
 
+variable "discord_webhook_parameter" {
+  description = "Discord 웹훅 URL을 담은 SSM Parameter Store SecureString의 이름. 인스턴스가 부팅할 때 이 값을 읽어 Alertmanager가 쓰는 Secret(monitoring/alertmanager-discord)을 만든다. 사람이 미리 만들어 둔다(README 참고). 없어도 부팅은 끝나고, Alertmanager는 자리표시자 URL로 뜬다(Discord 알림은 가지 않는다). 부트스트랩이 다시 돌 때 읽히면 자리표시자가 값으로 바뀐다."
+  type        = string
+  default     = "/dev-ops-study/discord-webhook-url"
+
+  # duckdns_token_parameter와 같은 이유로 /로 시작하는 이름만 받는다: iam.tf가 이름을 ARN 문자열에 이어 붙이고(parameter<이름>),
+  # cloud-init 템플릿은 이름을 bootstrap.env에 넣어 root가 source 하므로 템플릿의 regex()도 이 문자 집합만 통과시킨다.
+  # 이 파라미터는 DuckDNS 토큰과 같은 방식(기본 키 aws/ssm으로 암호화한 SecureString)으로 만든다. iam.tf의 정책이 그 키의 복호화만 허용한다.
+  validation {
+    condition     = can(regex("^/[a-zA-Z0-9_./-]+$", var.discord_webhook_parameter))
+    error_message = "discord_webhook_parameter는 /로 시작하고 영문자, 숫자, . - _ / 만 쓴 이름이어야 한다(예: /dev-ops-study/discord-webhook-url)."
+  }
+}
+
 variable "config_repo_url" {
   description = "설정 저장소의 URL. cloud-init이 부팅 중에 ArgoCD의 루트 Application(argocd/root.yaml)을 여기서 가져온다. ArgoCD는 이 저장소를 읽어 앱을 배포한다."
   type        = string

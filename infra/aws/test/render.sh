@@ -20,19 +20,22 @@ fail() { echo "실패: $*" >&2; exit 1; }
 # 시험용 값. 이름은 ec2.tf의 templatefile 호출과 같고, argocd_values는 저장소의 실제 파일이다.
 export EXPECT_SUB=myshort
 export EXPECT_ROOT_APP_URL=https://raw.githubusercontent.com/seongj-un/dev-ops-study-config/main/argocd/root.yaml
+export EXPECT_DUCKDNS_PARAM=/dev-ops-study/duckdns-token
+export EXPECT_DISCORD_PARAM=/dev-ops-study/discord-webhook-url
 cat >"$tf/main.tf" <<EOF
 locals {
   tpl = "$aws_dir/cloud-init.yaml.tftpl"
   vars = {
-    aws_region           = "ap-northeast-2"
-    duckdns_subdomain    = "$EXPECT_SUB"
-    ssm_parameter_name   = "/dev-ops-study/duckdns-token"
-    k3s_version          = "v1.35.8+k3s1"
-    helm_version         = "v4.3.0"
-    argocd_chart_version = "10.9.4"
-    argocd_values        = file("$repo/bootstrap/argocd/values.yaml")
-    config_repo_url      = "https://github.com/seongj-un/dev-ops-study-config"
-    config_repo_ref      = "main"
+    aws_region                     = "ap-northeast-2"
+    duckdns_subdomain              = "$EXPECT_SUB"
+    ssm_parameter_name             = "$EXPECT_DUCKDNS_PARAM"
+    discord_webhook_parameter_name = "$EXPECT_DISCORD_PARAM"
+    k3s_version                    = "v1.35.8+k3s1"
+    helm_version                   = "v4.3.0"
+    argocd_chart_version           = "10.9.4"
+    argocd_values                  = file("$repo/bootstrap/argocd/values.yaml")
+    config_repo_url                = "https://github.com/seongj-un/dev-ops-study-config"
+    config_repo_ref                = "main"
   }
 }
 output "rendered" {
@@ -60,13 +63,16 @@ cmp -s "$out/rendered.yaml" "$tf/git-suffix.yaml" || fail "config_repo_url 끝�
 # 먼저 정상 값이 console에서 통과하는지 본다: console이 늘 실패하는 환경이면 아래 거부 검사는 아무것도 증명하지 못한다.
 echo "length(templatefile(local.tpl, local.vars))" | terraform -chdir="$tf" console >/dev/null ||
   fail "정상 값으로도 terraform console 렌더링이 실패했다"
+rejected=0
 for bad in 'duckdns_subdomain = "my.short"' 'duckdns_subdomain = "x;reboot"' 'aws_region = "ap-northeast-2 x"' \
+  'ssm_parameter_name = "/x;reboot"' 'discord_webhook_parameter_name = "/x;reboot"' 'discord_webhook_parameter_name = "/x y"' \
   'k3s_version = "latest"' 'helm_version = "v4.3"' 'config_repo_url = "https://gitlab.com/a/b"' 'config_repo_ref = "main;id"'; do
   if echo "templatefile(local.tpl, merge(local.vars, { $bad }))" | terraform -chdir="$tf" console >/dev/null 2>&1; then
     fail "잘못된 값이 렌더링을 통과했다: $bad"
   fi
+  rejected=$((rejected + 1))
 done
-echo "잘못된 값 7개가 모두 렌더링에서 거부됐다"
+echo "잘못된 값 ${rejected}개가 모두 렌더링에서 거부됐다"
 
 # EC2 user data 한도는 base64로 바꾸기 전 바이트로 16384다. ec2.tf는 base64gzip을 넘기므로 그 바이트는 gzip 압축본이다:
 # Terraform이 만든 base64를 풀어 크기를 재고, 압축을 풀면 원문과 바이트까지 같은지 본다(cloud-init은 풀어서 원문을 읽는다).
@@ -106,6 +112,9 @@ print("argocd-values.yaml: 주석을 뺀", len(rf["/etc/devops/argocd-values.yam
 
 env = dict(line.split("=", 1) for line in rf["/etc/devops/bootstrap.env"]["content"].splitlines())
 assert env["DUCKDNS_SUBDOMAIN"] == os.environ["EXPECT_SUB"], env
+# 두 SSM 파라미터 이름이 서로 바뀌어 들어가면 DuckDNS 토큰이 Discord 웹훅 URL이 된다.
+assert env["SSM_PARAMETER_NAME"] == os.environ["EXPECT_DUCKDNS_PARAM"], env
+assert env["DISCORD_WEBHOOK_PARAMETER_NAME"] == os.environ["EXPECT_DISCORD_PARAM"], env
 assert env["ROOT_APP_URL"] == os.environ["EXPECT_ROOT_APP_URL"], env["ROOT_APP_URL"]
 print("bootstrap.env:", env)
 
