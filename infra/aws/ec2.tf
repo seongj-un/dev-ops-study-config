@@ -1,4 +1,5 @@
-# EC2 인스턴스 한 대: k3s 단일 노드 클러스터가 여기서 돈다. 설치와 설정은 모두 cloud-init(user_data)이 첫 부팅 때 한다.
+# EC2 인스턴스 한 대: k3s 단일 노드 클러스터가 여기서 돈다. cloud-init(user_data)은 첫 부팅 때 파일을 쓰고 devops-bootstrap.service를 켜기만 한다.
+# 설치(AWS CLI, DuckDNS, k3s, ArgoCD 등)는 그 서비스가 부팅마다 하고, 이미 된 단계는 건너뛴다(cloud-init.yaml.tftpl).
 
 # Canonical(Ubuntu를 만드는 회사)이 SSM 공개 파라미터로 공개하는 Ubuntu 24.04 LTS(amd64, gp3 루트 볼륨) AMI의 ID. 'current'는 호출한 시점의 최신 이미지를 가리킨다.
 # 이 파라미터를 읽으면 리전마다 다른 AMI ID를 코드에 적어 두지 않아도 된다.
@@ -59,16 +60,20 @@ resource "aws_instance" "k3s" {
     Name = "${local.project}-k3s-root"
   })
 
-  # cloud-init이 첫 부팅 때 이 내용을 실행한다(k3s, Helm, ArgoCD 설치와 DuckDNS 갱신 설정).
+  # cloud-init이 첫 부팅 때 이 내용을 처리한다: 스크립트·유닛 파일을 쓰고 devops-bootstrap.service를 켠 뒤 기다리지 않고 끝난다.
+  # 설치(k3s, Helm, ArgoCD, DuckDNS 갱신 설정)는 그 서비스가 한다. 진행은 /var/log/devops-bootstrap.log에 남는다(README의 진행 확인).
   # 변수 이름은 cloud-init.yaml.tftpl과 맞춘 약속이라 함부로 바꾸면 안 된다.
   # argocd_values는 로컬 클러스터용 값 파일(bootstrap/argocd/values.yaml)을 그대로 넣는다(템플릿이 그 위에 덮어쓰는 부분은 cloud-init.yaml.tftpl을 본다).
   # 그래서 이 값 파일이 바뀌면 렌더링 결과가 달라지고, 아래 user_data_replace_on_change 때문에 다음 apply에서 인스턴스가 교체된다.
   #
   # user_data가 아니라 user_data_base64로, gzip으로 압축해서 넘긴다. 이유는 크기 한도다:
-  #  - EC2는 user_data를 base64로 인코딩하기 전 원본 기준 16384바이트(16 KiB)까지만 받고, 프로바이더도 plan에서 이를 검사한다("expected length of user_data to be in the range (0 - 16384)").
-  #    바이트 수라서 한글(UTF-8에서 글자당 3바이트)이 많으면 빨리 닿는다. 이 템플릿은 값 파일이 통째로 들어가고 한글 주석이 많아서, 작성 시점에 렌더링 결과가 약 15.8 KB로 한도에 바짝 닿아 있었다.
-  #  - base64gzip은 문자열을 gzip으로 압축한 다음 base64로 인코딩한다. 압축하면 같은 내용이 약 6.6 KB가 된다. 압축본은 문자열(UTF-8)이 아닌 바이너리라서 user_data가 아니라 user_data_base64 인자로 넘긴다.
-  #  - cloud-init은 gzip으로 압축된 user-data를 자동으로 알아보고 풀어서 원래의 cloud-config로 처리한다. 한도는 압축한 뒤의 크기에 적용된다.
+  #  - EC2는 user data를 base64로 인코딩하기 전 바이트 기준 16384바이트(16 KiB)까지만 받는다. 프로바이더도 user_data 인자는 plan에서 이를 검사한다
+  #    ("expected length of user_data to be in the range (0 - 16384)"). 바이트 수라서 한글(UTF-8에서 글자당 3바이트)이 많으면 빨리 닿는다.
+  #    이 템플릿은 한글 주석, AWS CLI 서명 키, 스크립트가 들어가서 렌더링 원문이 이미 한도를 넘는다(2026-10-01 기준 약 21.8 KB).
+  #  - base64gzip은 문자열을 gzip으로 압축한 다음 base64로 인코딩한다. 같은 시점에 압축본은 약 10.2 KB(base64로는 약 13.6 KB)다.
+  #    압축본은 문자열(UTF-8)이 아닌 바이너리라서 user_data가 아니라 user_data_base64 인자로 넘긴다.
+  #  - 한도는 base64를 푼 바이트, 곧 압축본의 크기에 적용된다. 원문 크기는 상관없다. test/render.sh가 이와 같은 식으로 압축본을 만들어 크기를 검사한다.
+  #  - cloud-init은 gzip으로 압축된 user data를 스스로 알아보고 풀어서 원래의 cloud-config로 처리한다(render.sh가 cloud-init의 함수로 풀어 확인한다).
   # 주의: 압축 결과의 바이트는 Terraform을 빌드한 Go 버전에 따라 달라질 수 있다. Terraform을 올린 뒤 살아 있는 인스턴스에 plan하면, 내용이 같아도 user_data_base64가 바뀐 것으로 보여
   # 교체가 제안될 수 있다. 이 실습은 쓸 때 만들고 끝나면 destroy하므로 감수한다: 원인이 압축 결과뿐인 교체 제안은 apply하지 말고, 그 세션이 끝난 뒤 destroy한다.
   user_data_base64 = base64gzip(templatefile("${path.module}/cloud-init.yaml.tftpl", {

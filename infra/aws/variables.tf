@@ -34,7 +34,7 @@ variable "admin_cidr" {
 }
 
 variable "instance_type" {
-  description = "EC2 인스턴스 유형. m7i-flex.large는 2 vCPU, 8 GiB이고 AWS 무료 플랜 대상 유형이다."
+  description = "EC2 인스턴스 유형. m7i-flex.large는 2 vCPU, 8 GiB다. Free Tier 대상 인스턴스 유형이지만 이 계정은 유료 플랜이라 시간당 과금된다(서울 온디맨드 $0.11771/시간, 2026-10-01 확인. README의 비용)."
   type        = string
   default     = "m7i-flex.large"
 }

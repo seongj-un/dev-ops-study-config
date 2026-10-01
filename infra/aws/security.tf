@@ -31,8 +31,9 @@ resource "aws_vpc_security_group_ingress_rule" "http" {
   to_port           = 80
 }
 
-# 443: 같은 Traefik의 HTTPS. 지금은 평문 HTTP로 시작하고 인증서(cert-manager + Let's Encrypt)는 나중에 붙이므로 이 포트로 서비스하는 앱은 아직 없다.
-# 나중에 인증서를 붙일 때 보안 그룹까지 고치지 않도록 미리 열어 둔다.
+# 443: 같은 Traefik의 HTTPS(websecure). k3s의 Traefik은 처음부터 443에서도 듣는다. 신뢰할 수 있는 인증서(cert-manager + Let's Encrypt)는
+# 나중에 붙이므로, 지금 https://로 접속하면 Traefik이 스스로 만든 자체 서명 기본 인증서로 응답하고 브라우저가 경고를 띄운다.
+# 인증서를 붙일 때 보안 그룹까지 고치지 않도록 미리 열어 둔다.
 resource "aws_vpc_security_group_ingress_rule" "https" {
   security_group_id = aws_security_group.k3s.id
   description       = "HTTPS from anywhere (Traefik ingress)"
