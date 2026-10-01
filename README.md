@@ -1,9 +1,9 @@
 # dev-ops-study-config
 
 데브옵스 공부용 URL 단축 서비스([seongj-un/dev-ops-study](https://github.com/seongj-un/dev-ops-study))의 **배포 설정 저장소**다.
-Helm 차트, 환경별 값, ArgoCD 정의가 여기에 있고, 클러스터에는 ArgoCD가 이 저장소를 읽어서 반영한다(GitOps).
-앱은 사람이나 CI가 클러스터에 `helm install`·`kubectl apply`로 직접 밀어 넣지 않는다. 클러스터에 무엇이 떠 있어야 하는지는 이 저장소의 `main`이 말해 준다
-(손으로 하는 것은 ArgoCD 설치, 루트 Application 적용, DB Secret 생성뿐이다. 아래 부트스트랩).
+Helm 차트, 환경별 값, 모니터링 플랫폼의 값, ArgoCD 정의가 여기에 있고, 클러스터에는 ArgoCD가 이 저장소를 읽어서 반영한다(GitOps).
+앱과 플랫폼은 사람이나 CI가 클러스터에 `helm install`·`kubectl apply`로 직접 밀어 넣지 않는다. 클러스터에 무엇이 떠 있어야 하는지는 이 저장소의 `main`이 말해 준다
+(손으로 하는 것은 ArgoCD 설치, 루트 Application 적용, Git에 둘 수 없는 Secret(DB 비밀번호, Grafana 관리자, Discord 웹훅) 생성뿐이다. 아래 부트스트랩. EC2에서는 이것도 부트스트랩 스크립트가 한다).
 
 ## 왜 앱 저장소와 분리했나
 
@@ -34,7 +34,10 @@ bootstrap/argocd/values.yaml     ArgoCD를 처음 설치할 때 쓰는 Helm 값 
 argocd/root.yaml                 app-of-apps 루트 Application. ArgoCD를 설치한 뒤 손으로 한 번만 적용한다
 argocd/apps/shortener-dev.yaml   dev Application
 argocd/apps/shortener-prod.yaml  prod Application
-.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링, 스키마 검사)
+argocd/apps/kube-prometheus-stack.yaml      모니터링 Application (외부 차트 + 이 저장소의 값, multi-source)
+platform/kube-prometheus-stack/values.yaml  그 값 (Prometheus·Alertmanager·Grafana. 아래 "모니터링")
+tests/slo/                       앱 SLO 규칙(차트의 PrometheusRule)의 promtool 단위 테스트. validate가 차트를 렌더링해 꺼낸 규칙으로 돌린다
+.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링, 스키마 검사, SLO 규칙 검사, 플랫폼 차트 렌더링)
 .github/dependabot.yml           GitHub Actions 주간 갱신
 ```
 
@@ -129,22 +132,37 @@ for env in dev prod; do
   kubectl -n shortener-$env create secret generic shortener-db --from-literal=password="$(openssl rand -base64 24)"
 done
 
-# 4. 루트 Application 적용: 여기서부터 ArgoCD가 argocd/apps를 읽어 dev·prod를 만든다 (손으로 하는 마지막 단계)
+# 3-1. 모니터링 Secret 두 개. 이름과 키는 platform/kube-prometheus-stack/values.yaml이 정한다:
+#      grafana-admin(키 admin-user, admin-password), alertmanager-discord(키 webhook-url).
+#      EC2에서는 부트스트랩 스크립트가 만든다(웹훅은 SSM 파라미터 /dev-ops-study/discord-webhook-url의 값). 손으로 만들 때는 비밀번호를 무작위로 두고,
+#      웹훅은 실제 주소 대신 가짜 주소로 둔다(Alertmanager는 뜨고 Discord 알림만 실패한다). 비밀번호는 파이프로 넘긴다(명령줄 인자는 ps로 보인다)
+kubectl create namespace monitoring
+openssl rand -hex 16 | tr -d '\n' | kubectl -n monitoring create secret generic grafana-admin \
+  --from-literal=admin-user=admin --from-file=admin-password=/dev/stdin
+kubectl -n monitoring create secret generic alertmanager-discord --from-literal=webhook-url=https://discord.invalid/webhook-not-configured
+
+# 4. 루트 Application 적용: 여기서부터 ArgoCD가 argocd/apps를 읽어 dev·prod와 모니터링을 만든다 (손으로 하는 마지막 단계)
 kubectl apply -f argocd/root.yaml
 ```
 
 - 2번은 ArgoCD 이미지(약 200MB)를 처음 내려받아서 몇 분 걸린다. 진행은 `kubectl -n argocd get pods`로 본다.
 - 3번에서 네임스페이스를 미리 만드는 것은 Secret을 먼저 넣으려는 것이다. Application의 `CreateNamespace=true`는 이미 있는 네임스페이스를 건드리지 않는다.
   Secret이 없으면 앱·PostgreSQL 파드가 `CreateContainerConfigError`로 멈춰 있다가 Secret이 생기면 시작한다.
+- 3-1의 Secret도 같다. `grafana-admin`이 없으면 Grafana 파드가 `CreateContainerConfigError`(환경 변수로 읽는다), `alertmanager-discord`가 없으면
+  Alertmanager 파드가 `ContainerCreating`(볼륨으로 붙인다)에 머문다. EC2에서는 부트스트랩 스크립트가 루트 Application보다 먼저 만든다(`infra/aws/README.md`).
+- 모니터링(kube-prometheus-stack, 메모리 요청만 약 1GiB)은 EC2 클러스터(메모리 8GiB)를 위한 것이다. 로컬 k3d의 Docker VM(2.84GiB)은 앱만으로도 메모리가 모자라
+  EC2로 옮겼으므로(아래 메모리 메모) 그 위에는 자리가 없다. 루트 Application은 argocd/apps를 모두 배포하므로 로컬 k3d에서도 모니터링 Application이 생긴다.
+  그래도 로컬에서 띄운다면 3-1의 두 Secret을 위처럼 무작위 비밀번호와 가짜 웹훅 주소로 만든다.
 - 로컬 k3d에 이전 단계에서 `helm install`로 직접 설치한 `shortener` 릴리스(`shortener` 네임스페이스)가 남아 있으면 먼저 지운다. 로컬용으로 덮어쓴 prod 호스트(`shortener.localhost`)와
   같은 호스트를 쓰는 Ingress가 둘이 되면 요청이 어느 쪽으로 갈지 보장되지 않는다. EC2에는 그런 릴리스가 없다.
 
 확인:
 
 ```bash
-kubectl -n argocd get applications          # root, shortener-dev, shortener-prod가 Synced·Healthy가 될 때까지 몇 분 걸린다
+kubectl -n argocd get applications          # root, shortener-dev, shortener-prod, kube-prometheus-stack이 Synced·Healthy가 될 때까지 몇 분 걸린다
 kubectl -n shortener-dev get pods
 kubectl -n shortener-prod get pods
+kubectl -n monitoring get pods              # 아래 "모니터링"의 파드 6개
 curl -i -X POST http://dev.dev-ops-study.duckdns.org/api/v1/urls -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
 curl -i -X POST http://dev-ops-study.duckdns.org/api/v1/urls     -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
 ```
@@ -180,11 +198,16 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 
 | 컴포넌트 | CPU 요청 | 메모리 요청 | 메모리 한도 |
 |---|---|---|---|
-| application-controller (StatefulSet) | 50m | 128Mi | 256Mi |
-| repo-server | 25m | 96Mi | 256Mi |
+| application-controller (StatefulSet) | 50m | 128Mi | 512Mi |
+| repo-server | 25m | 96Mi | 512Mi |
 | server | 25m | 64Mi | 192Mi |
 | redis | 10m | 16Mi | 64Mi |
-| **합계** | **110m** | **304Mi** | **768Mi** |
+| **합계** | **110m** | **304Mi** | **1280Mi** |
+
+- application-controller·repo-server의 메모리 한도는 4단계에서 256Mi에서 512Mi로 올렸다. kube-prometheus-stack은 CRD가 커서(가장 큰 것이 JSON으로 약 486KiB)
+  컨트롤러가 캐시에 들고 있는 양이 늘고, repo-server 안에서 도는 `helm pull`·`helm template`이 이 차트에서 최대 RSS를 각각 195MiB·134MiB까지 쓴다(로컬에서 잰 값과 계산은 `bootstrap/argocd/values.yaml`).
+  EC2에서는 부트스트랩이 ArgoCD가 이미 설치돼 있으면 건너뛰므로, 이 값은 인스턴스를 새로 만들 때 적용된다. 떠 있는 클러스터에 바로 넣으려면
+  부트스트랩 2번의 `helm upgrade --install`을 다시 돌린다(EC2에서는 위에 적은 대로 `--set server.ingress.enabled=false`도 함께 준다).
 
 끈 컴포넌트:
 
@@ -212,6 +235,76 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 - ArgoCD로 배포한 앱의 배포 확인은 ArgoCD의 Application 상태(Synced·Healthy)와 위 `curl`로 한다. 앱의 readiness 엔드포인트를 직접 보려면
   `kubectl -n shortener-dev port-forward svc/shortener-dev 8081:8081` 뒤 `curl localhost:8081/actuator/health/readiness`.
 
+## 모니터링 (kube-prometheus-stack)
+
+Application `kube-prometheus-stack`이 Helm 차트 `prometheus-community/kube-prometheus-stack` **91.8.2**를 `platform/kube-prometheus-stack/values.yaml`의 값으로
+`monitoring` 네임스페이스에 배포한다. 차트는 외부 차트 저장소에 있고 값만 이 저장소에 있어서 소스를 둘 쓴다(multi-source: 차트 + `ref: values`로 가리키는 이 저장소).
+값을 바꾸는 방법은 앱과 같다: 값 파일을 고치는 PR을 머지하면 ArgoCD가 다음 폴링에서 반영한다. Grafana에는 Loki 데이터 소스(`uid: loki`)가 미리 들어 있다(Loki는 따로 배포한다).
+
+| 파드 | 하는 일 | CPU 요청 | 메모리 요청 / 한도 |
+|---|---|---|---|
+| `prometheus-kube-prometheus-stack-prometheus-0` (Operator가 만드는 StatefulSet) | 지표 수집·저장, 규칙 평가 | 110m | 528Mi / 1088Mi |
+| `alertmanager-kube-prometheus-stack-alertmanager-0` (Operator가 만드는 StatefulSet) | 경보를 묶어 Discord로 보낸다 | 20m | 48Mi / 192Mi |
+| `kube-prometheus-stack-operator` | Prometheus·Alertmanager 리소스를 StatefulSet으로, ServiceMonitor·PrometheusRule을 Prometheus 설정으로 바꾼다 | 20m | 64Mi / 192Mi |
+| `kube-prometheus-stack-grafana` | 대시보드. 사이드카 2개가 ConfigMap의 대시보드·데이터 소스를 넣는다 | 70m | 320Mi / 768Mi |
+| `kube-prometheus-stack-kube-state-metrics` | 쿠버네티스 객체의 상태를 지표로 | 10m | 64Mi / 128Mi |
+| `kube-prometheus-stack-prometheus-node-exporter` (DaemonSet) | 노드의 CPU·메모리·디스크 지표 | 10m | 32Mi / 64Mi |
+| **합계** | | **240m** | **1056Mi / 2432Mi** |
+
+파드별 값은 config-reloader·사이드카 같은 보조 컨테이너까지 더한 것이다. 클러스터에서 잰 값이 아니라 추정이라 띄운 뒤 `kubectl top pods -n monitoring`으로 확인한다.
+
+### 열어 보기 (port-forward)
+
+Ingress를 만들지 않는다. 80 포트는 인터넷에 열린 평문 HTTP라 Grafana 로그인 화면과 인증이 없는 Prometheus·Alertmanager의 UI·API를 그대로 내놓게 된다.
+HTTPS를 붙이기 전(6단계)에는 ArgoCD UI처럼 맥에서 port-forward로만 본다(인터넷을 건너는 구간은 k3s API의 TLS뿐이다).
+
+```bash
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80          # http://localhost:3000 (사용자 admin)
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090     # http://localhost:9090 (Status → Target health, Alerts)
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-alertmanager 9093:9093   # http://localhost:9093
+```
+
+Grafana 관리자 비밀번호는 부트스트랩이 무작위로 만들어 Secret `grafana-admin`에 넣어 둔다. 이렇게 읽는다(화면에 찍히므로 화면 공유·녹화 중에는 쓰지 않는다):
+
+```bash
+kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d; echo
+```
+
+Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레이블 `grafana_dashboard: "1"`이 붙은 `monitoring` 네임스페이스의 ConfigMap)에서, 데이터 소스는 차트가 만드는 ConfigMap에서 오므로
+파드가 다시 떠도 그대로지만, UI에서 손으로 만들거나 고친 대시보드는 사라진다. 남길 대시보드는 JSON으로 내보내 이 저장소에 ConfigMap으로 넣는다.
+
+### 경보가 가는 길
+
+규칙(차트의 기본 규칙, 앱 차트의 SLO 규칙) → Prometheus가 30초마다 평가 → Alertmanager가 묶어서 수신자로 보낸다. 경로는 위에서부터 처음 맞는 하나만 탄다.
+
+| 경보 | 가는 곳 |
+|---|---|
+| `Watchdog`(경보 파이프라인이 살아 있음을 보이려고 늘 울리는 경보), `InfoInhibitor`(info 경보를 누르는 데만 쓰는 경보. 같은 네임스페이스에 info 경보가 있고 warning·critical 경보는 울리지 않을 때만 울린다) | 보내지 않는다(`null`) |
+| `service="shortener"` (앱의 SLO 경보) | Discord |
+| `severity="critical"` (그 밖의 critical 경보) | Discord |
+| 나머지(warning·info) | 보내지 않는다. Alertmanager UI에서 본다 |
+
+- 같은 `alertname`·`namespace`의 경보를 한 알림으로 묶는다. 첫 알림은 30초 모았다 보내고, 묶음이 바뀌면 5분 간격으로, 그대로 울리면 4시간마다 다시 보낸다. 풀리면(RESOLVED)도 알린다.
+- Discord 웹훅 주소는 Git에 없다. 부트스트랩이 SSM 파라미터 `/dev-ops-study/discord-webhook-url`의 값으로 Secret `alertmanager-discord`(키 `webhook-url`)를 만들고,
+  Alertmanager가 그 파일(`/etc/alertmanager/secrets/alertmanager-discord/webhook-url`)을 알림을 보낼 때마다 읽는다. 주소를 바꾸는 방법은 `infra/aws/README.md`.
+- 클러스터 없이 라우팅을 확인하는 방법은 아래 "로컬에서 검증하기"에 있다.
+
+### k3s·ArgoCD 때문에 기본값에서 바꾼 것
+
+- **k3s**: kube-controller-manager·kube-scheduler·kube-proxy는 파드가 아니라 k3s 프로세스 안에서 돌고, etcd는 없다(SQLite). 차트 기본값대로면 이것들을 수집하지 못해
+  `KubeSchedulerDown` 같은 critical 경보가 영원히 울리므로 수집과 그 규칙을 끈다.
+- **ServerSideApply=true**: 차트의 CRD 6개가 클라이언트 쪽 적용이 쓰는 `last-applied-configuration` 어노테이션의 한도(256KiB)보다 크다(가장 큰 prometheuses CRD가 JSON으로 약 486KiB).
+- **어드미션 웹훅 끔**: 켜 두면 인증서를 만드는 Helm 훅 Job이 동기화마다 다시 돌고 웹훅 설정의 caBundle을 Git 밖에서 고쳐 쓴다. 그 인증서를 쓰는 Operator의 TLS도 함께 끈다.
+- **Grafana 관리자 Secret은 부트스트랩이 만든다**: 차트가 만들게 두면 ArgoCD가 렌더링할 때마다 무작위 비밀번호가 새로 나와 늘 OutOfSync가 된다.
+- **ServiceMonitor·PrometheusRule을 레이블 없이 모든 네임스페이스에서 고른다**(`*SelectorNilUsesHelmValues: false`): 앱 차트가 만드는 것에 이 릴리스의 `release` 레이블을 붙이지 않아도 된다.
+- **보존 3일·4GB**(PVC 5Gi, local-path): 인스턴스를 공부하는 동안만 띄우고 없애서 30일 오류 예산을 셀 만큼 쌓이지 않는다. 그래서 SLO는 소진 속도(burn rate)와 1h·6h·1d 가용성으로 본다.
+- **node-exporter도 hostNetwork 없이**: 노드의 네트워크를 같이 쓰는 파드는 IMDSv2의 홉 제한 1에 걸리지 않아 인스턴스 역할(SSM의 DuckDNS 토큰·Discord 웹훅 주소를 읽는다)을 얻을 수 있다.
+  이 클러스터는 hostNetwork 파드를 띄우지 않는다(`infra/aws/README.md`). 대가는 네트워크 지표의 일부다: 송수신·오류 카운터(netdev 수집기, netlink)와 `/proc/net`을 읽는
+  수집기(netstat·sockstat)는 노드가 아니라 그 파드의 네트워크(eth0, lo)를 보인다. 그래서 노드 트래픽 패널과 `NodeNetworkReceiveErrs`·`TransmitErrs`는 그 파드의 트래픽을 본다.
+  인터페이스 상태(netclass 수집기: `node_network_up`·`_info`·`_mtu_bytes`·`_speed_bytes`·`_carrier` 등)는 노드의 sysfs(`/host/sys`)를 읽으므로 그대로 노드의 인터페이스이고,
+  `NodeNetworkInterfaceFlapping`도 노드를 본다. CPU·메모리·디스크·파일시스템도 그대로다.
+- 자세한 이유는 `platform/kube-prometheus-stack/values.yaml`과 `argocd/apps/kube-prometheus-stack.yaml`의 주석에 있다.
+
 ## 메모리 메모
 
 노드는 EC2 `m7i-flex.large`(2 vCPU, 메모리 8GiB = 8192Mi) 한 대다. 로컬 Docker VM(2.84GiB)은 dev 롤링 업데이트 중에 메모리가 모자라서 프로젝트를 이 노드로 옮겼다.
@@ -221,15 +314,20 @@ JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 `-XX:Max
 | | 요청 합 | 한도 합 |
 |---|---|---|
 | k3s와 기본 구성요소 (Traefik 등. 사용량으로 잡은 값) | 약 800Mi | 약 800Mi |
-| ArgoCD (파드 4개) | 304Mi | 768Mi |
+| ArgoCD (파드 4개. 4단계에서 컨트롤러·repo-server 한도를 512Mi로 올렸다) | 304Mi | 1280Mi |
+| 모니터링: kube-prometheus-stack (파드 6개, 위 "모니터링" 표) | 1056Mi | 2432Mi |
 | dev (앱 384Mi/512Mi + PostgreSQL 128Mi/256Mi + Redis 32Mi/128Mi, 앱 1개) | 544Mi | 896Mi |
 | prod, HPA가 최대 3개까지 늘었을 때 (앱 3개 + PostgreSQL 256Mi/512Mi로 키움 + Redis 32Mi/128Mi) | 1440Mi | 2176Mi |
-| 합계 | 3088Mi | 4640Mi |
+| 합계 | 4144Mi | 7584Mi |
 | 롤링 업데이트 중 환경마다 앱 파드 하나 추가 (maxSurge 1) | +384Mi | +512Mi |
-| 합계, 두 환경이 동시에 롤링 중일 때 | 3856Mi | 5664Mi |
+| 합계, 두 환경이 동시에 롤링 중일 때 | 4912Mi | 8608Mi |
 
-- **최악의 경우에도 4단계 모니터링 몫이 남는다.** 한도 합 5664Mi는 모든 컨테이너가 한도까지 쓰고 prod가 3개인 채 두 환경이 동시에 롤링하는 경우다(차트의 파드 템플릿을 고치면 두 환경이 같은 `main`의 차트를 읽어 동시에 롤링된다).
-  8192Mi에서 빼면 2528Mi(약 2.5GiB)가 남고, 4단계 모니터링에 계획한 약 1.5GiB(1536Mi, 추정)를 빼도 992Mi가 남는다.
+- **요청 합은 최악에도 노드 안에 든다.** 요청은 스케줄러가 자리를 계산하는 값이다. prod가 3개인 채 두 환경이 동시에 롤링해도(차트의 파드 템플릿을 고치면 두 환경이 같은 `main`의 차트를 읽어 동시에 롤링된다)
+  4912Mi로 8192Mi(실제 MemTotal은 약 7.6GiB)보다 작다. 4단계에서 새로 더하는 요청은 약 1.6GiB까지로 잡았고, 그중 kube-prometheus-stack이 1056Mi를 쓴다. 남은 약 580Mi가 Loki·Alloy 몫이다(Loki·Alloy는 아직 위 표에 없다).
+  같은 계산이 `environments/prod/values.yaml`의 `autoscaling` 위 주석에도 있다(prod의 HPA 최대 3개를 정한 근거).
+- **한도 합은 최악에 노드 메모리를 넘는다(오버커밋).** 3단계까지는 모든 컨테이너가 한도까지 쓰는 최악(5664Mi)도 노드 안에 들게 잡았지만, 모니터링과 ArgoCD 한도를 더하니 8608Mi로 넘는다.
+  모든 컨테이너가 한꺼번에 한도까지 쓰는 일은 드물다고 보고 받아들인다. 한도는 컨테이너 하나가 폭주할 때 그 컨테이너만 OOMKilled로 멈추게 하는 상한이다.
+  한도보다 노드가 먼저 모자라면 kubelet이 요청을 넘게 쓰는 파드부터 내쫓는다(그래서 요청을 평소 사용량 가까이 잡는다). 띄운 뒤 실제 사용량으로 다시 본다.
 - 위 합계는 추정이다. k3s 행의 약 800Mi는 로컬 k3d의 빈 클러스터에서 잰 약 770MiB를 올려 잡은 값이고 EC2에서는 재지 않았다. 8GiB는 명목 크기라 실제 MemTotal은 조금 작고 호스트 OS도 메모리를 쓰므로 그만큼 위 여유가 줄어든다.
   한도는 상한일 뿐 평소 사용량은 훨씬 작다: 2단계에서 한도 512Mi로 띄웠을 때 유휴 상태의 앱 파드는 약 320Mi, PostgreSQL은 약 55Mi, Redis는 약 15Mi였다(`kubectl top`). 띄운 뒤 실제 값을 확인한다: `kubectl top pods -A --sort-by=memory`, 노드에서 `free -m`.
 - **prod가 최대 3개까지 늘 수 있다고 보고 예산을 잡았다.** 2단계에서는 새 파드가 뜬 직후 HPA가 앱을 1개에서 2개로 늘렸다가 5분쯤 뒤에 줄이는 일이 여러 번 있었다(콜드 JVM의 CPU 급증 때문으로 추정하지만 그 순간의 CPU는 재지 않았다).
@@ -252,20 +350,61 @@ KUBERNETES_VERSION=$(yq '.jobs.validate.env.KUBERNETES_VERSION' .github/workflow
 KUBECONFORM_IMAGE=$(yq '.jobs.validate.env.KUBECONFORM_IMAGE' .github/workflows/validate.yml)
 K8S_SCHEMA_LOCATION=$(yq '.jobs.validate.env.K8S_SCHEMA_LOCATION' .github/workflows/validate.yml)
 CRD_SCHEMA_LOCATION=$(yq '.jobs.validate.env.CRD_SCHEMA_LOCATION' .github/workflows/validate.yml)
+PROMETHEUS_IMAGE=$(yq '.jobs.validate.steps[] | select(.env.PROMETHEUS_IMAGE) | .env.PROMETHEUS_IMAGE' .github/workflows/validate.yml)
+out=$(mktemp -d)
 
+mkdir -p tests/slo/rendered     # 렌더링해서 꺼낸 SLO 규칙을 둘 곳(.gitignore에 있다)
 for env in dev prod; do
   diff <(yq '.' environments/$env/values.yaml) environments/$env/values.yaml     # 값 파일이 yq가 쓰는 모양인가 (출력이 없어야 한다)
   helm lint charts/shortener --strict --kube-version $KUBERNETES_VERSION -f environments/$env/values.yaml
-  helm template shortener-$env charts/shortener --namespace shortener-$env --kube-version $KUBERNETES_VERSION -f environments/$env/values.yaml \
-    | docker run -i --rm $KUBECONFORM_IMAGE -strict -summary -schema-location "$K8S_SCHEMA_LOCATION" -kubernetes-version $KUBERNETES_VERSION -
+  # --api-versions: 모니터링 CRD가 있는 클러스터처럼 렌더링해서 ServiceMonitor·PrometheusRule도 나오게 한다(ArgoCD는 클러스터의 API 목록을 넘긴다)
+  helm template shortener-$env charts/shortener --namespace shortener-$env --kube-version $KUBERNETES_VERSION \
+    --api-versions monitoring.coreos.com/v1 --api-versions monitoring.coreos.com/v1/ServiceMonitor --api-versions monitoring.coreos.com/v1/PrometheusRule \
+    -f environments/$env/values.yaml > $out/shortener-$env.yaml
+  docker run -i --rm $KUBECONFORM_IMAGE -strict -summary -schema-location "$K8S_SCHEMA_LOCATION" -schema-location "$CRD_SCHEMA_LOCATION" \
+    -kubernetes-version $KUBERNETES_VERSION - < $out/shortener-$env.yaml
+  yq 'select(.kind == "PrometheusRule") | .spec' $out/shortener-$env.yaml > tests/slo/rendered/shortener-$env.yaml
 done
+
+# SLO 규칙: promtool로 문법을 검사하고 단위 테스트(tests/slo/shortener-slo.test.yaml)를 돌린다
+docker run --rm -v "$PWD/tests/slo:/slo:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
+  check rules --lint-fatal /slo/rendered/shortener-dev.yaml /slo/rendered/shortener-prod.yaml
+docker run --rm -v "$PWD/tests/slo:/slo:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" test rules /slo/shortener-slo.test.yaml
 
 docker run --rm -v "$PWD":/work:ro -w /work $KUBECONFORM_IMAGE -strict -summary \
   -schema-location "$K8S_SCHEMA_LOCATION" -schema-location "$CRD_SCHEMA_LOCATION" -kubernetes-version $KUBERNETES_VERSION argocd/
 ```
 
 `helm template`은 ArgoCD가 하는 것과 같이 릴리스 이름(`shortener-dev`)과 네임스페이스를 주고 환경 값 파일을 얹어 렌더링한다. `image.tag`가 커밋 SHA 40자가 아니거나 DB Secret 이름이 없으면
-차트가 안내 메시지와 함께 실패한다. 워크플로 파일은 `docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.12`로 검사한다.
+차트가 안내 메시지와 함께 실패한다. `helm lint`에는 `--api-versions` 옵션이 없어서 ServiceMonitor·PrometheusRule은 lint에서 렌더링되지 않는다(내용은 렌더링·kubeconform·promtool이 검사한다).
+SLO 규칙 테스트의 시나리오와 읽는 법은 `tests/slo/shortener-slo.test.yaml`의 머리말에 있다. 워크플로 파일은 `docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.12`로 검사한다.
+
+플랫폼 차트(argocd/apps에서 `chart:` 소스를 쓰는 Application. 지금은 kube-prometheus-stack)는 CI 단계의 스크립트를 그대로 꺼내 돌린다.
+GitHub가 넣어 주는 변수 셋(`GITHUB_SERVER_URL`, `GITHUB_REPOSITORY`, `RUNNER_TEMP`)은 대신 준다. 위에서 읽은 변수를 그대로 쓴다:
+
+```bash
+export KUBERNETES_VERSION KUBECONFORM_IMAGE K8S_SCHEMA_LOCATION CRD_SCHEMA_LOCATION
+step='.jobs.validate.steps[] | select(.env.K8S_LOCAL_SCHEMA_LOCATION)'
+export K8S_LOCAL_SCHEMA_LOCATION=$(yq "$step | .env.K8S_LOCAL_SCHEMA_LOCATION" .github/workflows/validate.yml)
+GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=seongj-un/dev-ops-study-config RUNNER_TEMP=$(mktemp -d) \
+  bash -c "$(yq "$step | .run" .github/workflows/validate.yml)"
+```
+
+렌더링 결과를 직접 보려면 `helm template kube-prometheus-stack kube-prometheus-stack --repo https://prometheus-community.github.io/helm-charts --version 91.8.2 -n monitoring --include-crds -f platform/kube-prometheus-stack/values.yaml`이다.
+Alertmanager 설정은 그 결과의 Secret에서 꺼내 `amtool`로 문법과 라우팅을 확인한다(이미지 태그는 차트가 쓰는 Alertmanager 버전과 같게 둔다):
+
+```bash
+am=$(mktemp -d)/alertmanager.yaml
+helm template kube-prometheus-stack kube-prometheus-stack --repo https://prometheus-community.github.io/helm-charts --version 91.8.2 \
+    -n monitoring -f platform/kube-prometheus-stack/values.yaml \
+  | yq 'select(.kind == "Secret" and .metadata.name == "alertmanager-kube-prometheus-stack-alertmanager") | .data."alertmanager.yaml"' \
+  | base64 -d > $am
+amtool() { docker run --rm -v $am:/c.yaml:ro --entrypoint amtool quay.io/prometheus/alertmanager:v0.34.1 "$@"; }
+amtool check-config /c.yaml
+amtool config routes show --config.file=/c.yaml
+amtool config routes test --config.file=/c.yaml alertname=X service=shortener severity=critical   # discord
+amtool config routes test --config.file=/c.yaml alertname=Watchdog severity=none                  # null
+```
 
 ArgoCD 설치 값은 이렇게 확인한다. 워크로드는 dex·notifications 없이 다섯 개(applicationset만 replicas 0)이고, Ingress는 Traefik으로 `argocd.localhost`여야 한다:
 
@@ -286,8 +425,11 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | `azure/setup-helm` | v5.0.1 (커밋 SHA로 고정) | `validate.yml` |
 | kubeconform | v0.8.0 (태그@다이제스트) | `validate.yml`의 `KUBECONFORM_IMAGE` |
 | 쿠버네티스 내장 리소스 스키마 | yannh/kubernetes-json-schema 커밋 `8df8a88`(2026-09-29의 최신 커밋) | `validate.yml`의 `K8S_SCHEMA_LOCATION` |
-| Argo CRD 스키마 | datreeio/CRDs-catalog 커밋 `d373c2d`(Argo CD 3.5.0 CRD 기준) | `validate.yml`의 `CRD_SCHEMA_LOCATION` |
+| CRD 스키마 (Argo CD, monitoring.coreos.com) | datreeio/CRDs-catalog 커밋 `d373c2d`(2026-09-29. Argo CD 3.5.0 CRD 기준. monitoring.coreos.com 스키마는 클러스터의 Prometheus Operator v0.94.1보다 오래됐다: `validate.yml`의 주석) | `validate.yml`의 `CRD_SCHEMA_LOCATION` |
+| Prometheus (promtool) | v3.15.0 (태그@다이제스트. kube-prometheus-stack 91.8.2가 띄우는 Prometheus와 같은 버전) | `validate.yml` "SLO 규칙 검사" 단계의 `PROMETHEUS_IMAGE` |
 | 검증 기준 쿠버네티스 | 1.35.0 (클러스터는 k3s v1.35.8) | `validate.yml`의 `KUBERNETES_VERSION`, `clusters/local/k3d.yaml` |
+| kube-prometheus-stack 차트 | 91.8.2 (Prometheus Operator v0.94.1. 이미지 태그도 이 차트 버전이 정한다) | `argocd/apps/kube-prometheus-stack.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
+| CustomResourceDefinition 객체의 스키마 | yannh/kubernetes-json-schema 커밋 `8df8a88`의 `-local` 디렉터리 (`-standalone`에는 없다) | `validate.yml` 플랫폼 차트 단계의 `K8S_LOCAL_SCHEMA_LOCATION` |
 
 액션은 Dependabot이 SHA와 버전 주석을 함께 올려 준다. 나머지는 손으로 올린다(`.github/dependabot.yml` 참고).
 
@@ -301,6 +443,9 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 - `validate` 잡은 룰셋 "PR 필수"의 필수 상태 검사다(저장소 설정). 룰셋이 잡 이름으로 검사를 찾으므로 이름을 바꾸지 않는다. deploy key는 그 룰셋을 우회하므로 CI의 dev 태그 직접 커밋은
   이 검사를 기다리지 않고, 푸시된 뒤에 `push` 이벤트로 검사가 돈다(결과를 알려 줄 뿐 막지는 못한다. ArgoCD는 GitHub의 검사 결과를 보지 않는다).
 - Application을 지우면(루트의 prune 포함) 그것이 배포한 리소스는 클러스터에 남는다(삭제 finalizer를 붙이지 않았다). 네임스페이스와 PostgreSQL의 PVC도 남는다.
+- 외부 차트를 쓰는 Application(지금은 `kube-prometheus-stack`)은 값을 `platform/<Application 이름>/values.yaml`에 두고 `$values/`로 가리킨다. 이 값 파일도 환경 값 파일처럼
+  빈 줄 없는 yq 모양을 지킨다(`validate`의 플랫폼 차트 단계가 검사한다). 인라인 값(`helm.values`·`valuesObject`·`parameters`)은 그 단계가 렌더링에 넣지 못해 거부한다.
+- kube-prometheus-stack의 `crds.enabled`는 끄지 않는다. 렌더링에서 CRD가 빠지면 prune이 CRD를 지우고, CRD가 지워지면 그 종류의 리소스(앱 차트의 ServiceMonitor·SLO 규칙 포함)가 모든 네임스페이스에서 함께 지워진다.
 
 ## 막혔을 때
 
@@ -313,3 +458,7 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | 앱이 DB 인증에 실패한다 | Secret을 다시 만들었는데 PostgreSQL 볼륨이 옛 비밀번호로 이미 초기화되어 있다. `POSTGRES_PASSWORD`는 빈 볼륨을 처음 만들 때만 쓰인다. 데이터를 버려도 되면 PVC(`data-shortener-<환경>-postgresql-0`)를 지우고 파드를 다시 띄운다 |
 | 커밋했는데 반영이 안 된다 | 폴링을 기다린다(60초 안팎, 길면 2분 가까이). 바로 보려면 위의 `argocd.argoproj.io/refresh` 어노테이션으로 새로고침한다 |
 | ArgoCD 파드가 `OOMKilled` | 위 메모리 메모 참고 |
+| Grafana 파드가 `CreateContainerConfigError` | `monitoring`에 `grafana-admin` Secret이 없다. 부트스트랩 3-1대로 만든다 |
+| Alertmanager 파드가 `ContainerCreating`에 머문다 | `monitoring`에 `alertmanager-discord` Secret이 없어 볼륨을 붙이지 못한다(`kubectl -n monitoring describe pod`의 이벤트에 `FailedMount`). 부트스트랩 3-1대로 만든다 |
+| kube-prometheus-stack 동기화가 `metadata.annotations: Too long`으로 실패한다 | Application의 `syncOptions`에서 `ServerSideApply=true`가 빠졌다(위 "모니터링") |
+| Discord로 알림이 오지 않는다 | Alertmanager UI(port-forward)에 그 경보가 있는지, 경로(위 "경보가 가는 길")에 맞는지 본다. `kubectl -n monitoring logs alertmanager-kube-prometheus-stack-alertmanager-0 -c alertmanager`에 notify 오류가 있으면 웹훅 주소 Secret을 확인한다(바꾸는 방법은 `infra/aws/README.md`) |
