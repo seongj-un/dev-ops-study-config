@@ -1,0 +1,19 @@
+# Terraform이 provider를 내려받아 두는 작업 디렉터리. init을 할 때마다 다시 생기므로 커밋하지 않는다.
+# (.terraform.lock.hcl은 다르다. provider의 정확한 버전과 해시를 고정하는 파일이라 커밋한다.)
+.terraform/
+
+# 로컬 state와 그 백업(terraform.tfstate, terraform.tfstate.backup 등).
+# 이 스택은 state를 둘 S3 버킷을 만드는 스택이라 state를 로컬에 둔다(이유는 versions.tf와 README).
+# state에는 리소스의 모든 속성이 평문으로 들어 있고, 이 파일은 저장소가 아니라 이 컴퓨터의 것이므로 git에 올리지 않는다.
+*.tfstate*
+
+# 값을 로컬에서 덮어쓰는 파일(예: 다른 알림 이메일). 저장소에는 variables.tf의 기본값만 둔다.
+*.tfvars
+*.tfvars.json
+
+# `terraform plan -out`으로 저장한 계획 파일. 계획에는 state와 같은 값이 들어 있다.
+*.tfplan
+
+# provider가 비정상 종료할 때 Terraform이 남기는 로그.
+crash.log
+crash.*.log

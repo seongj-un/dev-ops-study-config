@@ -37,9 +37,8 @@ spec:
       # Git에서 사라진 리소스를 클러스터에서도 지운다. 지워지는 것은 ArgoCD가 추적하는 리소스뿐이다: 손으로 만든 Secret(shortener-db)과 PostgreSQL의 PVC는 남는다.
       prune: true
       # 클러스터의 라이브 상태를 누가 손으로 바꿔도 Git의 내용으로 되돌린다. prod에서는 kubectl로 임시 조치한 것이 조용히 되돌려진다는 뜻이니 조치는 Git으로 한다.
-      # 지금 prod는 HPA를 끄고 파드 수를 Git의 replicaCount로 적으므로(environments/prod/values.yaml) kubectl scale로 파드 수를 바꿔도 되돌려진다.
-      # HPA를 다시 켜면(prod를 EC2로 옮기는 6단계) 차트가 Deployment에 replicas를 적지 않으므로(charts/shortener/templates/deployment.yaml),
-      # HPA가 파드를 늘려도 Git과 어긋난 것으로 보이지 않아 selfHeal이 HPA와 다투지 않는다.
+      # prod는 HPA가 켜져 있어(environments/prod/values.yaml) 차트가 Deployment에 replicas를 적지 않는다(charts/shortener/templates/deployment.yaml).
+      # 그래서 HPA가 파드를 늘려도 Git과 어긋난 것으로 보이지 않아 selfHeal이 HPA와 다투지 않는다.
       selfHeal: true
     syncOptions:
       # destination.namespace(shortener-prod)가 없으면 동기화할 때 만든다. 이미 있으면 건드리지 않는다(부트스트랩에서 Secret을 넣으려고 미리 만들어 둔 경우).
