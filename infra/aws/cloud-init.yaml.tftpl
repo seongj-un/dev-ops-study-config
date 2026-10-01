@@ -179,13 +179,19 @@ write_files:
     #  - 노드가 Ready이고 node.cloudprovider.kubernetes.io/uninitialized taint가 없다: 내장 클라우드 컨트롤러 매니저(CCM)를 쓰면 k3s가 kubelet을
     #    --cloud-provider=external로 띄워 kubelet이 노드를 처음 등록할 때 이 taint를 붙이고, CCM이 노드를 초기화해야 지운다.
     #  - k3s 서비스의 NRestarts(systemd가 Restart=로 다시 시작한 횟수)가 그동안 그대로다.
+    # 이 확인은 보장이 아니다: 5초 간격 6번은 25~30초 동안 안정했다는 것만 본다. 이미 초기화된 노드(재부팅 뒤)는 taint가 없고 Ready=True가
+    # 남아 있어서 사실상 /readyz와 NRestarts만 거르므로, 한 번 뜨면 그보다 오래 버티다 죽는 크래시 루프는 통과할 수 있다. 그러면 뒤 단계가
+    # 실패하고 systemd가 부트스트랩을 다시 시작한다.
+    # kubectl의 표준 오류는 값(표준 출력)에 섞이지 않게 $WORK/gate.err로 따로 받는다: 성공한 호출이 경고 한 줄만 내도 값 비교가 어긋나 확인이
+    # 영영 실패한다. 표준 오류는 실패 이유에만 쓴다. gate_why는 표준 출력($1)과 표준 오류 파일에서 비어 있지 않은 첫 줄을 200자까지 출력한다.
+    gate_why() { { printf '%s\n' "$1"; cat "$WORK/gate.err"; } | grep -m1 . | cut -c 1-200; }
     k3s_check() {
       local r
-      if ! r=$(kubectl get --raw=/readyz --request-timeout=5s 2>&1) || [ "$r" != ok ]; then
-        echo "/readyz: $(printf '%s' "$r" | head -n 1 | cut -c 1-200)"; return 1
+      if ! r=$(kubectl get --raw=/readyz --request-timeout=5s 2>"$WORK/gate.err") || [ "$r" != ok ]; then
+        echo "/readyz: $(gate_why "$r")"; return 1
       fi
-      if ! r=$(kubectl get nodes --request-timeout=5s -o jsonpath='{range .items[*]}{.metadata.name} Ready={.status.conditions[?(@.type=="Ready")].status} {.spec.taints[*].key}{"\n"}{end}' 2>&1); then
-        echo "노드 조회: $(printf '%s' "$r" | head -n 1 | cut -c 1-200)"; return 1
+      if ! r=$(kubectl get nodes --request-timeout=5s -o jsonpath='{range .items[*]}{.metadata.name} Ready={.status.conditions[?(@.type=="Ready")].status} {.spec.taints[*].key}{"\n"}{end}' 2>"$WORK/gate.err"); then
+        echo "노드 조회: $(gate_why "$r")"; return 1
       fi
       case $r in
         '') echo "등록된 노드가 없다"; return 1 ;;
@@ -239,8 +245,10 @@ write_files:
     #  - pending-install·pending-upgrade·pending-rollback: helm이 작업 도중 끊겼다(API가 끊김, 재부팅, 시간 초과). Helm은 마지막 리비전이
     #    pending이면 다른 작업이 진행 중이라 보고 upgrade를 거부하는데("another operation ... is in progress"), 그 helm이 이미 없어도 상태가
     #    남아 저절로 풀리지 않는다. failed(--wait 시간 초과 등)와 uninstalling(지우다 끊김)도 함께 정리한다.
-    #  - 정리: 성공했던 리비전(deployed, 또는 그 뒤에 밀려난 superseded)이 있으면 그 가운데 마지막 것으로 rollback한다. 돌고 있는 ArgoCD를
-    #    지우지 않고 마지막으로 성공한 설정으로 되돌린다(rollback은 pending 상태에서도 된다). 그런 리비전이 없으면(첫 설치가 끊기거나 실패했다)
+    #  - 정리: deployed 리비전이 있으면 그 가운데 마지막 것으로 rollback한다. 돌고 있는 ArgoCD를 지우지 않고 마지막으로 성공한 설정으로
+    #    되돌린다(rollback은 pending 상태에서도 된다). superseded는 한때 성공했다는 뜻이 아니라서 고르지 않는다: rollback의 적용이 실패하면 Helm이
+    #    rollback을 시작할 때의 마지막 리비전(pending이나 failed라 성공한 적 없다)을 superseded로 바꾼다. 성공한 install·upgrade·rollback은
+    #    deployed를 하나만 남기고, 실패한 upgrade·rollback은 이전 deployed를 그대로 둔다. deployed가 없으면(예: 첫 설치가 끊기거나 실패했다)
     #    uninstall한다: 되돌아갈 곳이 없으니 반쯤 만든 리소스를 지우고 첫 부팅과 같은 설치를 다시 한다. --wait는 지운 리소스가 실제로 사라질
     #    때까지 기다린다(지워지는 중인 같은 이름의 객체가 남아 있으면 설치가 실패한다). CRD는 차트가 남기게 표시해 둬서 지워지지 않는다.
     # 정리한 뒤 상태가 deployed가 아닐 때만 설치한다(rollback이 성공하면 이미 deployed다).
@@ -253,7 +261,7 @@ write_files:
     case $st in
       pending-install|pending-upgrade|pending-rollback|failed|uninstalling)
         rev=$(helm history argocd -n argocd -o json |
-          python3 -c 'import json, sys; print(max([r["revision"] for r in json.load(sys.stdin) if r["status"] in ("deployed", "superseded")], default=""))')
+          python3 -c 'import json, sys; print(max([r["revision"] for r in json.load(sys.stdin) if r["status"] == "deployed"], default=""))')
         if [ "$st" != uninstalling ] && [ -n "$rev" ]; then
           log "ArgoCD 릴리스가 $st: 성공했던 리비전 $rev(으)로 rollback"
           helm rollback argocd "$rev" -n argocd --wait --timeout 10m

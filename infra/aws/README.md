@@ -148,7 +148,7 @@ aws ssm get-command-invocation --region ap-northeast-2 --instance-id "$INSTANCE_
 
 - 인스턴스가 SSM에 등록되기 전(부팅 뒤 1~2분)에는 `send-command`가 `InvalidInstanceId`로 실패한다. 잠시 뒤 다시 한다.
 - 다른 명령도 같은 방법으로 보낸다. `--parameters`의 `commands` 목록만 바꾸고 나머지 두 줄은 그대로 쓴다. 명령은 root로 돈다.
-- 로그에는 단계마다 `STEP: <번호>/8 <이름>` 줄이 있어서 마지막 `STEP:`이 지금 단계다. `STEP: 4/8 k3s`와 `STEP: 6/8 ArgoCD`에서 오래 머무는 것은 정상이다(k3s 안정 확인이 최대 10분, `helm --wait`가 최대 10분 기다린다). k3s 안정 확인은 기다리는 이유가 바뀔 때마다 `대기: <이유>` 줄을 남긴다. 단계가 실패하면 `실패: STEP <단계>, <줄>번 줄, 종료 코드 <코드>: <명령>` 줄이 남는다(줄 번호는 인스턴스의 `/usr/local/sbin/devops-bootstrap` 기준).
+- 로그에는 단계마다 `STEP: <번호>/8 <이름>` 줄이 있어서 마지막 `STEP:`이 지금 단계다. `STEP: 4/8 k3s`와 `STEP: 6/8 ArgoCD`에서 오래 머무는 것은 정상이다(k3s 안정 확인이 최대 10분, ArgoCD 단계가 최대 약 25분이다: 끊긴 릴리스를 지우는 `uninstall` 5분, 설치의 `--timeout 10m`은 pre-install 훅 Job 대기와 리소스 대기에 따로 걸려 10분씩이다). k3s 안정 확인은 기다리는 이유가 바뀔 때마다 `대기: <이유>` 줄을 남긴다. 단계가 실패하면 `실패: STEP <단계>, <줄>번 줄, 종료 코드 <코드>: <명령>` 줄이 남는다(줄 번호는 인스턴스의 `/usr/local/sbin/devops-bootstrap` 기준).
 - `state:`와 `done:` 읽는 법:
 
 | 출력 | 뜻 |
@@ -271,7 +271,7 @@ terraform destroy \
 | 부트스트랩 로그에 `경고: DuckDNS 갱신 실패`가 있고 이름이 새 IP를 가리키지 않는다 | 토큰 파라미터가 없거나 이름·리전이 틀렸거나(`ParameterNotFound`), 토큰이나 서브도메인이 틀렸다(DuckDNS가 `KO`). `plan`·`apply`는 이것을 잡지 못한다. [준비물](#준비물) 4번의 `describe-parameters`로 파라미터를 확인한다. 오류 내용은 첫 실행분이 부트스트랩 로그에, 그 뒤 타이머 실행분이 `journalctl -u duckdns-update -n 20 --no-pager`에 있다. 고치면 타이머가 5분 안에 다시 갱신한다. |
 | 로그 끝이 `실패: STEP 2/8 AWS CLI, … gpgv …`이고 그 위에 `BAD signature` 또는 `Can't check signature: No public key`가 있다 | AWS CLI zip의 서명 검사가 실패했다. 내려받기가 깨진 것이면 systemd의 재시작에서 풀린다. `No public key`가 계속되면 AWS가 서명 키를 바꾼 것이다: [AWS CLI 설치 문서](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)의 공개 키 블록으로 `cloud-init.yaml.tftpl`의 `/etc/devops/aws-cli.asc`와 `test/container-checks.sh`의 지문을 고친다. `user_data`가 바뀌므로 인스턴스가 교체된다. |
 | 로그 끝이 `실패: k3s가 600초 안에 안정되지 않았다(마지막 이유: …)`다 | k3s가 뜨지 않거나 재시작을 되풀이한다. [k3s가 재시작을 되풀이할 때](#k3s가-재시작을-되풀이할-때)를 본다. |
-| 로그에 `ArgoCD 릴리스가 pending-install: uninstall하고 다시 설치`(또는 `… rollback`)가 있다 | 정상이다. 앞선 시도의 helm이 작업 도중 끊겨(k3s API가 끊김, 재부팅, 시간 초과) 릴리스가 `pending-*`나 `failed`로 남은 것을 6단계가 정리했다. Helm은 마지막 리비전이 `pending-*`이면 upgrade를 `another operation (install/upgrade/rollback) is in progress`로 거부하고, 그 helm이 이미 없어도 상태가 남아 저절로 풀리지 않는다. 그래서 성공했던 리비전(`deployed`, `superseded`)이 있으면 그리로 `rollback`하고, 없으면(첫 설치가 끊기거나 실패했다) `uninstall`한 뒤 다시 설치한다. 지워도 ArgoCD의 CRD는 남고(차트가 지우지 않게 표시해 둔다), 다시 설치할 때 그대로 이어받는다. 릴리스 기록은 `export HOME=/root KUBECONFIG=/etc/rancher/k3s/k3s.yaml` 뒤 `helm -n argocd history argocd`로 본다. |
+| 로그에 `ArgoCD 릴리스가 pending-install: uninstall하고 다시 설치`(또는 `… rollback`)가 있다 | 정상이다. 앞선 시도의 helm이 작업 도중 끊겨(k3s API가 끊김, 재부팅, 시간 초과) 릴리스가 `pending-*`나 `failed`로 남은 것을 6단계가 정리했다. Helm은 마지막 리비전이 `pending-*`이면 upgrade를 `another operation (install/upgrade/rollback) is in progress`로 거부하고, 그 helm이 이미 없어도 상태가 남아 저절로 풀리지 않는다. 그래서 `deployed` 리비전이 있으면 그 가운데 마지막 것으로 `rollback`하고, 없으면(예: 첫 설치가 끊기거나 실패했다) `uninstall`한 뒤 다시 설치한다. `superseded`는 한때 성공했다는 뜻이 아니라서 고르지 않는다: `rollback`의 적용이 실패하면 Helm이 `rollback`을 시작할 때의 마지막 리비전(`pending-*`나 `failed`라 성공한 적 없다)을 `superseded`로 바꾼다. 성공한 install·upgrade·rollback은 `deployed`를 하나만 남기고, 실패한 upgrade·rollback은 이전 `deployed`를 그대로 둔다. 지워도 ArgoCD의 CRD는 남고(차트가 지우지 않게 표시해 둔다), 다시 설치할 때 그대로 이어받는다. 릴리스 기록은 `export HOME=/root KUBECONFIG=/etc/rancher/k3s/k3s.yaml` 뒤 `helm -n argocd history argocd`로 본다. |
 | 로그 끝이 `실패: STEP 6/8 ArgoCD, …`이고 그 위에 `another operation (install/upgrade/rollback) is in progress`가 있다 | 6단계가 릴리스 상태를 본 뒤에 다른 helm 작업이 시작됐다. 부트스트랩은 잠금으로 한 번에 하나만 돌므로 손으로 돌린 helm이 겹친 것이다. 그 작업이 끝나면 systemd의 재시도(90초 뒤)가 이어서 한다. |
 | `kubectl get pods -A`에 `ErrImagePull`이나 `ImagePullBackOff`가 있고 `kubectl describe pod`의 이벤트에 `toomanyrequests`가 보인다 | Docker Hub가 로그인하지 않은 내려받기를 IP마다 횟수로 제한한다. Docker Hub에서 받는 것은 k3s 기본 구성 요소(`rancher/...`: Traefik, CoreDNS 등)와 앱의 PostgreSQL·Redis다(ArgoCD 이미지는 quay.io와 ECR Public이라 무관하다). 기다리면 된다: 제한이 풀리면 kubelet이 다시 받아 저절로 뜬다. |
 | [진행 확인](#진행-확인)의 상태가 `state: failed`다 | 3시간 안에 10번 시작해 모두 실패해서 systemd가 재시작을 멈췄다. 로그의 마지막 `STEP:`·`실패:` 줄로 원인을 고친 뒤 [실패한 부트스트랩 다시 돌리기](#실패한-부트스트랩-다시-돌리기)의 명령을 쓴다(`systemctl reset-failed`가 먼저다). |
@@ -300,16 +300,19 @@ terraform destroy \
 | 이유 | 뜻 |
 |---|---|
 | `k3s가 다시 시작됐다(NRestarts a -> b)` | k3s 프로세스가 죽고 있다. 원인은 `journalctl -u k3s -n 100 --no-pager`에 있다 |
-| `CCM이 아직 노드를 초기화하지 않았다: …` | k3s 안의 CCM이 노드를 초기화하지 못했다. `journalctl -u k3s --no-pager \| grep -i cloud-controller`로 본다 |
 | `/readyz: …` | API 서버가 아직 준비되지 않았거나(시작 직후) 내려가 있다 |
+| `노드 조회: …` | `kubectl get nodes`가 실패했다. 대개 `/readyz`를 통과한 API 서버가 그 사이 내려갔거나 5초 안에 답하지 않은 것이다 |
+| `등록된 노드가 없다` | 노드 조회는 됐는데 Node가 하나도 없다. kubelet이 노드를 처음 등록하기 전이다 |
+| `CCM이 아직 노드를 초기화하지 않았다: …` | k3s 안의 CCM이 노드를 초기화하지 못했다. `journalctl -u k3s --no-pager \| grep -i cloud-controller`로 본다 |
+| `Ready가 아닌 노드가 있다: …` | 노드의 `Ready` 조건이 `True`가 아니다(`False`나 `Unknown`). `…`에 노드 이름·`Ready` 값·taint가 나온다 |
 
 2026-10-01 첫 부팅(`v1.35.5+k3s1`)이 이 경우였다. k3s에 들어 있는 CCM이 쓸 권한이 아직 없을 때 configmap `extension-apiserver-authentication`을 읽다가 forbidden을 받고 끝났고, k3s는 그 컨트롤러가 끝나면 프로세스 전체를 끝내서 재시작이 되풀이됐다(인스턴스를 띄우고 12분 뒤 `NRestarts` 59).
 업스트림 이슈 [k3s-io/k3s#7328](https://github.com/k3s-io/k3s/issues/7328)이고 [PR #14201](https://github.com/k3s-io/k3s/pull/14201)로 고쳐져 `v1.35.6+k3s1`부터 들어 있어서, 그 수정이 든 가장 새 안정 v1.35 릴리스인 `v1.35.8+k3s1`(2026-08-27)로 올렸다. 같은 버전의 로컬 k3d(맥)에서는 나지 않았다: 시간 순서에 달린 경쟁이라 빠른 맥에서는 권한이 먼저 생기고, 2 vCPU EC2에서는 CCM이 먼저 읽었다.
 
 ## 이 스택의 설계 메모
 
-- **`user_data`는 gzip으로 압축해서 넘긴다**(`user_data_base64 = base64gzip(...)`). EC2는 user data를 base64로 바꾸기 전 바이트 기준 16 KiB까지만 받는다. 렌더링한 cloud-init은 한글 주석(UTF-8에서 글자당 3바이트), AWS CLI 서명 키, 스크립트가 들어가서 원문이 이미 한도를 넘는다(2026-10-01 기준 약 27.9 KB).
-  압축하면 약 12.5 KB이고 한도는 이 압축본에 걸린다. `test/render.sh`가 Terraform과 같은 식으로 압축본을 만들어 크기를 검사하고, cloud-init의 함수로 풀어 원문과 같은지도 본다. cloud-init은 gzip으로 압축된 user data를 스스로 풀어서 처리한다. `plan`에서 `user_data_base64`가 긴 base64 문자열로 보이는 것은 정상이다.
+- **`user_data`는 gzip으로 압축해서 넘긴다**(`user_data_base64 = base64gzip(...)`). EC2는 user data를 base64로 바꾸기 전 바이트 기준 16 KiB까지만 받는다. 렌더링한 cloud-init은 한글 주석(UTF-8에서 글자당 3바이트), AWS CLI 서명 키, 스크립트가 들어가서 원문이 이미 한도를 넘는다(2026-10-01 기준 약 29.1 KB).
+  압축하면 약 12.9 KB이고 한도는 이 압축본에 걸린다. `test/render.sh`가 Terraform과 같은 식으로 압축본을 만들어 크기를 검사하고, cloud-init의 함수로 풀어 원문과 같은지도 본다. cloud-init은 gzip으로 압축된 user data를 스스로 풀어서 처리한다. `plan`에서 `user_data_base64`가 긴 base64 문자열로 보이는 것은 정상이다.
   다만 압축 결과의 바이트는 Terraform을 빌드한 Go 버전에 따라 달라질 수 있다. Terraform을 올린 뒤 살아 있는 인스턴스에 `plan`하면 내용이 같아도 교체가 제안될 수 있다. 그 교체는 `apply`하지 말고 그 세션이 끝난 뒤 `destroy`한다.
 - **`user_data_replace_on_change = true`.** cloud-init은 첫 부팅 때 한 번만 실행해서, `user_data`만 바꾸면 바뀐 스크립트가 실행되지 않은 채 반영된 것처럼 보인다. 교체하면 항상 현재 코드가 만든 그대로 부팅한다.
 - **설치는 cloud-init이 아니라 systemd 서비스가 한다.** cloud-init의 `write_files`·`runcmd`는 인스턴스의 첫 부팅에만 돈다. 그래서 cloud-init은 파일을 쓰고 `devops-bootstrap.service`를 켜기만 하고, 그 서비스가 부팅마다 돌며 이미 된 단계는 건너뛴다. 실패하면 systemd가 90초 뒤 다시 시작한다(3시간 안에 10번까지).
