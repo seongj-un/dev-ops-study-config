@@ -80,3 +80,11 @@ postgresql:
       memory: 256Mi
     limits:
       memory: 512Mi
+# 관측(4단계): 이 릴리스의 메트릭 수집(ServiceMonitor)과 SLO 규칙·알림(PrometheusRule)을 켠다. SLO 목표(가용성 99.5%, 요청의 99%가 0.3초 안)는 차트 기본값을 쓴다.
+# 둘 다 kube-prometheus-stack이 설치하는 CRD라서, CRD가 아직 없는 새 클러스터에서는 차트가 만들지 않고 CRD가 생긴 뒤 ArgoCD가 다시 렌더링할 때 추가된다
+# (차트 templates/prometheusrule.yaml 머리말의 [조건부 생성]).
+metrics:
+  serviceMonitor:
+    enabled: true
+slo:
+  enabled: true
