@@ -31,7 +31,7 @@ jobs:
     # 기본 타임아웃은 360분이다. 멈춘 잡(예: 스키마 내려받기 대기)이 러너를 오래 붙잡지 않게 상한을 둔다.
     timeout-minutes: 10
     env:
-      # 검증 기준이 되는 쿠버네티스 버전. 클러스터의 k3s(v1.35.5)와 같은 마이너 버전이다. helm이 .Capabilities와 차트의 kubeVersion 조건을 평가할 때와
+      # 검증 기준이 되는 쿠버네티스 버전. 클러스터의 k3s(v1.35.8)와 같은 마이너 버전이다. helm이 .Capabilities와 차트의 kubeVersion 조건을 평가할 때와
       # kubeconform이 스키마를 고를 때 같은 값을 쓰게 한다(ArgoCD도 helm template에 클러스터의 버전을 넘긴다).
       KUBERNETES_VERSION: 1.35.0
       # kubeconform 이미지: 태그@다이제스트로 고정한다(다이제스트가 실제로 가리키는 이미지이고, 태그는 사람이 읽으라고 남긴 표시다). 멀티 아키텍처 인덱스의 다이제스트다.

@@ -27,7 +27,7 @@ locals {
     aws_region           = "ap-northeast-2"
     duckdns_subdomain    = "$EXPECT_SUB"
     ssm_parameter_name   = "/dev-ops-study/duckdns-token"
-    k3s_version          = "v1.35.5+k3s1"
+    k3s_version          = "v1.35.8+k3s1"
     helm_version         = "v4.3.0"
     argocd_chart_version = "10.9.4"
     argocd_values        = file("$repo/bootstrap/argocd/values.yaml")

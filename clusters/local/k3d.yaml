@@ -10,7 +10,9 @@ metadata:
 servers: 1
 agents: 0
 # k3s 버전을 고정한다. 버전을 올릴 때는 이 줄을 바꾸고 클러스터를 다시 만든다
-image: rancher/k3s:v1.35.5-k3s1
+# EC2(infra/aws/variables.tf의 k3s_version)와 같은 버전이다. v1.35.5는 EC2 첫 부팅에서 내장 cloud-controller-manager가 RBAC 경쟁에 져서
+# k3s가 재시작을 되풀이했다(k3s#7328, v1.35.6+k3s1에서 고쳐짐). 이 맥에서는 그 경쟁을 이겨서 드러나지 않았지만 같은 버전으로 맞춰 올렸다
+image: rancher/k3s:v1.35.8-k3s1
 ports:
   # 맥의 8090 포트 → k3d 로드밸런서 → 노드의 80 포트(Traefik). docker compose 스택(8080)과 겹치지 않게 8090을 쓴다
   - port: 8090:80

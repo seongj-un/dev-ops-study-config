@@ -287,7 +287,7 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | kubeconform | v0.8.0 (태그@다이제스트) | `validate.yml`의 `KUBECONFORM_IMAGE` |
 | 쿠버네티스 내장 리소스 스키마 | yannh/kubernetes-json-schema 커밋 `8df8a88`(2026-09-29의 최신 커밋) | `validate.yml`의 `K8S_SCHEMA_LOCATION` |
 | Argo CRD 스키마 | datreeio/CRDs-catalog 커밋 `d373c2d`(Argo CD 3.5.0 CRD 기준) | `validate.yml`의 `CRD_SCHEMA_LOCATION` |
-| 검증 기준 쿠버네티스 | 1.35.0 (클러스터는 k3s v1.35.5) | `validate.yml`의 `KUBERNETES_VERSION`, `clusters/local/k3d.yaml` |
+| 검증 기준 쿠버네티스 | 1.35.0 (클러스터는 k3s v1.35.8) | `validate.yml`의 `KUBERNETES_VERSION`, `clusters/local/k3d.yaml` |
 
 액션은 Dependabot이 SHA와 버전 주석을 함께 올려 준다. 나머지는 손으로 올린다(`.github/dependabot.yml` 참고).
 

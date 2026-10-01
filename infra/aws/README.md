@@ -58,7 +58,7 @@ Terraform이 만드는 리소스는 15개다: VPC, IGW, 서브넷, 라우트 테
 | `admin_cidr` | (필수) | k3s API(6443)에 접속할 내 IP. 반드시 `/32` |
 | `region` | `ap-northeast-2` | 리소스를 만들 리전 |
 | `instance_type` | `m7i-flex.large` | 2 vCPU, 8 GiB. Free Tier 대상 유형이지만 이 계정은 유료 플랜이라 시간당 과금된다([비용](#비용)) |
-| `k3s_version` | `v1.35.5+k3s1` | 로컬 k3d와 같은 버전 |
+| `k3s_version` | `v1.35.8+k3s1` | 로컬 k3d와 같은 버전. v1.35.5+k3s1은 EC2 첫 부팅에서 k3s가 재시작을 되풀이해서 올렸다(`variables.tf`의 주석) |
 | `helm_version` | `v4.3.0` | ArgoCD 설치에만 쓰는 도구 |
 | `argocd_chart_version` | `10.9.4` | `bootstrap/argocd/values.yaml`이 가정하는 차트 버전 |
 | `duckdns_token_parameter` | `/dev-ops-study/duckdns-token` | 토큰을 담은 SSM 파라미터 이름(`/`로 시작) |
