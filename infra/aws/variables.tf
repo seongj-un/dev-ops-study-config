@@ -42,12 +42,18 @@ variable "instance_type" {
 variable "k3s_version" {
   description = "설치할 k3s 버전(INSTALL_K3S_VERSION에 들어가는 형식). 로컬 k3d 클러스터와 같은 버전이다."
   type        = string
-  default     = "v1.35.5+k3s1"
+  default     = "v1.35.8+k3s1"
 
+  # v1.35.5+k3s1에서 올린 이유: 그 버전으로 띄운 EC2의 첫 부팅(2026-10-01)에서 k3s가 처음부터 재시작을 되풀이했다(인스턴스를 띄우고 12분 뒤 NRestarts 59).
+  # k3s에 들어 있는 cloud-controller-manager(CCM)가 RBAC 경쟁에서 졌다: CCM이 쓸 권한이 아직 없을 때 configmap extension-apiserver-authentication을
+  # 읽다가 forbidden을 받고 끝났고, k3s는 그 컨트롤러가 끝나면 프로세스 전체를 끝낸다(systemd가 다시 띄우면 같은 일이 되풀이된다).
+  # 업스트림 이슈 k3s-io/k3s#7328("cloud-controller-manager exited")이고, PR #14201("Fix cloud-controller-manager exiting due to missing core RBAC")로
+  # 고쳐져 v1.35.6+k3s1부터 들어 있다. v1.35.8+k3s1(2026-08-27)은 그 수정이 든 가장 새 안정 v1.35 릴리스다(2026-10-01 기준).
+  # 같은 버전의 로컬 k3d(맥)에서는 나지 않았다: 시간 순서에 달린 경쟁이라 빠른 맥에서는 권한이 먼저 생기고, 2 vCPU EC2에서는 CCM이 먼저 읽었다.
   # 이 값은 부팅 중에 k3s 설치 스크립트의 버전 지정(INSTALL_K3S_VERSION)으로 쓰인다. 형식이 틀리면 설치가 부팅 중에 실패하고, 그걸 알게 되는 것은 몇 분 뒤다.
   validation {
     condition     = can(regex("^v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.]+)?\\+k3s[0-9]+$", var.k3s_version))
-    error_message = "k3s_version은 v1.35.5+k3s1 같은 형식이어야 한다."
+    error_message = "k3s_version은 v1.35.8+k3s1 같은 형식이어야 한다."
   }
 }
 
