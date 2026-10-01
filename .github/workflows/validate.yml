@@ -93,6 +93,9 @@ jobs:
 
       # --strict: 경고도 실패로 취급한다. 값 파일(environments/<환경>/values.yaml)을 넘기는 이유는 image.tag와 DB Secret 이름이 차트의 필수 값이라
       # 값 없이 lint하면 템플릿이 안내 메시지와 함께 실패하기 때문이다. 그 값 파일이 차트 검증(태그가 커밋 SHA 40자인가 등)을 통과하는지도 함께 확인된다.
+      # 차트의 ServiceMonitor·PrometheusRule은 여기서 렌더링되지 않는다. 두 템플릿은 클러스터에 그 CRD가 있을 때(.Capabilities.APIVersions)만 만들어지는데,
+      # helm lint에는 API 목록을 더하는 --api-versions 옵션이 없어서 CRD가 없는 클러스터처럼 렌더링한다(템플릿 문법 오류는 파일을 읽을 때 걸린다).
+      # 두 템플릿의 내용은 다음 단계(렌더링 + 스키마 검사)와 그다음 단계(promtool)가 검사한다.
       - name: 차트 lint (dev, prod)
         run: |
           for environment in dev prod; do
@@ -107,6 +110,12 @@ jobs:
       # kubeconform 옵션: -strict는 스키마에 없는 필드와 중복된 키를 오류로 본다(오타를 잡는다). -kubernetes-version은 그 버전의 스키마로 검사한다.
       # -schema-location은 위에서 커밋 SHA로 고정한 내장 리소스 스키마 위치(K8S_SCHEMA_LOCATION)다. 이 옵션을 주면 기본 위치(master 브랜치)는 쓰이지 않는다.
       # 렌더링 결과에는 helm test용 파드도 들어 있어서 함께 검사된다(ArgoCD는 그 파드를 배포하지 않는다).
+      # --api-versions: 클러스터에 있다고 칠 API를 더한다. ServiceMonitor·PrometheusRule 템플릿은 .Capabilities.APIVersions.Has "monitoring.coreos.com/v1/<Kind>"가
+      # 참일 때만 렌더링되는데(CRD가 아직 없는 새 클러스터에서 동기화가 실패하지 않게 하는 조건, 차트 templates/prometheusrule.yaml 머리말),
+      # Has는 목록의 문자열과 글자 그대로 비교하므로 그룹/버전(monitoring.coreos.com/v1)만 넣으면 거짓이다. ArgoCD는 클러스터의 API를 그룹/버전과 그룹/버전/Kind
+      # 두 형태로 모두 넘기므로, 여기서도 둘 다 넣어 kube-prometheus-stack이 설치된 클러스터에서 ArgoCD가 렌더링하는 것과 같은 결과를 만든다.
+      # 그 두 리소스는 CRD라서 내장 리소스 스키마에 없다. 두 번째 -schema-location은 아래 ArgoCD Application 검사도 쓰는 CRD_SCHEMA_LOCATION(커밋 SHA로 고정한 CRD 스키마 모음)이고,
+      # 그 커밋에 monitoring.coreos.com/servicemonitor_v1.json과 prometheusrule_v1.json이 있다. kubeconform은 -schema-location을 적은 순서대로 찾아 처음 찾은 스키마를 쓴다.
       - name: 렌더링 + 쿠버네티스 스키마 검사 (dev, prod)
         run: |
           for environment in dev prod; do
@@ -114,13 +123,46 @@ jobs:
             helm template "shortener-$environment" charts/shortener \
               --namespace "shortener-$environment" \
               --kube-version "$KUBERNETES_VERSION" \
+              --api-versions monitoring.coreos.com/v1 \
+              --api-versions monitoring.coreos.com/v1/ServiceMonitor \
+              --api-versions monitoring.coreos.com/v1/PrometheusRule \
               -f "environments/$environment/values.yaml" > "$RUNNER_TEMP/$environment.yaml"
             docker run -i --rm "$KUBECONFORM_IMAGE" \
               -strict -summary \
               -schema-location "$K8S_SCHEMA_LOCATION" \
+              -schema-location "$CRD_SCHEMA_LOCATION" \
               -kubernetes-version "$KUBERNETES_VERSION" - < "$RUNNER_TEMP/$environment.yaml"
             echo "::endgroup::"
           done
+
+      # 차트의 SLO 규칙(PrometheusRule)을 Prometheus의 도구 promtool로 검사한다. kubeconform은 리소스의 모양만 보고 그 안의 PromQL은 문자열로만 본다.
+      #   1) 위 단계의 렌더링 결과에서 yq로 PrometheusRule의 spec만 꺼내 tests/slo/rendered/<릴리스>.yaml에 쓴다. spec(groups)이 곧 Prometheus 규칙 파일의 형식이다.
+      #      환경마다 PrometheusRule이 정확히 하나여야 한다. 없으면 값 파일에서 slo가 꺼졌거나 위 --api-versions 조건이 깨진 것이라 실패시킨다.
+      #   2) promtool check rules: YAML 구조, PromQL 문법, 어노테이션의 템플릿 문법, 같은 규칙의 중복을 검사한다(--lint-fatal: 중복 경고도 실패로 본다).
+      #   3) promtool test rules: tests/slo/shortener-slo.test.yaml이 가짜 시계열을 넣고, 정한 시각에 울려야 할 알림과 울리지 않아야 할 알림을 확인한다
+      #      (5xx 100%, 5xx 0.1%, 20%가 느린 요청, 요청 없음, 5xx 4%의 느린 소진). 테스트 파일은 rendered/의 두 환경 규칙을 함께 읽는다.
+      # promtool은 클러스터의 Prometheus와 같은 버전을 쓴다(v3.15.0: kube-prometheus-stack 91.8.2가 띄우는 버전. 클러스터는 같은 버전의 distroless 변형을 quay.io에서 받는다).
+      # 규칙 문법과 PromQL 함수는 Prometheus 버전마다 다를 수 있어서다. kube-prometheus-stack을 올리면 그 차트의 Prometheus 이미지 태그에 맞춰 이 값도 올린다.
+      # 태그@다이제스트(멀티 아키텍처 인덱스)로 고정하는 방식과 이유는 KUBECONFORM_IMAGE와 같고(docker.io와 quay.io의 다이제스트가 같다), 같은 이유로 Dependabot이 갱신해 주지 않는다.
+      # promtool은 파일을 읽기만 하므로 tests/slo를 읽기 전용으로 마운트한다.
+      - name: SLO 규칙 검사 (promtool check + test)
+        env:
+          PROMETHEUS_IMAGE: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+        run: |
+          mkdir -p tests/slo/rendered
+          for environment in dev prod; do
+            rendered="$RUNNER_TEMP/$environment.yaml"
+            count="$(yq ea '[select(.kind == "PrometheusRule")] | length' "$rendered")"
+            if [ "$count" != 1 ]; then
+              echo "::error::shortener-${environment}의 렌더링 결과에 PrometheusRule이 ${count}개 있다(1개여야 한다)"
+              exit 1
+            fi
+            yq 'select(.kind == "PrometheusRule") | .spec' "$rendered" > "tests/slo/rendered/shortener-$environment.yaml"
+          done
+          docker run --rm -v "$GITHUB_WORKSPACE/tests/slo:/slo:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
+            check rules --lint-fatal /slo/rendered/shortener-dev.yaml /slo/rendered/shortener-prod.yaml
+          docker run --rm -v "$GITHUB_WORKSPACE/tests/slo:/slo:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
+            test rules /slo/shortener-slo.test.yaml
 
       # argocd/ 아래의 Application 매니페스트(루트와 dev·prod)를 스키마로 검사한다. 내장 리소스는 위 K8S_SCHEMA_LOCATION(고정한 기본 스키마)에서,
       # Application은 위 CRD 스키마 모음에서 찾는다. 찾지 못하면 통과시키지 않고 실패한다(-ignore-missing-schemas를 쓰지 않았다).
