@@ -295,6 +295,8 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 - **Grafana 관리자 Secret은 부트스트랩이 만든다**: 차트가 만들게 두면 ArgoCD가 렌더링할 때마다 무작위 비밀번호가 새로 나와 늘 OutOfSync가 된다.
 - **ServiceMonitor·PrometheusRule을 레이블 없이 모든 네임스페이스에서 고른다**(`*SelectorNilUsesHelmValues: false`): 앱 차트가 만드는 것에 이 릴리스의 `release` 레이블을 붙이지 않아도 된다.
 - **보존 3일·4GB**(PVC 5Gi, local-path): 인스턴스를 공부하는 동안만 띄우고 없애서 30일 오류 예산을 셀 만큼 쌓이지 않는다. 그래서 SLO는 소진 속도(burn rate)와 1h·6h·1d 가용성으로 본다.
+- **node-exporter도 hostNetwork 없이**: 노드의 네트워크를 같이 쓰는 파드는 IMDSv2의 홉 제한 1에 걸리지 않아 인스턴스 역할(SSM의 DuckDNS 토큰·Discord 웹훅 주소를 읽는다)을 얻을 수 있다.
+  이 클러스터는 hostNetwork 파드를 띄우지 않는다(`infra/aws/README.md`). 대가로 node-exporter의 네트워크 지표는 노드가 아니라 그 파드의 네트워크를 보인다(CPU·메모리·디스크는 그대로).
 - 자세한 이유는 `platform/kube-prometheus-stack/values.yaml`과 `argocd/apps/kube-prometheus-stack.yaml`의 주석에 있다.
 
 ## 메모리 메모
