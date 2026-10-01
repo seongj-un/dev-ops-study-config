@@ -10,7 +10,7 @@
 #   - validate.yml의 setup-helm 입력 version(Helm 버전), KUBECONFORM_IMAGE(kubeconform 태그@다이제스트), K8S_SCHEMA_LOCATION·CRD_SCHEMA_LOCATION과
 #     플랫폼 차트 단계의 K8S_LOCAL_SCHEMA_LOCATION(스키마 모음의 커밋 SHA) (액션의 입력값과 env 값이라 github-actions 생태계가 읽지 않는다)
 #   - bootstrap/argocd/values.yaml과 README의 ArgoCD 차트 버전
-#   - argocd/apps/kube-prometheus-stack.yaml의 차트 버전(targetRevision. 외부 Helm 차트 저장소라 Dependabot이 보지 않는다)
+#   - argocd/apps의 외부 차트 버전(kube-prometheus-stack·loki·alloy의 targetRevision. 외부 Helm 차트 저장소라 Dependabot이 보지 않는다)
 #   - charts/shortener/values.yaml의 PostgreSQL·Redis·busybox 이미지(태그@다이제스트). Helm 생태계는 설정하지 않았다.
 version: 2
 updates:
