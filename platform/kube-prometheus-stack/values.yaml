@@ -44,14 +44,15 @@ prometheusOperator:
     # PrometheusRule을 적용할 때 미리 검사하는 Operator의 어드미션 웹훅을 끈다. 켜 두면 차트가 Helm 훅 Job 두 개로 자체 서명 인증서 Secret을 만들고
     # 웹훅 설정(Validating·MutatingWebhookConfiguration)의 caBundle을 클러스터에서 직접 고쳐 쓴다. Git에 없는 값이 Job으로 들어가는 구조이고,
     # ArgoCD는 설치와 업그레이드를 구분하지 못해 이 훅 Job들을 동기화할 때마다 PreSync·PostSync로 다시 돌린다.
-    # 꺼도 잘못된 규칙은 Operator가 Prometheus 설정에 넣지 않고 건너뛰고(Operator 로그), 앱 차트의 SLO 규칙은 CI의 promtool이 머지 전에 검사한다.
+    # 꺼도 잘못된 규칙은 Operator가 Prometheus 설정에 넣지 않고 건너뛰고(Operator 로그의 "skipping prometheusrule", 그 PrometheusRule의 Warning 이벤트),
+    # 앱 차트의 SLO 규칙은 CI의 promtool이 머지 전에 검사한다.
     enabled: false
   tls:
     # Operator 자신의 HTTPS(웹훅 요청을 받는 포트)도 끈다. 켜 두면 Operator 파드가 위 훅 Job이 만드는 인증서 Secret(kube-prometheus-stack-admission)을
     # 볼륨으로 붙이는데, 웹훅을 끄면 그 Secret이 생기지 않아 파드가 ContainerCreating에 머문다. 끄면 Operator는 HTTP 8080으로 지표를 내놓는다.
     enabled: false
   # Operator: Prometheus·Alertmanager 리소스를 보고 StatefulSet과 설정 Secret을 만들고, ServiceMonitor·PrometheusRule을 모아 Prometheus 설정으로 바꾼다.
-  # 클러스터의 Secret·ConfigMap 등을 감시하는 캐시가 메모리의 대부분이다. 차트가 GOGC=30을 넣어 GC를 자주 돌린다.
+  # 메모리는 감시하는 리소스(Secret·ConfigMap·StatefulSet·자기 CR 등)의 캐시 크기에 따라 는다. 차트가 GOGC=30을 넣어 GC를 자주 돌린다.
   resources:
     requests:
       cpu: 20m
@@ -98,7 +99,8 @@ prometheus:
           resources:
             requests:
               storage: 5Gi
-    # 메모리는 활성 시계열 수에 비례한다(최근 약 2시간치를 head 블록으로 메모리에 들고 있다). 요청 512Mi는 이 규모에서 예상하는 평소 사용량이다(추정).
+    # 메모리는 주로 활성 시계열 수에 비례한다(시계열마다 최근 데이터를 담는 head 블록의 색인과 지금 채우는 청크를 메모리에 둔다. 다 찬 청크는 디스크에 쓰고 mmap으로 읽는다).
+    # 요청 512Mi는 이 규모에서 예상하는 평소 사용량이다(추정).
     # 한도 1Gi는 재시작할 때 WAL을 다시 읽는 동안과 긴 창([1d]~[30d])을 읽는 기본 규칙을 평가할 때 늘어나는 몫을 둔 것이다.
     resources:
       requests:
@@ -172,7 +174,7 @@ grafana:
   # 데이터 소스는 차트가 만드는 ConfigMap에서 오므로 DB가 지워져도 다시 만들어진다. UI에서 손으로 바꾼 것(저장한 대시보드, 사용자 설정)은 파드가 다시 뜨면 사라진다.
   persistence:
     enabled: false
-  # 사이드카가 ConfigMap·Secret을 읽는 권한. 하위 차트 기본값(false)은 ClusterRole이라 클러스터의 모든 Secret(다른 네임스페이스의 DB 비밀번호 포함)을 읽을 수 있다.
+  # 사이드카가 ConfigMap·Secret을 읽는 권한. 하위 차트 기본값(namespaced: false)은 ClusterRole을 만들어 클러스터의 모든 Secret(다른 네임스페이스의 DB 비밀번호 포함)을 읽게 한다.
   # 사이드카는 monitoring 네임스페이스만 보므로(아래 searchNamespace) 그 네임스페이스의 Role로 줄인다.
   rbac:
     namespaced: true
