@@ -198,14 +198,17 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 
 | 컴포넌트 | CPU 요청 | 메모리 요청 | 메모리 한도 |
 |---|---|---|---|
-| application-controller (StatefulSet) | 50m | 128Mi | 512Mi |
+| application-controller (StatefulSet) | 50m | 384Mi | 1024Mi |
 | repo-server | 25m | 96Mi | 512Mi |
 | server | 25m | 64Mi | 192Mi |
 | redis | 10m | 16Mi | 64Mi |
-| **합계** | **110m** | **304Mi** | **1280Mi** |
+| **합계** | **110m** | **560Mi** | **1792Mi** |
 
 - application-controller·repo-server의 메모리 한도는 4단계에서 256Mi에서 512Mi로 올렸다. kube-prometheus-stack은 CRD가 커서(가장 큰 것이 JSON으로 약 486KiB)
   컨트롤러가 캐시에 들고 있는 양이 늘고, repo-server 안에서 도는 `helm pull`·`helm template`이 이 차트에서 최대 RSS를 각각 195MiB·134MiB까지 쓴다(로컬에서 잰 값과 계산은 `bootstrap/argocd/values.yaml`).
+  컨트롤러에게는 그 추정이 모자랐다: EC2의 새 인스턴스에서 kube-prometheus-stack을 처음 동기화하는 동안 OOMKilled로 3번 죽었고(다음에 뜬 인스턴스의 기동 중 최고가 509.3MiB로 한도의 99%, 평소는 294~421MiB),
+  그래서 컨트롤러를 요청 384Mi(평소 사용량 가까이)·한도 1Gi(잰 최고치의 두 배)로 다시 올렸다. repo-server의 초기화 컨테이너 `copyutil`도 한도 128Mi에서 OOM이 한 번 나서(복사하는 실행 파일이 약 238MiB) 512Mi로 올렸다.
+  초기화 컨테이너는 앱 컨테이너보다 먼저 돌고 끝나므로 위 표의 합계에는 넣지 않는다. 근거와 잰 값은 `bootstrap/argocd/values.yaml`의 주석에 있다.
   EC2에서는 부트스트랩이 ArgoCD가 이미 설치돼 있으면 건너뛰므로, 이 값은 인스턴스를 새로 만들 때 적용된다. 떠 있는 클러스터에 바로 넣으려면
   부트스트랩 2번의 `helm upgrade --install`을 다시 돌린다(EC2에서는 위에 적은 대로 `--set server.ingress.enabled=false`도 함께 준다).
 
@@ -216,7 +219,7 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 - **applicationset**: Deployment는 있지만 `replicas: 0`이라 파드가 없다. 이 차트에는 ApplicationSet 컨트롤러를 끄는 스위치가 없고 항상 만들기 때문이다(차트 6.9.0부터, 차트 README의 변경 이력).
   Application을 손으로 적는 이 저장소에서는 쓸 일이 없고, 파드가 없어 메모리를 쓰지 않는다.
 
-- CPU 한도는 두지 않는다(앱 차트와 같은 이유: CFS 쿼터 스로틀링). 위 값은 클러스터에서 측정한 것이 아니라 작은 규모를 가정한 추정이다. 띄운 뒤 `kubectl top pods -n argocd`로 확인한다.
+- CPU 한도는 두지 않는다(앱 차트와 같은 이유: CFS 쿼터 스로틀링). 위 값은 대부분 클러스터에서 측정한 것이 아니라 작은 규모를 가정한 추정이다(application-controller와 `copyutil`은 EC2에서 잰 값으로 고쳤다). 띄운 뒤 `kubectl top pods -n argocd`로 확인한다.
 - 설치·업그레이드 때만 도는 것이 따로 있다: redis 비밀번호 Secret을 만드는 Job(`redis-secret-init`, 끝나면 60초 뒤 지워진다)과 repo-server의 초기화 컨테이너(`copyutil`).
 - `server.insecure: true`: TLS를 끝내는 곳이 없어서 서버가 평문 HTTP로만 받는 구성이다(로컬 k3d에서는 브라우저 → Traefik → 서버가 모두 평문 HTTP). 그래서 인터넷에 공개하면 안 되고, EC2에서는 Ingress 없이 port-forward로만 본다.
 - ArgoCD 자신은 이 저장소의 Application으로 관리하지 않는다. 설치·업그레이드는 위 `helm upgrade --install` 명령으로 한다.
@@ -314,18 +317,19 @@ JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 `-XX:Max
 | | 요청 합 | 한도 합 |
 |---|---|---|
 | k3s와 기본 구성요소 (Traefik 등. 사용량으로 잡은 값) | 약 800Mi | 약 800Mi |
-| ArgoCD (파드 4개. 4단계에서 컨트롤러·repo-server 한도를 512Mi로 올렸다) | 304Mi | 1280Mi |
+| ArgoCD (파드 4개. 4단계에서 repo-server 한도를 512Mi로, 컨트롤러 요청·한도를 384Mi·1024Mi로 올렸다) | 560Mi | 1792Mi |
 | 모니터링: kube-prometheus-stack (파드 6개, 위 "모니터링" 표) | 1056Mi | 2432Mi |
 | dev (앱 384Mi/512Mi + PostgreSQL 128Mi/256Mi + Redis 32Mi/128Mi, 앱 1개) | 544Mi | 896Mi |
 | prod, HPA가 최대 3개까지 늘었을 때 (앱 3개 + PostgreSQL 256Mi/512Mi로 키움 + Redis 32Mi/128Mi) | 1440Mi | 2176Mi |
-| 합계 | 4144Mi | 7584Mi |
+| 합계 | 4400Mi | 8096Mi |
 | 롤링 업데이트 중 환경마다 앱 파드 하나 추가 (maxSurge 1) | +384Mi | +512Mi |
-| 합계, 두 환경이 동시에 롤링 중일 때 | 4912Mi | 8608Mi |
+| 합계, 두 환경이 동시에 롤링 중일 때 | 5168Mi | 9120Mi |
 
 - **요청 합은 최악에도 노드 안에 든다.** 요청은 스케줄러가 자리를 계산하는 값이다. prod가 3개인 채 두 환경이 동시에 롤링해도(차트의 파드 템플릿을 고치면 두 환경이 같은 `main`의 차트를 읽어 동시에 롤링된다)
-  4912Mi로 8192Mi(실제 MemTotal은 약 7.6GiB)보다 작다. 4단계에서 새로 더하는 요청은 약 1.6GiB까지로 잡았고, 그중 kube-prometheus-stack이 1056Mi를 쓴다. 남은 약 580Mi가 Loki·Alloy 몫이다(Loki·Alloy는 아직 위 표에 없다).
+  5168Mi로 8192Mi(실제 MemTotal은 약 7.6GiB)보다 작다. 4단계에서 새로 더하는 요청은 약 1.6GiB까지로 잡았고(ArgoCD 컨트롤러 요청을 128Mi에서 384Mi로 올린 256Mi는 위 ArgoCD 행에 따로 들어 있다), 그중 kube-prometheus-stack이 1056Mi를 쓴다.
+  남은 약 580Mi가 Loki·Alloy 몫이다(Loki·Alloy는 아직 위 표에 없다. 더해도 5168 + 580 = 5748Mi로 노드 안에 든다).
   같은 계산이 `environments/prod/values.yaml`의 `autoscaling` 위 주석에도 있다(prod의 HPA 최대 3개를 정한 근거).
-- **한도 합은 최악에 노드 메모리를 넘는다(오버커밋).** 3단계까지는 모든 컨테이너가 한도까지 쓰는 최악(5664Mi)도 노드 안에 들게 잡았지만, 모니터링과 ArgoCD 한도를 더하니 8608Mi로 넘는다.
+- **한도 합은 최악에 노드 메모리를 넘는다(오버커밋).** 3단계까지는 모든 컨테이너가 한도까지 쓰는 최악(5664Mi)도 노드 안에 들게 잡았지만, 모니터링과 ArgoCD 한도를 더하니 9120Mi로 넘는다.
   모든 컨테이너가 한꺼번에 한도까지 쓰는 일은 드물다고 보고 받아들인다. 한도는 컨테이너 하나가 폭주할 때 그 컨테이너만 OOMKilled로 멈추게 하는 상한이다.
   한도보다 노드가 먼저 모자라면 kubelet이 요청을 넘게 쓰는 파드부터 내쫓는다(그래서 요청을 평소 사용량 가까이 잡는다). 띄운 뒤 실제 사용량으로 다시 본다.
 - 위 합계는 추정이다. k3s 행의 약 800Mi는 로컬 k3d의 빈 클러스터에서 잰 약 770MiB를 올려 잡은 값이고 EC2에서는 재지 않았다. 8GiB는 명목 크기라 실제 MemTotal은 조금 작고 호스트 OS도 메모리를 쓰므로 그만큼 위 여유가 줄어든다.
