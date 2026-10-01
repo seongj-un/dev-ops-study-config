@@ -179,3 +179,79 @@ jobs:
             -schema-location "$CRD_SCHEMA_LOCATION" \
             -kubernetes-version "$KUBERNETES_VERSION" \
             argocd/
+
+      # argocd/apps의 Application 가운데 Helm 차트 저장소의 차트를 쓰는 것(chart가 있는 소스. 예: kube-prometheus-stack)을 ArgoCD처럼 렌더링해 스키마로 검사한다.
+      # 차트 저장소·차트 이름·버전·릴리스 이름(helm.releaseName, 없으면 Application 이름)·네임스페이스·값 파일을 모두 Application 파일에서 yq로 읽으므로
+      # 차트 버전을 올리거나 이런 Application을 더해도 이 단계는 고칠 필요가 없다. helm repo add 없이 --repo로 Application의 repoURL을 그대로 쓴다.
+      # 값 파일은 $values/(ref: values로 이름 붙인 이 저장소)로 시작해야 하고, 그 파일이 없거나(ArgoCD도 매니페스트를 만들지 못한다)
+      # yq가 쓰는 모양이 아니면(환경 값 파일과 같은 규칙. 맨 위 단계 참고) 실패한다.
+      # --include-crds: ArgoCD처럼 차트의 crds/ 디렉터리도 렌더링해서 CRD 객체 자체도 검사한다.
+      # kubeconform은 스키마를 세 곳에서 차례로 찾는다: 내장 리소스(K8S_SCHEMA_LOCATION), CRD로 정의된 리소스(CRD_SCHEMA_LOCATION. Prometheus·ServiceMonitor 등),
+      # CustomResourceDefinition 자체(아래 K8S_LOCAL_SCHEMA_LOCATION). 어디에서도 못 찾으면 실패한다.
+      - name: 플랫폼 차트 렌더링 + 스키마 검사 (argocd/apps의 Helm 차트 저장소 소스)
+        env:
+          # CustomResourceDefinition 객체의 스키마 위치(K8S_SCHEMA_LOCATION과 같은 커밋). 그쪽 -standalone-strict 디렉터리에는 CustomResourceDefinition이 없다:
+          # CRD 안의 스키마 정의(JSONSchemaProps)가 자기 자신을 참조하는 재귀 구조라, 모든 $ref를 한 파일에 펼쳐 넣는 standalone 형식으로는 만들 수 없다.
+          # -local 디렉터리는 정의를 같은 디렉터리의 _definitions.json으로 상대 참조해서 CRD 스키마가 있고, 그 참조도 같은 커밋 안에서 풀린다.
+          # strict 형식이 아니라서 CRD 객체의 모르는 필드는 잡지 못하고 타입과 필수 필드를 검사한다. Dependabot이 갱신해 주지 않는다(K8S_SCHEMA_LOCATION과 함께 올린다).
+          K8S_LOCAL_SCHEMA_LOCATION: https://raw.githubusercontent.com/yannh/kubernetes-json-schema/8df8a883b68a24a104b4a9e43c1288090ae60b3b/{{.NormalizedKubernetesVersion}}-local/{{.ResourceKind}}{{.KindSuffix}}.json
+        run: |
+          set -euo pipefail
+          # 문제가 있으면 그 Application 파일을 가리키는 오류를 남기고 바로 멈춘다.
+          fail() { echo "::error file=$app::$*"; exit 1; }
+          # $values가 가리켜야 하는 저장소(이 저장소). Application의 repoURL과 같은 모양이다.
+          this_repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          checked=0
+          for app in argocd/apps/*.yaml; do
+            name=$(yq '.metadata.name' "$app")
+            namespace=$(yq '.spec.destination.namespace' "$app")
+            # 소스가 하나인 형태(.spec.source)와 여럿인 형태(.spec.sources)를 모두 보고, chart가 있는 소스(Helm 차트 저장소)만 고른다.
+            charts='[(.spec.sources // [.spec.source])[] | select(has("chart"))]'
+            count=$(yq "$charts | length" "$app")
+            for ((i = 0; i < count; i++)); do
+              # yq 식 "[...][i]"(i번째 차트 소스)를 만든다. 셸 배열이 아니다.
+              src="${charts}[$i]"
+              repo=$(yq "$src.repoURL" "$app")
+              chart=$(yq "$src.chart" "$app")
+              version=$(yq "$src.targetRevision" "$app")
+              release=$(yq "$src.helm.releaseName // \"\"" "$app")
+              release=${release:-$name}
+              for value in "$repo" "$chart" "$version" "$namespace"; do
+                [ "$value" != null ] || fail "repoURL·chart·targetRevision·destination.namespace 가운데 빈 것이 있다"
+              done
+              case $repo in
+                https://*) ;;
+                *) fail "HTTP(S) Helm 차트 저장소만 검사한다(OCI 등은 이 단계를 고쳐야 한다): $repo" ;;
+              esac
+              # yq에서는 or가 |보다 늦게 묶이므로 괄호로 감싼다(감싸지 않으면 뒤의 has가 문서 맨 위를 본다).
+              [ "$(yq "$src.helm | (has(\"values\") or has(\"valuesObject\") or has(\"parameters\"))" "$app")" = false ] ||
+                fail "helm.values·valuesObject·parameters는 이 검사가 렌더링에 넣지 않는다. 값은 \$values/의 값 파일에 둔다"
+              values_args=()
+              while IFS= read -r ref; do
+                case $ref in
+                  "\$values/"*) file=${ref#"\$values/"} ;;
+                  *) fail "값 파일은 \$values/(이 저장소)로 시작해야 한다: $ref" ;;
+                esac
+                [ "$(yq '.spec.sources[] | select(.ref == "values") | .repoURL' "$app")" = "$this_repo" ] ||
+                  fail "ref: values 소스가 이 저장소($this_repo)를 가리키지 않는다"
+                [ -f "$file" ] || fail "값 파일이 없다: $file"
+                diff <(yq '.' "$file") "$file" ||
+                  fail "yq가 다시 쓰면 $file 이 바뀐다. yq -i '.' $file 로 정규화해서 커밋한다"
+                values_args+=(-f "$file")
+              done < <(yq "($src.helm.valueFiles // []) | .[]" "$app")
+              echo "::group::helm template + kubeconform ($name: $chart $version)"
+              helm template "$release" "$chart" --repo "$repo" --version "$version" \
+                --namespace "$namespace" --kube-version "$KUBERNETES_VERSION" --include-crds \
+                "${values_args[@]}" > "$RUNNER_TEMP/platform-$name-$i.yaml"
+              docker run -i --rm "$KUBECONFORM_IMAGE" \
+                -strict -summary \
+                -schema-location "$K8S_SCHEMA_LOCATION" \
+                -schema-location "$CRD_SCHEMA_LOCATION" \
+                -schema-location "$K8S_LOCAL_SCHEMA_LOCATION" \
+                -kubernetes-version "$KUBERNETES_VERSION" - < "$RUNNER_TEMP/platform-$name-$i.yaml"
+              echo "::endgroup::"
+              checked=$((checked + 1))
+            done
+          done
+          # 고르는 식이 깨져 아무것도 검사하지 않고 통과하는 일을 막는다.
+          [ "$checked" -gt 0 ] || { echo "::error::chart 소스가 있는 Application을 argocd/apps에서 하나도 찾지 못했다"; exit 1; }

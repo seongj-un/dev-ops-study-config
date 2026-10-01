@@ -7,9 +7,10 @@
 # groups로 묶는 이유: 갱신마다 PR이 따로 열리면 검사가 PR 수만큼 돌고 리뷰 부담이 커진다. 한 번에 모아서 검토하고 머지한다.
 #
 # 이 파일이 감시하는 것은 액션 참조(uses:)뿐이다. 다른 곳에 고정해 둔 값은 Dependabot이 올려 주지 않으니 손으로 올린다:
-#   - validate.yml의 setup-helm 입력 version(Helm 버전), KUBECONFORM_IMAGE(kubeconform 태그@다이제스트), K8S_SCHEMA_LOCATION·CRD_SCHEMA_LOCATION(스키마 모음의 커밋 SHA)
-#     (액션의 입력값과 env 값이라 github-actions 생태계가 읽지 않는다)
+#   - validate.yml의 setup-helm 입력 version(Helm 버전), KUBECONFORM_IMAGE(kubeconform 태그@다이제스트), K8S_SCHEMA_LOCATION·CRD_SCHEMA_LOCATION과
+#     플랫폼 차트 단계의 K8S_LOCAL_SCHEMA_LOCATION(스키마 모음의 커밋 SHA) (액션의 입력값과 env 값이라 github-actions 생태계가 읽지 않는다)
 #   - bootstrap/argocd/values.yaml과 README의 ArgoCD 차트 버전
+#   - argocd/apps/kube-prometheus-stack.yaml의 차트 버전(targetRevision. 외부 Helm 차트 저장소라 Dependabot이 보지 않는다)
 #   - charts/shortener/values.yaml의 PostgreSQL·Redis·busybox 이미지(태그@다이제스트). Helm 생태계는 설정하지 않았다.
 version: 2
 updates:
