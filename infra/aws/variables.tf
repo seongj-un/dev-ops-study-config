@@ -98,7 +98,7 @@ variable "duckdns_token_parameter" {
 }
 
 variable "discord_webhook_parameter" {
-  description = "Discord 웹훅 URL을 담은 SSM Parameter Store SecureString의 이름. 인스턴스가 부팅할 때 이 값을 읽어 Alertmanager가 쓰는 Secret(monitoring/alertmanager-discord)을 만든다. 사람이 미리 만들어 둔다(README 참고). 없어도 부팅은 끝나고, Alertmanager는 자리표시자 URL로 뜬다(Discord 알림은 가지 않는다)."
+  description = "Discord 웹훅 URL을 담은 SSM Parameter Store SecureString의 이름. 인스턴스가 부팅할 때 이 값을 읽어 Alertmanager가 쓰는 Secret(monitoring/alertmanager-discord)을 만든다. 사람이 미리 만들어 둔다(README 참고). 없어도 부팅은 끝나고, Alertmanager는 자리표시자 URL로 뜬다(Discord 알림은 가지 않는다). 부트스트랩이 다시 돌 때 읽히면 자리표시자가 값으로 바뀐다."
   type        = string
   default     = "/dev-ops-study/discord-webhook-url"
 

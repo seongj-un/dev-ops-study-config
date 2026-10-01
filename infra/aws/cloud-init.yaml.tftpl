@@ -284,7 +284,7 @@ write_files:
         --wait --timeout 10m
     fi
 
-    # 7. Secret: 앱의 DB 비밀번호, 모니터링의 Grafana admin 비밀번호와 Discord 웹훅 URL. 모두 없을 때만 만든다. 있는 것을 새 값으로 바꾸면
+    # 7. Secret: 앱의 DB 비밀번호, 모니터링의 Grafana admin 비밀번호와 Discord 웹훅 URL. 모두 없을 때만 만든다(자리표시자만 예외다. 아래). 있는 것을 새 값으로 바꾸면
     # DB는 PostgreSQL 데이터(PVC)에 이미 들어간 비밀번호와 어긋나고, Grafana admin 비밀번호는 재시도·재부팅마다 달라진다.
     # 값은 파이프로만 흐른다: 명령줄 인자(ps)·로그·임시 파일에 쓰지 않는다. tr은 openssl이 끝에 붙이는 줄바꿈을 뺀다.
     # 저장은 된다: Secret은 k3s 데이터 저장소(/var/lib/rancher/k3s/server/db, 암호화된 EBS 볼륨)에 들어간다. k3s는 기본으로 Secret을
@@ -303,10 +303,12 @@ write_files:
     # monitoring/alertmanager-discord: Alertmanager가 알림을 보낼 Discord 웹훅 URL이다. 이 URL을 아는 사람은 누구나 채널에 글을 올릴 수 있어서
     # DuckDNS 토큰과 같게 다룬다: SSM의 SecureString에서 읽어 변수에만 담고(출력하지 않는다. set -x도 쓰지 않는다) kubectl의 표준 입력으로 넣는다.
     # printf는 bash 내장 명령이라 exec되지 않아서 값이 ps(/proc/<pid>/cmdline)에 나타나지 않는다. aws가 실패하면 표준 오류에는 실패 이유만 있고
-    # 값은 없어서 로그에 그대로 남는다. timeout 120: SSM이 응답하지 않아도 여기서 2분 넘게 붙잡히지 않는다.
+    # 값은 없어서 로그에 그대로 남는다. timeout 120: SSM이 응답하지 않아도 여기서 2분 넘게 붙잡히지 않는다. 값을 담은 변수는 다 쓰면 바로 unset 한다.
     # 못 읽으면(파라미터 없음, 권한·복호화 오류, 시간 초과, 빈 값) 부팅을 멈추지 않고 자리표시자 URL로 Secret을 만들고 경고를 남긴다. Alertmanager는 이 Secret을
     # 볼륨으로 마운트해서 Secret이 없으면 파드가 뜨지 못한다. 자리표시자(.invalid는 예약된 최상위 도메인이라 어디에도 풀리지 않는다)가 있으면 뜨고 Discord 알림만 가지 않는다.
-    # 한번 만든 Secret은 건너뛰므로 자리표시자는 SSM에 값을 만든 뒤에도 저절로 바뀌지 않는다. 바꾸는 절차는 README에 있다.
+    # 자리표시자 Secret에는 라벨 dev-ops-study.io/placeholder=true를 붙인다. 이 단계는 부팅마다 돌아서 라벨이 있으면 SSM을 다시 읽는다. 읽히면 replace로 Secret을
+    # 값으로 통째로 바꾸고(라벨도 없어진다) 못 읽으면 자리표시자를 두고 경고를 다시 남긴다. apply는 쓰지 않는다: 라벨을 지우지 않고 값을 last-applied 주석에도 남긴다.
+    # 라벨이 없는 Secret은 값이 있는 것이라 SSM을 읽지 않고 건너뛴다. am: missing(없음), placeholder(라벨 true), real(값이 있음). 조회가 실패하면 없는 것으로 본다(위의 확인들과 같다).
     kubectl get namespace monitoring >/dev/null 2>&1 || kubectl create namespace monitoring
     if kubectl -n monitoring get secret grafana-admin >/dev/null 2>&1; then
       log "건너뜀: monitoring/grafana-admin 있음"
@@ -314,15 +316,30 @@ write_files:
       openssl rand -hex 16 | tr -d '\n' | kubectl -n monitoring create secret generic grafana-admin \
         --from-literal=admin-user=admin --from-file=admin-password=/dev/stdin
     fi
-    if kubectl -n monitoring get secret alertmanager-discord >/dev/null 2>&1; then
+    am=missing
+    if ph=$(kubectl -n monitoring get secret alertmanager-discord -o 'jsonpath={.metadata.labels.dev-ops-study\.io/placeholder}' 2>/dev/null); then
+      if [ "$ph" = true ]; then am=placeholder; else am=real; fi
+    fi
+    if [ "$am" = real ]; then
       log "건너뜀: monitoring/alertmanager-discord 있음"
     else
       hook=$(timeout 120 aws ssm get-parameter --with-decryption --region "$AWS_REGION" --name "$DISCORD_WEBHOOK_PARAMETER_NAME" --query Parameter.Value --output text) || hook=
       if [ -z "$hook" ]; then
-        log "경고: Discord 웹훅 URL을 SSM에서 읽지 못했다($DISCORD_WEBHOOK_PARAMETER_NAME. 이유는 위의 aws 오류, 없으면 시간 초과나 빈 값이다). alertmanager-discord에 자리표시자 URL을 넣었다: Alertmanager는 뜨지만 Discord 알림은 가지 않는다"
-        hook=https://discord.invalid/webhook-not-configured
+        log "경고: Discord 웹훅 URL을 SSM에서 읽지 못했다($DISCORD_WEBHOOK_PARAMETER_NAME. 이유는 위의 aws 오류, 없으면 시간 초과나 빈 값이다). alertmanager-discord는 자리표시자 URL이다: Alertmanager는 뜨지만 Discord 알림은 가지 않는다. 다음 부트스트랩 실행(재부팅 등)에서 SSM을 다시 읽는다"
+        if [ "$am" = missing ]; then
+          # 라벨은 만들 때 함께 붙인다(만든 뒤에 붙이면 그 사이에 멈출 때 라벨 없는 자리표시자가 남는다). kubectl create에는 라벨 옵션이 없어서 label --local로 붙인다.
+          kubectl -n monitoring create secret generic alertmanager-discord --from-literal=webhook-url=https://discord.invalid/webhook-not-configured --dry-run=client -o yaml |
+            kubectl label --local -f - dev-ops-study.io/placeholder=true -o yaml |
+            kubectl -n monitoring create -f -
+        fi
+      elif [ "$am" = missing ]; then
+        printf '%s' "$hook" | kubectl -n monitoring create secret generic alertmanager-discord --from-file=webhook-url=/dev/stdin
+      else
+        log "monitoring/alertmanager-discord: 자리표시자를 SSM의 값으로 바꾼다"
+        printf '%s' "$hook" | kubectl -n monitoring create secret generic alertmanager-discord --from-file=webhook-url=/dev/stdin --dry-run=client -o yaml |
+          kubectl -n monitoring replace -f -
       fi
-      printf '%s' "$hook" | kubectl -n monitoring create secret generic alertmanager-discord --from-file=webhook-url=/dev/stdin
+      unset hook
     fi
 
     # 8. 루트 Application: ArgoCD가 이것을 읽어 argocd/apps의 dev·prod Application을 만들고, 그 뒤 배포는 모두 ArgoCD가 한다.

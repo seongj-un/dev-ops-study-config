@@ -69,8 +69,8 @@ resource "aws_instance" "k3s" {
   # user_data가 아니라 user_data_base64로, gzip으로 압축해서 넘긴다. 이유는 크기 한도다:
   #  - EC2는 user data를 base64로 인코딩하기 전 바이트 기준 16384바이트(16 KiB)까지만 받는다. 프로바이더도 user_data 인자는 plan에서 이를 검사한다
   #    ("expected length of user_data to be in the range (0 - 16384)"). 바이트 수라서 한글(UTF-8에서 글자당 3바이트)이 많으면 빨리 닿는다.
-  #    이 템플릿은 한글 주석, AWS CLI 서명 키, 스크립트가 들어가서 렌더링 원문이 이미 한도를 넘는다(2026-10-01 기준 약 32.3 KB).
-  #  - base64gzip은 문자열을 gzip으로 압축한 다음 base64로 인코딩한다. 같은 시점에 압축본은 약 13.8 KB(base64로는 약 18.5 KB)다.
+  #    이 템플릿은 한글 주석, AWS CLI 서명 키, 스크립트가 들어가서 렌더링 원문이 이미 한도를 넘는다(2026-10-01 기준 약 34.0 KB).
+  #  - base64gzip은 문자열을 gzip으로 압축한 다음 base64로 인코딩한다. 같은 시점에 압축본은 약 14.3 KB(base64로는 약 19.1 KB)다.
   #    압축본은 문자열(UTF-8)이 아닌 바이너리라서 user_data가 아니라 user_data_base64 인자로 넘긴다.
   #  - 한도는 base64를 푼 바이트, 곧 압축본의 크기에 적용된다. 원문 크기는 상관없다. test/render.sh가 이와 같은 식으로 압축본을 만들어 크기를 검사한다.
   #  - cloud-init은 gzip으로 압축된 user data를 스스로 알아보고 풀어서 원래의 cloud-config로 처리한다(render.sh가 cloud-init의 함수로 풀어 확인한다).

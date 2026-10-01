@@ -93,7 +93,7 @@ Terraform이 만드는 리소스는 15개다: VPC, IGW, 서브넷, 라우트 테
    ```
    - 이미 있으면 `put-parameter`가 `ParameterAlreadyExists`로 실패한다. 이미 만들어 두었다면 그대로 쓰고, 값을 바꿀 때는 `--overwrite`를 더한다([Discord 웹훅 URL 갱신](#discord-웹훅-url-갱신)).
    - 기본 키(`aws/ssm`)로 암호화한 SecureString이어야 한다. `iam.tf`의 정책은 그 키의 복호화만 허용해서, 다른 키로 암호화하면 부팅 때 읽지 못한다.
-   - **없어도 부팅은 끝난다.** 읽지 못하면 부트스트랩이 경고를 남기고 자리표시자 URL로 Secret을 만들어서 Alertmanager는 뜨지만 Discord 알림은 가지 않는다. 그래서 `apply` 전에 아래 5번으로 확인한다.
+   - **없어도 부팅은 끝난다.** 읽지 못하면 부트스트랩이 경고를 남기고 자리표시자 URL로 Secret을 만들어서 Alertmanager는 뜨지만 Discord 알림은 가지 않는다. 파라미터를 나중에 만들면 부트스트랩이 다시 돌 때(다음 부팅 등) 자리표시자가 값으로 바뀐다([Discord 웹훅 URL 갱신](#discord-웹훅-url-갱신)). 그래도 `apply` 전에 아래 5번으로 확인한다.
 5. **`apply` 전에 두 파라미터가 있는지 확인한다.** 파라미터가 없거나 이름·리전이 틀려도 `plan`과 `apply`는 성공한다(`iam.tf`는 이름으로 ARN 문자열을 만들 뿐 파라미터를 읽지 않는다). 그 실수는 인스턴스가 부팅한 뒤 부트스트랩 로그의 `경고: DuckDNS 갱신 실패`(토큰)나 `경고: Discord 웹훅 URL을 SSM에서 읽지 못했다`(웹훅 URL)로만 드러난다.
    아래 명령은 값이 아니라 메타데이터(이름, 형식, 키, 수정 시각)만 보여 준다. 파라미터마다 `SecureString`과 `alias/aws/ssm`이 든 한 줄씩, 모두 두 줄이 나와야 한다.
    ```bash
@@ -187,7 +187,7 @@ aws ssm send-command --region ap-northeast-2 --instance-ids "$INSTANCE_ID" \
 
 ### 재부팅할 때
 
-인스턴스를 재부팅하거나 멈췄다 시작하면 부트스트랩이 다시 돈다. 이미 된 단계는 건너뛰고 DuckDNS 갱신과 k3s 안정 확인(5초 간격 6번 연속, 최소 약 30초)만 하므로 보통 1분 안팎 걸린다.
+인스턴스를 재부팅하거나 멈췄다 시작하면 부트스트랩이 다시 돈다. 이미 된 단계는 건너뛰고 DuckDNS 갱신과 k3s 안정 확인(5초 간격 6번 연속, 최소 약 30초)만 하므로 보통 1분 안팎 걸린다. `alertmanager-discord`가 자리표시자로 남아 있으면 그 Discord 웹훅 URL도 SSM에서 다시 읽는다([모니터링 Secret](#모니터링-secret)).
 이 서비스는 `WantedBy=multi-user.target`인 oneshot이라 **재부팅할 때마다 부팅 완료(`multi-user.target`)가 부트스트랩이 끝나기를 기다린다.** 보통 1분 안팎이고, 단계가 멈추면 최악에는 `TimeoutStartSec`(60분)까지 기다린다.
 의도한 동작이다. k3s와 SSM 에이전트는 이 서비스를 기다리지 않고 함께 뜨므로, 그동안에도 앱이 올라오고 SSM 명령이 된다.
 
@@ -220,27 +220,41 @@ terraform output -raw ssm_shell_command
 
 ## 모니터링 Secret
 
-부트스트랩 7단계가 `monitoring` 네임스페이스에 Secret 둘을 만든다. ArgoCD가 모니터링 앱을 올리기 전에 넣어 두려고 루트 Application보다 먼저 만든다. 이미 있는 Secret은 건너뛰므로 재시도·재부팅으로 값이 바뀌지 않는다.
+부트스트랩 7단계가 `monitoring` 네임스페이스에 Secret 둘을 만든다. ArgoCD가 모니터링 앱을 올리기 전에 넣어 두려고 루트 Application보다 먼저 만든다. 값이 있는 Secret은 건너뛰므로 재시도·재부팅으로 값이 바뀌지 않는다. 자리표시자인 `alertmanager-discord`만 예외다(아래).
 
 | Secret | 키 | 값 |
 |---|---|---|
 | `grafana-admin` | `admin-user`, `admin-password` | `admin`과, 인스턴스 안에서 `openssl rand -hex 16`으로 만든 32자(hex). 코드·SSM·Terraform 상태에 없다 |
-| `alertmanager-discord` | `webhook-url` | SSM `discord_webhook_parameter`의 값. 읽지 못하면 자리표시자 `https://discord.invalid/webhook-not-configured`를 넣고 로그에 `경고: Discord 웹훅 URL을 SSM에서 읽지 못했다`를 남긴다 |
+| `alertmanager-discord` | `webhook-url` | SSM `discord_webhook_parameter`의 값. 읽지 못하면 자리표시자 `https://discord.invalid/webhook-not-configured`를 넣고(라벨 `dev-ops-study.io/placeholder=true`를 붙인다) 로그에 `경고: Discord 웹훅 URL을 SSM에서 읽지 못했다`를 남긴다 |
 
 자리표시자를 두는 이유: Alertmanager는 이 Secret을 볼륨으로 마운트하므로 Secret이 없으면 파드가 뜨지 못한다. 자리표시자가 있으면 Alertmanager는 뜨고 Discord 알림만 가지 않는다(`.invalid`는 예약된 최상위 도메인이라 어디에도 풀리지 않는다).
 값은 명령줄 인자·로그·임시 파일에 쓰지 않고 파이프로 `kubectl`의 표준 입력에만 넣는다.
 
-kubeconfig를 받은 뒤([접속하기](#접속하기)) 아래로 읽는다. 둘째 줄은 Grafana admin 비밀번호를 출력한다. 셋째 줄은 웹훅 URL을 출력하지 않고 자리표시자인지만 센다: `1`이면 자리표시자(Discord 알림이 가지 않는다), `0`이면 SSM의 값이다.
+**자리표시자는 부트스트랩이 다시 돌 때 저절로 값으로 바뀐다.** 부트스트랩은 부팅마다, 그리고 `systemctl start devops-bootstrap`으로 다시 돌릴 때마다 7단계에서 `alertmanager-discord`를 이렇게 다룬다.
+
+| `alertmanager-discord`의 상태 | 7단계가 하는 일 |
+|---|---|
+| 없다 | SSM을 읽어 만든다. 못 읽으면 라벨이 붙은 자리표시자를 만든다 |
+| 라벨 `dev-ops-study.io/placeholder=true`가 있다(자리표시자) | SSM을 다시 읽는다. 읽히면 Secret을 그 값으로 바꾸고(라벨도 없어진다) 못 읽으면 그대로 두고 경고를 다시 남긴다 |
+| 라벨이 없다(값이 있다) | SSM을 읽지 않고 건너뛴다 |
+
+그래서 파라미터를 늦게 만들었거나 이름·권한을 고쳤다면 Secret을 지우지 않아도 다음 부팅이나 부트스트랩 재실행 때 반영된다([Discord 웹훅 URL 갱신](#discord-웹훅-url-갱신)).
+
+kubeconfig를 받은 뒤([접속하기](#접속하기)) 아래로 읽는다. 둘째 줄은 Grafana admin 비밀번호를 출력한다. 셋째 줄은 `alertmanager-discord`가 있는지 보여 주고 라벨을 함께 출력한다: Secret이 없으면 `NotFound` 오류가 나고, `LABELS`에 `dev-ops-study.io/placeholder=true`가 있으면 자리표시자다. 넷째 줄은 웹훅 URL을 출력하지 않고 자리표시자인지만 센다: `1`이면 자리표시자(Discord 알림이 가지 않는다), `0`이면 다른 값이다. **셋째 줄이 Secret을 보여 줄 때만 넷째 줄의 `0`을 믿는다.** Secret이 없어도 넷째 줄은 `kubectl`의 오류 뒤에 `0`을 출력한다.
 
 ```bash
 export KUBECONFIG=$HOME/.kube/dev-ops-study-aws.yaml
 kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d; echo
+kubectl -n monitoring get secret alertmanager-discord --show-labels
 kubectl -n monitoring get secret alertmanager-discord -o jsonpath='{.data.webhook-url}' | base64 -d | grep -c discord.invalid
 ```
 
 ### Discord 웹훅 URL 갱신
 
-자리표시자가 들어갔을 때(파라미터를 늦게 만들었다, 이름·키·권한이 틀렸다)나 웹훅을 바꿨을 때 쓴다. Secret이 있으면 건너뛰므로 SSM 값만 바꿔서는 반영되지 않는다. Secret을 지우고 부트스트랩을 다시 돌리면 7단계가 SSM의 현재 값으로 Secret을 다시 만든다.
+자리표시자가 들어갔을 때(파라미터를 늦게 만들었다, 이름·키·권한이 틀렸다)나 웹훅을 바꿀 때 쓴다. 어느 쪽인지는 위 셋째 줄의 `LABELS`로 안다.
+
+- **자리표시자**(라벨 있음): Secret을 지울 필요가 없다. SSM만 고치고 부트스트랩을 다시 돌리면(다음 재부팅도 된다) 7단계가 SSM을 다시 읽어 Secret을 바꾼다.
+- **값이 있는 Secret**(라벨 없음): 7단계가 SSM을 읽지 않고 건너뛰므로 SSM 값만 바꿔서는 반영되지 않는다. Secret을 지우고 부트스트랩을 다시 돌리면 7단계가 SSM의 현재 값으로 Secret을 다시 만든다.
 
 1. SSM 값을 새로 쓴다. 파라미터가 이미 있으면 `--overwrite`가 필요하다.
    ```bash
@@ -249,15 +263,38 @@ kubectl -n monitoring get secret alertmanager-discord -o jsonpath='{.data.webhoo
      --type SecureString --overwrite --value "$DISCORD_WEBHOOK_URL"
    unset DISCORD_WEBHOOK_URL
    ```
-2. 인스턴스에서 Secret을 지우고 부트스트랩을 다시 시작한다. `INSTANCE_ID`는 [진행 확인](#진행-확인)의 첫 줄로 정한다. `reset-failed`가 먼저인 이유는 [실패한 부트스트랩 다시 돌리기](#실패한-부트스트랩-다시-돌리기)와 같다. 이미 된 단계는 건너뛰므로 1분 안팎에 끝난다.
+2. 인스턴스에서 부트스트랩을 다시 시작한다. 보내기 직전의 시각을 적어 둔다(3번에서 쓴다). `INSTANCE_ID`는 [진행 확인](#진행-확인)의 첫 줄로 정한다. `reset-failed`가 먼저인 이유는 [실패한 부트스트랩 다시 돌리기](#실패한-부트스트랩-다시-돌리기)와 같다. 이미 된 단계는 건너뛰므로 1분 안팎에 끝난다.
+   자리표시자일 때는 Secret을 지우지 않는다.
    ```bash
+   date -u +%FT%TZ
+   aws ssm send-command --region ap-northeast-2 --instance-ids "$INSTANCE_ID" \
+     --document-name AWS-RunShellScript \
+     --parameters '{"commands":["systemctl reset-failed devops-bootstrap","systemctl start --no-block devops-bootstrap"]}' \
+     --query Command.CommandId --output text
+   ```
+   값이 있는 Secret을 바꿀 때는 먼저 Secret을 지운다.
+   ```bash
+   date -u +%FT%TZ
    aws ssm send-command --region ap-northeast-2 --instance-ids "$INSTANCE_ID" \
      --document-name AWS-RunShellScript \
      --parameters '{"commands":["KUBECONFIG=/etc/rancher/k3s/k3s.yaml /usr/local/bin/kubectl -n monitoring delete secret alertmanager-discord","systemctl reset-failed devops-bootstrap","systemctl start --no-block devops-bootstrap"]}' \
      --query Command.CommandId --output text
    ```
-3. [진행 확인](#진행-확인)의 명령으로 로그를 본다. `secret/alertmanager-discord created`가 있고 `경고: Discord 웹훅 URL`은 없어야 하며, 위의 `grep -c`가 `0`을 줘야 한다.
-4. Alertmanager는 알림을 보낼 때마다 Secret 볼륨의 파일을 읽는다(`webhook_url_file`). 볼륨은 kubelet이 보통 1~2분 안에 새 값으로 바꾼다. 바로 반영하려면 파드를 지운다(StatefulSet이 새로 띄운다).
+3. 결과를 읽는다. 아래 명령은 로그에서 **마지막 `STEP: 7/8` 줄부터 끝까지**와 서비스 상태, 완료 표시를 출력한다.
+   ```bash
+   CMD_ID=$(aws ssm send-command --region ap-northeast-2 --instance-ids "$INSTANCE_ID" \
+     --document-name AWS-RunShellScript \
+     --parameters '{"commands":["tac /var/log/devops-bootstrap.log | sed \"/STEP: 7[/]8/q\" | tac","echo state: $(systemctl is-active devops-bootstrap)","echo done: $(cat /var/lib/devops-bootstrap.done 2>/dev/null)"]}' \
+     --query Command.CommandId --output text)
+   aws ssm wait command-executed --region ap-northeast-2 --instance-id "$INSTANCE_ID" --command-id "$CMD_ID"
+   aws ssm get-command-invocation --region ap-northeast-2 --instance-id "$INSTANCE_ID" --command-id "$CMD_ID" \
+     --query StandardOutputContent --output text
+   ```
+   로그는 부팅·재시작마다 이어 붙는다. `tail -n 40`처럼 끝부분만 보면 옛 실행의 `secret/... created`나 `경고` 줄이 이번 실행의 결과로 보일 수 있어서, 위 명령은 마지막 `STEP: 7/8` 줄부터만 보여 준다. 아래를 모두 만족할 때만 이번 실행의 결과로 믿는다.
+   - 출력 첫 줄이 `STEP: 7/8` 줄이고(아니면 로그에 그 줄이 없는 것이다) 그 시각과 `done:`의 시각이 둘 다 2번에서 적어 둔 시각보다 뒤다. `done:`이 비어 있거나 더 이르면 이번 실행이 아직 끝나지 않았거나(`state: activating`) 실패했거나(`실패:` 줄) 시작하지 않은 것이다. 이때 위 로그 줄은 옛 실행의 것일 수 있으니 믿지 말고 잠시 뒤 다시 본다.
+   - 자리표시자를 바꿨다면 `secret/alertmanager-discord replaced`가, Secret을 지우고 다시 만들었다면 `secret/alertmanager-discord created`가 있고 `경고: Discord 웹훅 URL`은 없다. 경고가 있으면 SSM을 아직 읽지 못한 것이다(경고 바로 위의 `aws` 오류 줄이 이유다). 원인을 고치고 2번부터 다시 한다.
+   - Secret이 있다. 위 읽기 명령의 셋째 줄(`kubectl -n monitoring get secret alertmanager-discord --show-labels`)이 Secret을 보여 주고 `LABELS`가 `<none>`이다(`dev-ops-study.io/placeholder`가 있으면 아직 자리표시자다). 이것을 먼저 본다: Secret이 없어도 넷째 줄(`grep -c`)은 `0`을 출력해서 성공처럼 보인다. Secret이 있을 때 `grep -c`가 `0`이면 자리표시자가 아닌 값이다.
+4. Alertmanager 파드가 이미 떠 있으면 다시 띄운다. 새 파드가 Secret의 지금 값을 마운트한다(StatefulSet이 파드를 새로 띄운다). Alertmanager 문서에는 `webhook_url_file`을 언제 다시 읽는지 나와 있지 않아서, 파드를 다시 띄우는 것을 기준 절차로 둔다. 파드가 아직 없으면 할 일이 없다(새로 뜨는 파드가 지금 값을 쓴다).
    ```bash
    kubectl -n monitoring delete pod -l app.kubernetes.io/name=alertmanager
    ```
@@ -325,7 +362,7 @@ terraform destroy \
 | 증상 | 원인과 해결 |
 |---|---|
 | 부트스트랩 로그에 `경고: DuckDNS 갱신 실패`가 있고 이름이 새 IP를 가리키지 않는다 | 토큰 파라미터가 없거나 이름·리전이 틀렸거나(`ParameterNotFound`), 토큰이나 서브도메인이 틀렸다(DuckDNS가 `KO`). `plan`·`apply`는 이것을 잡지 못한다. [준비물](#준비물) 5번의 `describe-parameters`로 파라미터를 확인한다. 오류 내용은 첫 실행분이 부트스트랩 로그에, 그 뒤 타이머 실행분이 `journalctl -u duckdns-update -n 20 --no-pager`에 있다. 고치면 타이머가 5분 안에 다시 갱신한다. |
-| 부트스트랩 로그에 `경고: Discord 웹훅 URL을 SSM에서 읽지 못했다`가 있다 | 웹훅 URL 파라미터가 없거나 이름·리전이 틀렸거나(`ParameterNotFound`), 기본 키(`aws/ssm`)가 아닌 키로 암호화했거나 권한이 틀렸다(`AccessDeniedException`). 이유는 경고 바로 위의 `aws` 오류 줄에 있고, 그 줄이 없으면 120초 시간 초과나 빈 값이다. 부팅은 계속되어 Alertmanager는 자리표시자 URL로 뜨고 Discord 알림만 가지 않는다. [준비물](#준비물) 5번의 `describe-parameters`로 확인한 뒤 [Discord 웹훅 URL 갱신](#discord-웹훅-url-갱신)대로 Secret을 다시 만든다. |
+| 부트스트랩 로그에 `경고: Discord 웹훅 URL을 SSM에서 읽지 못했다`가 있다 | 웹훅 URL 파라미터가 없거나 이름·리전이 틀렸거나(`ParameterNotFound`), 기본 키(`aws/ssm`)가 아닌 키로 암호화했거나 권한이 틀렸다(`AccessDeniedException`). 이유는 경고 바로 위의 `aws` 오류 줄에 있고, 그 줄이 없으면 120초 시간 초과나 빈 값이다. 부팅은 계속되어 Alertmanager는 자리표시자 URL로 뜨고 Discord 알림만 가지 않는다. 부트스트랩이 다시 돌 때마다 SSM을 다시 읽고 못 읽으면 이 경고를 다시 남긴다. [준비물](#준비물) 5번의 `describe-parameters`로 확인해 고친 뒤 [Discord 웹훅 URL 갱신](#discord-웹훅-url-갱신)대로 부트스트랩을 다시 돌린다(자리표시자는 Secret을 지울 필요가 없다). |
 | 로그 끝이 `실패: STEP 2/8 AWS CLI, … gpgv …`이고 그 위에 `BAD signature` 또는 `Can't check signature: No public key`가 있다 | AWS CLI zip의 서명 검사가 실패했다. 내려받기가 깨진 것이면 systemd의 재시작에서 풀린다. `No public key`가 계속되면 AWS가 서명 키를 바꾼 것이다: [AWS CLI 설치 문서](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)의 공개 키 블록으로 `cloud-init.yaml.tftpl`의 `/etc/devops/aws-cli.asc`와 `test/container-checks.sh`의 지문을 고친다. `user_data`가 바뀌므로 인스턴스가 교체된다. |
 | 로그 끝이 `실패: k3s가 600초 안에 안정되지 않았다(마지막 이유: …)`다 | k3s가 뜨지 않거나 재시작을 되풀이한다. [k3s가 재시작을 되풀이할 때](#k3s가-재시작을-되풀이할-때)를 본다. |
 | 로그에 `ArgoCD 릴리스가 pending-install: uninstall하고 다시 설치`(또는 `… rollback`)가 있다 | 정상이다. 앞선 시도의 helm이 작업 도중 끊겨(k3s API가 끊김, 재부팅, 시간 초과) 릴리스가 `pending-*`나 `failed`로 남은 것을 6단계가 정리했다. Helm은 마지막 리비전이 `pending-*`이면 upgrade를 `another operation (install/upgrade/rollback) is in progress`로 거부하고, 그 helm이 이미 없어도 상태가 남아 저절로 풀리지 않는다. 그래서 `deployed` 리비전이 있으면 그 가운데 마지막 것으로 `rollback`하고, 없으면(예: 첫 설치가 끊기거나 실패했다) `uninstall`한 뒤 다시 설치한다. `superseded`는 한때 성공했다는 뜻이 아니라서 고르지 않는다: `rollback`의 적용이 실패하면 Helm이 `rollback`을 시작할 때의 마지막 리비전(`pending-*`나 `failed`라 성공한 적 없다)을 `superseded`로 바꾼다. 성공한 install·upgrade·rollback은 `deployed`를 하나만 남기고, 실패한 upgrade·rollback은 이전 `deployed`를 그대로 둔다. 지워도 ArgoCD의 CRD는 남고(차트가 지우지 않게 표시해 둔다), 다시 설치할 때 그대로 이어받는다. 릴리스 기록은 `export HOME=/root KUBECONFIG=/etc/rancher/k3s/k3s.yaml` 뒤 `helm -n argocd history argocd`로 본다. |
@@ -368,8 +405,8 @@ terraform destroy \
 
 ## 이 스택의 설계 메모
 
-- **`user_data`는 gzip으로 압축해서 넘긴다**(`user_data_base64 = base64gzip(...)`). EC2는 user data를 base64로 바꾸기 전 바이트 기준 16 KiB까지만 받는다. 렌더링한 cloud-init은 한글 주석(UTF-8에서 글자당 3바이트), AWS CLI 서명 키, 스크립트가 들어가서 원문이 이미 한도를 넘는다(2026-10-01 기준 약 32.3 KB).
-  압축하면 약 13.8 KB이고 한도는 이 압축본에 걸린다. `test/render.sh`가 Terraform과 같은 식으로 압축본을 만들어 크기를 검사하고, cloud-init의 함수로 풀어 원문과 같은지도 본다. cloud-init은 gzip으로 압축된 user data를 스스로 풀어서 처리한다. `plan`에서 `user_data_base64`가 긴 base64 문자열로 보이는 것은 정상이다.
+- **`user_data`는 gzip으로 압축해서 넘긴다**(`user_data_base64 = base64gzip(...)`). EC2는 user data를 base64로 바꾸기 전 바이트 기준 16 KiB까지만 받는다. 렌더링한 cloud-init은 한글 주석(UTF-8에서 글자당 3바이트), AWS CLI 서명 키, 스크립트가 들어가서 원문이 이미 한도를 넘는다(2026-10-01 기준 약 34.0 KB).
+  압축하면 약 14.3 KB이고 한도는 이 압축본에 걸린다. `test/render.sh`가 Terraform과 같은 식으로 압축본을 만들어 크기를 검사하고, cloud-init의 함수로 풀어 원문과 같은지도 본다. cloud-init은 gzip으로 압축된 user data를 스스로 풀어서 처리한다. `plan`에서 `user_data_base64`가 긴 base64 문자열로 보이는 것은 정상이다.
   다만 압축 결과의 바이트는 Terraform을 빌드한 Go 버전에 따라 달라질 수 있다. Terraform을 올린 뒤 살아 있는 인스턴스에 `plan`하면 내용이 같아도 교체가 제안될 수 있다. 그 교체는 `apply`하지 말고 그 세션이 끝난 뒤 `destroy`한다.
 - **`user_data_replace_on_change = true`.** cloud-init은 첫 부팅 때 한 번만 실행해서, `user_data`만 바꾸면 바뀐 스크립트가 실행되지 않은 채 반영된 것처럼 보인다. 교체하면 항상 현재 코드가 만든 그대로 부팅한다.
 - **설치는 cloud-init이 아니라 systemd 서비스가 한다.** cloud-init의 `write_files`·`runcmd`는 인스턴스의 첫 부팅에만 돈다. 그래서 cloud-init은 파일을 쓰고 `devops-bootstrap.service`를 켜기만 하고, 그 서비스가 부팅마다 돌며 이미 된 단계는 건너뛴다. 실패하면 systemd가 90초 뒤 다시 시작한다(3시간 안에 10번까지).
