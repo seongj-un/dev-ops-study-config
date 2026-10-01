@@ -1,0 +1,26 @@
+{{- /*
+ServiceMonitor: Prometheus Operator에게 "이 Service 뒤의 파드에서 메트릭을 가져가라"고 알리는 리소스다(Prometheus Operator의 CRD).
+연산자가 이것을 Prometheus의 수집 설정(scrape_configs)으로 바꾸고, Prometheus는 Service의 엔드포인트(파드 IP:포트)를 하나씩 직접 긁는다.
+- selector: 이 릴리스의 앱 Service(component=app)만 고른다. 같은 릴리스의 PostgreSQL·Redis Service는 component 레이블이 달라서 빠진다.
+  namespaceSelector를 적지 않았으므로 ServiceMonitor와 같은 네임스페이스의 Service만 본다.
+- endpoints: Service의 포트 이름 management(8081)에서 /actuator/prometheus를 긁는다. 이 포트는 Ingress에 연결되지 않아 클러스터 밖에서는 닿지 않는다.
+- 연산자가 만든 수집 설정은 수집한 시계열에 namespace·service·pod·container·endpoint·job 레이블을 붙인다. job은 Service 이름(= 릴리스 이름, 예: shortener-dev)이고,
+  SLO 규칙(prometheusrule.yaml)은 namespace와 job으로 이 릴리스의 시계열만 고른다.
+CRD가 있을 때만 만드는 이유는 prometheusrule.yaml 머리말의 [조건부 생성]과 같다(ServiceMonitor도 kube-prometheus-stack이 설치하는 CRD다).
+*/ -}}
+{{- if and .Values.metrics.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "shortener.fullname" . }}
+  labels:
+    {{- include "shortener.labels" (dict "ctx" . "component" "app") | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "shortener.selectorLabels" (dict "ctx" . "component" "app") | nindent 6 }}
+  endpoints:
+    - port: management
+      path: /actuator/prometheus
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+{{- end }}
