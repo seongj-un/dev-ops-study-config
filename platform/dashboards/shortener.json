@@ -1,0 +1,951 @@
+{
+  "uid": "shortener",
+  "title": "Shortener",
+  "description": "URL 단축 서비스(dev·prod): SLO, 트래픽, 지연, 캐시, ERROR 로그. 이 대시보드는 Git(platform/dashboards/shortener.json)에서 온다. UI에서 고친 것은 저장되지 않는다.",
+  "tags": [
+    "shortener",
+    "slo",
+    "logs"
+  ],
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "links": [],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "namespace",
+        "label": "환경",
+        "type": "custom",
+        "query": "dev : shortener-dev,prod : shortener-prod",
+        "description": "앱 차트가 배포된 네임스페이스. 모든 패널이 namespace=\"$namespace\"로 고른다.",
+        "current": {
+          "text": "prod",
+          "value": "shortener-prod"
+        },
+        "options": [
+          {
+            "text": "dev",
+            "value": "shortener-dev",
+            "selected": false
+          },
+          {
+            "text": "prod",
+            "value": "shortener-prod",
+            "selected": true
+          }
+        ],
+        "multi": false,
+        "includeAll": false,
+        "hide": 0
+      },
+      {
+        "name": "availability_objective",
+        "type": "constant",
+        "query": "99.5",
+        "hide": 2,
+        "description": "가용성 SLO 목표(%). 앱 차트 values.yaml의 slo.availability.objective와 같게 둔다."
+      },
+      {
+        "name": "latency_objective",
+        "type": "constant",
+        "query": "99",
+        "hide": 2,
+        "description": "지연 SLO 목표(%). 앱 차트 values.yaml의 slo.latency.objective와 같게 둔다."
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "가용성 (1시간)",
+      "description": "최근 1시간 동안 5xx가 아닌 응답의 비율(1 - 5xx 비율). 차트의 SLO 기록 규칙 namespace_job:http_server_requests_errors:ratio_rate1h를 읽는다. 목표 99.5%보다 낮으면 빨간색. 요청이 없으면 0 ÷ 0이라 '요청 없음'으로 보인다.",
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "1 - namespace_job:http_server_requests_errors:ratio_rate1h{namespace=\"$namespace\"}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "noValue": "데이터 없음",
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "nan",
+                "result": {
+                  "text": "요청 없음",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.995
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "가용성 (6시간)",
+      "description": "최근 6시간 동안 5xx가 아닌 응답의 비율. 기록 규칙 namespace_job:http_server_requests_errors:ratio_rate6h를 읽는다.",
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "1 - namespace_job:http_server_requests_errors:ratio_rate6h{namespace=\"$namespace\"}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "noValue": "데이터 없음",
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "nan",
+                "result": {
+                  "text": "요청 없음",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.995
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "가용성 (1일)",
+      "description": "최근 1일 동안 5xx가 아닌 응답의 비율. 1일 창의 기록 규칙은 없어서 원래 지표로 바로 계산한다(SLO 규칙과 같은 식: /actuator 제외, 5xx가 한 번도 없으면 분자를 0으로 채움). Prometheus는 3일만 보존하고 클러스터는 공부할 때만 띄우므로 30일 예산 대신 이 창들을 본다.",
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "1 - (\n  (\n    sum(rate(http_server_requests_seconds_count{namespace=\"$namespace\", uri!~\"/actuator.*\", status=~\"5..\"}[1d]))\n    or\n    0 * sum(rate(http_server_requests_seconds_count{namespace=\"$namespace\", uri!~\"/actuator.*\"}[1d]))\n  )\n  /\n  sum(rate(http_server_requests_seconds_count{namespace=\"$namespace\", uri!~\"/actuator.*\"}[1d]))\n)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "noValue": "데이터 없음",
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "nan",
+                "result": {
+                  "text": "요청 없음",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.995
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "오류 예산 소진 속도: 가용성",
+      "description": "번 레이트 = 5xx 비율 ÷ 오류 예산(1 - 목표 $availability_objective%). 1이면 30일에 예산을 딱 다 쓰는 속도다. 경보(ShortenerAvailabilityBudgetBurn)는 1시간·5분이 모두 14.4를 넘거나 6시간·30분이 모두 6을 넘으면 울린다(점선).",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "namespace_job:http_server_requests_errors:ratio_rate5m{namespace=\"$namespace\"} / (1 - $availability_objective / 100)",
+          "legendFormat": "5분"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B",
+          "editorMode": "code",
+          "expr": "namespace_job:http_server_requests_errors:ratio_rate30m{namespace=\"$namespace\"} / (1 - $availability_objective / 100)",
+          "legendFormat": "30분"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "C",
+          "editorMode": "code",
+          "expr": "namespace_job:http_server_requests_errors:ratio_rate1h{namespace=\"$namespace\"} / (1 - $availability_objective / 100)",
+          "legendFormat": "1시간"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "D",
+          "editorMode": "code",
+          "expr": "namespace_job:http_server_requests_errors:ratio_rate6h{namespace=\"$namespace\"} / (1 - $availability_objective / 100)",
+          "legendFormat": "6시간"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "decimals": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 6
+              },
+              {
+                "color": "red",
+                "value": 14.4
+              }
+            ]
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "오류 예산 소진 속도: 지연",
+      "description": "번 레이트 = 0.3초보다 오래 걸린 응답의 비율 ÷ 오류 예산(1 - 목표 $latency_objective%). 경보(ShortenerLatencyBudgetBurn)의 기준은 가용성과 같다(점선 6, 14.4). le=\"0.3\" 버킷이 없는 앱 버전이면 비어 있다.",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "namespace_job:http_server_requests_slow:ratio_rate5m{namespace=\"$namespace\"} / (1 - $latency_objective / 100)",
+          "legendFormat": "5분"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B",
+          "editorMode": "code",
+          "expr": "namespace_job:http_server_requests_slow:ratio_rate30m{namespace=\"$namespace\"} / (1 - $latency_objective / 100)",
+          "legendFormat": "30분"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "C",
+          "editorMode": "code",
+          "expr": "namespace_job:http_server_requests_slow:ratio_rate1h{namespace=\"$namespace\"} / (1 - $latency_objective / 100)",
+          "legendFormat": "1시간"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "D",
+          "editorMode": "code",
+          "expr": "namespace_job:http_server_requests_slow:ratio_rate6h{namespace=\"$namespace\"} / (1 - $latency_objective / 100)",
+          "legendFormat": "6시간"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "decimals": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 6
+              },
+              {
+                "color": "red",
+                "value": 14.4
+              }
+            ]
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "초당 요청 수 (상태 코드 계열별)",
+      "description": "앱이 처리한 요청(/actuator 제외)을 상태 코드의 첫 자리로 묶은 초당 수. label_replace가 status(예: 302)에서 status_class(3xx)를 만든다. 리다이렉트는 302라서 3xx, 단축 URL 생성은 201이라 2xx다.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum by (status_class) (\n  label_replace(\n    rate(http_server_requests_seconds_count{namespace=\"$namespace\", uri!~\"/actuator.*\"}[$__rate_interval]),\n    \"status_class\", \"${1}xx\", \"status\", \"(.)..\"\n  )\n)",
+          "legendFormat": "{{status_class}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "5xx 비율",
+      "description": "5xx 응답의 비율. SLO 기록 규칙(5분·1시간 창)을 그대로 읽는다. 경보는 1시간·5분 비율이 모두 7.2%(14.4 × 오류 예산 0.5%)를 넘거나 6시간·30분 비율이 모두 3%(6 × 0.5%)를 넘으면 울리므로 네 창이 모두 경보의 입력이다. 이 패널은 그중 빠른 짝(5분·1시간)을 보이고, 네 창을 함께 보려면 '오류 예산 소진 속도: 가용성' 패널을 본다.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "namespace_job:http_server_requests_errors:ratio_rate5m{namespace=\"$namespace\"}",
+          "legendFormat": "5분 창"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B",
+          "editorMode": "code",
+          "expr": "namespace_job:http_server_requests_errors:ratio_rate1h{namespace=\"$namespace\"}",
+          "legendFormat": "1시간 창"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "응답 시간 p50·p95·p99",
+      "description": "앱의 히스토그램(http_server_requests_seconds_bucket)에서 계산한 분위수. 버킷 경계 사이는 선형으로 어림한다. 점선은 지연 SLO의 기준 0.3초다.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(http_server_requests_seconds_bucket{namespace=\"$namespace\", uri!~\"/actuator.*\"}[$__rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B",
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{namespace=\"$namespace\", uri!~\"/actuator.*\"}[$__rate_interval])))",
+          "legendFormat": "p95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "C",
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_requests_seconds_bucket{namespace=\"$namespace\", uri!~\"/actuator.*\"}[$__rate_interval])))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.3
+              }
+            ]
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "단축 URL 생성·리다이렉트 (초당)",
+      "description": "앱이 직접 세는 카운터: shortener_urls_shortened_total(단축 URL을 만들 때), shortener_redirects_total(짧은 주소로 리다이렉트할 때).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum(rate(shortener_urls_shortened_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "단축 URL 생성"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B",
+          "editorMode": "code",
+          "expr": "sum(rate(shortener_redirects_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "리다이렉트"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "캐시 적중률",
+      "description": "리다이렉트가 Redis 캐시를 조회한 결과의 비율(shortener_cache_requests_total의 result: hit·miss·error). 적중 = hit ÷ 전체. Redis 오류(error)는 캐시 미스처럼 DB에서 읽으므로 응답은 되지만 느려진다.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum(rate(shortener_cache_requests_total{namespace=\"$namespace\", result=\"hit\"}[$__rate_interval]))\n/\nsum(rate(shortener_cache_requests_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "적중(hit)"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B",
+          "editorMode": "code",
+          "expr": "sum(rate(shortener_cache_requests_total{namespace=\"$namespace\", result=\"error\"}[$__rate_interval]))\n/\nsum(rate(shortener_cache_requests_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "Redis 오류(error)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "앱 로그 줄 수 (레벨별)",
+      "description": "Loki에 들어온 앱 컨테이너 로그를 level 레이블(Alloy가 ECS JSON의 log.level에서 올린 값)별로 센 것. 레벨이 없는 줄(JSON이 아닌 줄)은 세지 않는다. INFO가 보이면 로그 수집(Alloy → Loki)은 살아 있다. 오른쪽 ERROR 패널이 비어 있을 때 '에러가 없음'과 '수집이 멈춤'을 가른다.",
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 24
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum by (level) (count_over_time({namespace=\"$namespace\", app=\"shortener\", container=\"shortener\", level=~\".+\"}[$__auto]))",
+          "legendFormat": "{{level}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 60,
+            "showPoints": "never",
+            "spanNulls": false,
+            "drawStyle": "bars",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "logs",
+      "title": "ERROR 로그",
+      "description": "앱 컨테이너의 level=\"ERROR\" 로그(Loki). | json이 ECS JSON의 필드를 꺼내고(중첩 키는 밑줄로 이어진다: log.logger → log_logger), line_format이 '로거: 메시지 (예외 종류: 예외 메시지)'로 줄인다. 줄을 펼치면 error_stack_trace 등 모든 필드가 보인다.",
+      "gridPos": {
+        "h": 10,
+        "w": 16,
+        "x": 8,
+        "y": 24
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "{namespace=\"$namespace\", app=\"shortener\", container=\"shortener\", level=\"ERROR\"}\n| json\n| line_format `{{.log_logger}}: {{.message}}{{if .error_type}} ({{.error_type}}: {{.error_message}}){{end}}`",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "prettifyLogMessage": false,
+        "showLabels": false,
+        "showCommonLabels": false
+      }
+    }
+  ],
+  "schemaVersion": 41,
+  "version": 1
+}

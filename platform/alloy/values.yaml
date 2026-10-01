@@ -1,0 +1,185 @@
+# Alloy 값: Helm 차트 grafana/alloy 1.13.0 (Alloy v1.20.0). ArgoCD의 alloy Application(argocd/apps/alloy.yaml)이 차트의 기본값 위에 이 파일을 얹어 monitoring 네임스페이스에 배포한다.
+# 적지 않은 값은 그 차트 버전의 기본값이다: helm show values grafana/alloy --version 1.13.0
+#
+# 하는 일: 노드마다 하나 뜨는 Alloy(DaemonSet)가 그 노드에 있는 모든 파드의 컨테이너 로그를 쿠버네티스 API로(kubectl logs -f와 같은 길) 읽어 Loki로 보낸다.
+# 흔한 방식인 "노드의 로그 파일(/var/log/pods)을 hostPath로 붙여 읽기"는 쓰지 않는다. 그 방식은 쿠버네티스 권한(RBAC)과 상관없이 노드에 있는 모든 파드의
+# 로그 파일을 직접 읽고, 그 파일을 읽으려고 보통 root로 띄운다(이 이미지의 기본 사용자도 root다). API로 읽으면 무엇을 읽을 수 있는지가 RBAC(pods/log 권한,
+# 아래 rbac)로 정해지고 노드의 파일은 하나도 보지 않는다. 대가: 로그가 kubelet → API 서버 → Alloy로 흘러 API 서버가 일을 더 한다(이 클러스터의 로그는 초당 수백 바이트라 작다).
+# hostNetwork도 쓰지 않는다. 이 클러스터의 불변식은 hostNetwork 파드를 띄우지 않는 것 하나다: 노드의 네트워크를 같이 쓰는 파드는 IMDSv2의 홉 제한(1)을 비켜
+# 인스턴스 역할을 얻는다(infra/aws/ec2.tf의 metadata_options). hostPath·hostPort를 쓰는 파드는 이 불변식과 상관없이 클러스터에 있다
+# (node-exporter의 /proc·/sys·/와 hostPID, k3s servicelb(svclb-traefik)의 hostPort 80·443, local-path 프로비저너가 볼륨 디렉터리를 만들고 지울 때 띄우는 도우미 파드).
+#
+# 이미지는 차트 버전이 정하는 태그를 그대로 쓴다(grafana/alloy:v1.20.0, quay.io/prometheus-operator/prometheus-config-reloader:v0.94.0 태그@다이제스트).
+# 고정의 단위가 차트 버전인 이유는 kube-prometheus-stack 값 파일 맨 위와 같다.
+# 접속: Ingress 없음. Alloy UI(파이프라인 그래프, 컴포넌트 상태, 읽고 있는 컨테이너 목록)는 kubectl -n monitoring port-forward ds/alloy 12345 뒤 http://localhost:12345 .
+#
+# 이 파일에는 빈 줄을 두지 않는다(아래 Alloy 설정 안도 같다. validate 워크플로가 yq '.'로 다시 써도 그대로인지 검사한다).
+# 차트가 PodLogs CRD(monitoring.grafana.com, loki.source.podlogs 컴포넌트용)를 설치하지 않게 한다. 쓰지 않는 CRD를 클러스터에 두지 않는다.
+crds:
+  create: false
+alloy:
+  configMap:
+    # Alloy 설정(Alloy 문법, // 뒤는 주석). 차트가 이 내용으로 ConfigMap을 만들고, 옆의 config-reloader 컨테이너가 파일이 바뀌면 Alloy에 다시 읽게 한다(파드는 다시 뜨지 않는다).
+    # 차트가 이 내용을 Helm의 tpl로 한 번 더 렌더링하므로 여는 중괄호 두 개를 연달아 쓰지 않는다(Helm 템플릿 문법으로 읽힌다).
+    # 문법 검사: 차트를 렌더링해 이 ConfigMap의 config.alloy를 꺼낸 뒤 alloy validate로 본다(README의 "로컬에서 검증하기").
+    content: |-
+      // 1) 이 노드의 파드를 찾는다. API 서버의 파드 목록을 지켜보고(watch) 컨테이너마다 대상(target)을 만든다(컨테이너의 포트마다 하나씩 생기지만,
+      //    3)의 loki.source.kubernetes가 레이블이 같은 대상을 하나로 합쳐 같은 컨테이너를 한 번만 읽는다).
+      //    필드 셀렉터로 이 노드(spec.nodeName)의 파드만 받는다. 노드가 늘어 Alloy가 여럿이 되어도 같은 컨테이너를 둘이 읽지 않는다.
+      //    K8S_NODE_NAME은 차트가 파드의 spec.nodeName으로 넣어 주는 환경 변수다.
+      discovery.kubernetes "pods" {
+        role = "pod"
+        selectors {
+          role  = "pod"
+          field = "spec.nodeName=" + sys.env("K8S_NODE_NAME")
+        }
+      }
+      // 2) Loki 레이블을 만든다. __로 시작하는 레이블(__meta_kubernetes_* 등)은 Loki로 가지 않으므로 남길 것만 새 이름으로 옮긴다
+      //    (3의 loki.source.kubernetes는 그중 네임스페이스·파드·컨테이너 이름과 파드 UID로 읽을 컨테이너를 고른 뒤 지운다).
+      //    레이블 값의 조합마다 스트림(색인 단위)이 따로 생기므로 가짓수가 적은 것만 둔다: namespace, pod, container,
+      //    app(파드의 app.kubernetes.io/name 레이블. 그 레이블이 없는 파드에는 app이 붙지 않는다).
+      discovery.relabel "pods" {
+        targets = discovery.kubernetes.pods.targets
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+          target_label  = "app"
+        }
+      }
+      // 3) 대상 컨테이너의 로그를 API로 따라 읽는다(GET /api/v1/namespaces/<ns>/pods/<파드>/log?follow=true). 컨테이너마다 마지막으로 읽은 줄의 시각을
+      //    저장 경로(--storage.path, 아래 mounts의 emptyDir)의 positions.yml에 적어 두고, 다시 시작하면 그 시각부터 읽는다. 기록이 없는 컨테이너는
+      //    지금 로그 파일의 처음부터 읽는다(Alloy보다 먼저 뜬 앱의 시작 로그도 들어온다). 이 컴포넌트가 job·instance 레이블을 더 붙인다(4에서 지운다).
+      loki.source.kubernetes "pods" {
+        targets    = discovery.relabel.pods.output
+        forward_to = [loki.process.pods.receiver]
+      }
+      // 4) 줄마다 처리한다.
+      loki.process "pods" {
+        forward_to = [loki.write.loki.receiver]
+        // job(컴포넌트 이름이라 늘 같은 값)과 instance("namespace/pod:container", pod·container와 같은 정보)를 버린다.
+        stage.label_drop {
+          values = ["job", "instance"]
+        }
+        // 앱 컨테이너의 줄만 JSON으로 읽는다. 같은 차트의 PostgreSQL·Redis 파드도 app="shortener"라서 container로 한 번 더 고른다.
+        stage.match {
+          selector = `{app="shortener", container="shortener"}`
+          // 앱 로그는 Spring Boot의 ECS 구조화 로그로, 한 줄이 JSON 하나다. 레벨은 중첩 객체 안에 있다: "log":{"level":"INFO","logger":"..."}
+          // (kubectl logs로 본 실제 줄의 모양. 점이 든 평평한 키 "log.level"이었다면 식이 "\"log.level\""여야 한다).
+          // JSON이 아닌 줄(JVM이 로깅보다 먼저 찍는 줄 등)은 레벨 없이 그대로 지나간다.
+          stage.json {
+            expressions = {
+              level = "log.level",
+            }
+          }
+          // 레벨만 레이블로 올린다(INFO·WARN·ERROR 등 몇 가지뿐이다). 나머지 필드(message, log.logger, error.stack_trace 등)는 줄 안에 두고
+          // 쿼리에서 | json으로 꺼낸다(대시보드의 ERROR 로그 패널).
+          stage.labels {
+            values = {
+              level = "",
+            }
+          }
+        }
+      }
+      // 5) Loki로 보낸다. 줄을 1MiB까지 묶어 보내고, 연결 오류·5xx·429(Loki의 수집 속도 한도)일 때만 기다림을 0.5초에서 두 배씩 늘려 다시 보낸다
+      //    (기본값으로 10번, 모두 약 8.5분. 그래도 안 되면 그 묶음은 버린다). 못 보낸 묶음이 10MiB만큼 쌓이면 3)이 읽기를 멈추고 기다린다.
+      //    그 밖의 4xx(예: 400 entry too far behind)는 다시 보내도 같으므로 다시 보내지 않고 "final error sending batch" 오류 로그를 남긴 뒤 그 묶음을 버린다.
+      loki.write "loki" {
+        endpoint {
+          url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+        }
+      }
+  # Grafana Labs로 익명 사용 통계를 보내지 않는다(차트가 --disable-reporting을 넣는다).
+  enableReporting: false
+  # 이미지의 기본 사용자는 root다(노드의 로그 파일을 읽는 구성에 맞춘 것). API로 읽으니 root가 필요 없어서 이미지에 있는 alloy 계정(UID·GID 473)으로 띄운다.
+  # 루트 파일시스템은 읽기 전용이고, 쓰는 곳은 저장 경로(아래 mounts) 하나다. capability는 하나도 필요 없다(12345 포트는 1024보다 크다).
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 473
+    runAsGroup: 473
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+  # 저장 경로(차트 기본값 --storage.path=/tmp/alloy)에 emptyDir(아래 controller.volumes)을 붙인다. 컨테이너가 다시 떠도(OOMKilled 등) 위치 기록이 남아 읽은 줄을 처음부터 다시 읽지 않는다.
+  # 위치는 줄을 읽어 다음 단계로 넘길 때 앞으로 가고 Loki가 받았다고 답할 때가 아니므로, OOMKilled 순간 loki.write에 쌓여 아직 보내지 못한 줄 가운데
+  # 위치가 이미 파일에 적힌 것(위치 파일은 10초마다 쓴다)은 다시 읽지 않아 잃는다.
+  # 파드가 새로 만들어지면(차트·값이 바뀌어 DaemonSet이 롤링될 때) emptyDir도 새것이라 컨테이너마다 지금 로그 파일을 처음부터 다시 보낸다.
+  # 시각과 내용이 같은 줄은 Loki가 한 번만 돌려주므로 쿼리에 중복으로 보이지는 않는다(Loki 3.6.11 로컬 컨테이너에서 같은 줄을 다시 보내 확인했다).
+  # 다시 보낸 줄 가운데 그 스트림의 가장 새 줄보다 1시간(Loki의 max_chunk_age 2h의 절반) 넘게 오래된 줄은 Loki가 "entry too far behind"로 버리고 400으로 답할 수 있어서,
+  # 이미 저장된 줄이라 잃는 것은 없지만(같은 묶음의 다른 줄은 저장된다) loki.write가 "final error sending batch, no retries left, dropping data" 오류 로그를 남긴다.
+  mounts:
+    extra:
+      - name: storage
+        mountPath: /tmp/alloy
+  extraEnv:
+    # Go 런타임의 메모리 목표(한도 256Mi의 약 90%). 힙이 이 근처에 오면 GC를 자주 돌려 한도에 닿기 전에 메모리를 돌려받는다.
+    - name: GOMEMLIMIT
+      value: 230MiB
+  # 같은 이미지와 이 설정(쿠버네티스 쪽 두 컴포넌트만 바꾼 것)으로 띄운 로컬 컨테이너의 working set이 약 46MiB였다. 클러스터에서는 파드 목록 캐시와
+  # 컨테이너마다(지금 약 30개) 열린 로그 스트림이 더해진다. 요청 96Mi는 그 평소 사용량을, 한도 256Mi는 파드가 새로 떠 모든 컨테이너의 로그를 처음부터
+  # 다시 보낼 때(못 보낸 줄이 위 5)의 10MiB까지 쌓인다)의 여유를 본 추정이다. 띄운 뒤 kubectl top pods -n monitoring으로 확인한다.
+  resources:
+    requests:
+      cpu: 20m
+      memory: 96Mi
+    limits:
+      memory: 256Mi
+controller:
+  # 노드마다 파드 하나(차트 기본값). 노드가 하나라 파드도 하나다.
+  type: daemonset
+  # 노드의 네트워크를 같이 쓰지 않는다. 차트 기본값도 false지만 이 클러스터의 불변식이라 적어 둔다(위 맨 위 주석). hostPath(mounts.varlog 등)도 기본값대로 끈 채 둔다(이유도 맨 위 주석).
+  hostNetwork: false
+  volumes:
+    extra:
+      # 위 저장 경로의 볼륨. 위치 기록(positions.yml)은 컨테이너 수 × 한 줄이라 작다. sizeLimit은 폭주해도 노드 디스크를 채우지 않게 하는 상한이다.
+      - name: storage
+        emptyDir:
+          sizeLimit: 64Mi
+configReloader:
+  # ConfigMap의 설정 파일이 바뀌면 Alloy의 /-/reload를 부르는 컨테이너(차트 기본값은 요청만 있고 한도가 없다).
+  # 같은 프로그램이 이 클러스터의 Prometheus·Alertmanager 옆에서 working set 10~11MiB를 썼다(4단계에 EC2에서 잰 값). 그래서 그쪽(kube-prometheus-stack 값)과 같은 크기로 둔다.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      memory: 64Mi
+rbac:
+  # 차트 기본 권한은 Alloy의 여러 컴포넌트를 위한 것이라 모든 네임스페이스의 Secret·ConfigMap 읽기까지 들어 있다(DB 비밀번호, Grafana 관리자 Secret 포함).
+  # 이 설정이 쓰는 두 컴포넌트에 필요한 것만 남긴다. rbac.namespaces를 비워 두어 아래 rules와 clusterRules가 ClusterRole 하나에 함께 들어간다.
+  # rules: discovery.kubernetes가 파드 목록을, loki.source.kubernetes가 파드와 그 로그(pods/log)를 읽는다.
+  rules:
+    - apiGroups:
+        - ""
+      resources:
+        - pods
+        - pods/log
+      verbs:
+        - get
+        - list
+        - watch
+  # clusterRules(클러스터 범위 리소스): 차트가 loki.source.kubernetes에 필요하다고 적은 namespaces만 둔다.
+  # 이 목록을 비우면 차트의 ClusterRole 템플릿이 깨진 YAML을 만든다(rules 목록 뒤에 []가 붙는다).
+  clusterRules:
+    - apiGroups:
+        - ""
+      resources:
+        - namespaces
+      verbs:
+        - get
+        - list
+        - watch

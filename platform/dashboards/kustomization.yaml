@@ -1,0 +1,19 @@
+# Grafana 대시보드: 이 디렉터리의 대시보드 JSON을 ConfigMap으로 만들어 monitoring 네임스페이스에 둔다.
+# monitoring-dashboards Application(argocd/apps/monitoring-dashboards.yaml)이 이 디렉터리를 kustomize로 렌더링해 배포한다.
+# Grafana 파드의 사이드카(platform/kube-prometheus-stack/values.yaml의 grafana.sidecar.dashboards)가 monitoring에서 레이블 grafana_dashboard: "1"이 붙은
+# ConfigMap을 지켜보다가, 그 data의 키마다 파일(키 이름 = 파일 이름)로 써서 Grafana에 넣는다. 대시보드를 더하려면 JSON 파일을 두고 아래 files에 한 줄을 더한다.
+# 대시보드 JSON은 Grafana UI에서 만들고 "Export → Export as JSON"으로 받은 것을 고쳐 쓴다. 데이터 소스는 uid로 가리킨다(Prometheus: prometheus, Loki: loki).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: monitoring
+generatorOptions:
+  # 이름 뒤에 내용의 해시를 붙이지 않는다. 해시는 이 ConfigMap을 이름으로 참조하는 Deployment가 내용이 바뀔 때 롤링되게 하려는 것인데,
+  # 사이드카는 이름이 아니라 레이블로 찾고 내용의 변경도 지켜보므로 필요 없다. 이름이 고정이면 내용이 바뀔 때 ArgoCD가 같은 ConfigMap을 고치고,
+  # 해시가 붙으면 바뀔 때마다 새 이름의 ConfigMap이 생기고 옛것은 prune으로 지워진다.
+  disableNameSuffixHash: true
+  labels:
+    grafana_dashboard: "1"
+configMapGenerator:
+  - name: grafana-dashboard-shortener
+    files:
+      - shortener.json

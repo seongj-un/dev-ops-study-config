@@ -1,0 +1,40 @@
+# 로그 저장소 Application: Loki(grafana/loki 차트, 단일 바이너리)를 platform/loki/values.yaml 값으로 monitoring 네임스페이스에 배포한다.
+# 루트 Application(argocd/root.yaml)이 이 파일을 읽어 클러스터에 Application을 만든다.
+#
+# 모양은 kube-prometheus-stack Application과 같은 multi-source다(차트 저장소의 차트 + 이 저장소의 값 파일. 설명은 argocd/apps/kube-prometheus-stack.yaml).
+# 차트 버전을 올릴 때는 아래 targetRevision과 값 파일 맨 위의 버전 표기를 함께 바꾼다. CI(validate.yml)가 이 파일에서 차트와 값 파일을 읽어 렌더링하고 스키마로 검사한다.
+# 로그를 보내는 쪽은 alloy Application(argocd/apps/alloy.yaml), 읽는 쪽은 Grafana의 Loki 데이터 소스다. 셋 사이에 동기화 순서는 없다:
+# Loki가 늦게 뜨면 Alloy가 보낼 묶음마다 기다림을 늘려 가며 다시 보내고(기본값으로 10번, 모두 약 8.5분. 그래도 안 되면 그 묶음은 버린다),
+# 그동안 Grafana에서는 로그 패널만 오류를 보인다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  # ArgoCD는 이 이름을 Helm 릴리스 이름으로 쓴다. 차트가 리소스 이름을 여기서 만들어 Service가 loki가 된다(Alloy와 Grafana가 쓰는 주소 loki.monitoring.svc).
+  name: loki
+  namespace: argocd
+spec:
+  project: default
+  sources:
+    - repoURL: https://grafana.github.io/helm-charts
+      chart: loki
+      # 정확한 버전으로 고정한다. 이미지 태그도 이 차트 버전이 정한다(값 파일 맨 위 주석).
+      targetRevision: 7.3.0
+      helm:
+        valueFiles:
+          - $values/platform/loki/values.yaml
+    - repoURL: https://github.com/seongj-un/dev-ops-study-config.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    # 자동 동기화와 prune·selfHeal은 다른 Application과 같다(argocd/apps/shortener-dev.yaml 참고).
+    # Loki의 PVC는 StatefulSet이 만든 것이라 ArgoCD가 추적하지 않는다. 다만 차트 기본값(persistentVolumeClaimRetentionPolicy의 whenDeleted: Delete)대로
+    # StatefulSet이 지워지면 쿠버네티스가 PVC도 지운다(값 파일의 singleBinary.persistence).
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # monitoring 네임스페이스가 없으면 만든다. 이미 있으면(kube-prometheus-stack이 먼저 만들었거나 부트스트랩이 만든 경우) 건드리지 않는다.
+      - CreateNamespace=true
