@@ -1,13 +1,14 @@
 # 앱 SLO 규칙(charts/shortener/templates/prometheusrule.yaml)의 단위 테스트. promtool이 가짜 시계열(input_series)을 넣고 규칙을 평가해서,
 # 정한 시각(eval_time)에 울리는 알림(alert_rule_test)과 PromQL 결과(promql_expr_test)를 기대값과 비교한다.
 # 규칙 파일은 저장소에 없고 차트를 렌더링해서 만든다(rendered/는 .gitignore). validate 워크플로의 "SLO 규칙 검사" 단계가 하는 일을 로컬에서 하려면 저장소 루트에서:
+#   KUBERNETES_VERSION=$(yq '.jobs.validate.env.KUBERNETES_VERSION' .github/workflows/validate.yml)
+#   PROMETHEUS_IMAGE=$(yq '.jobs.validate.steps[] | select(.env.PROMETHEUS_IMAGE) | .env.PROMETHEUS_IMAGE' .github/workflows/validate.yml)
 #   mkdir -p tests/slo/rendered
 #   for e in dev prod; do
-#     helm template shortener-$e charts/shortener -n shortener-$e --kube-version 1.35.0 \
+#     helm template shortener-$e charts/shortener -n shortener-$e --kube-version "$KUBERNETES_VERSION" \
 #       --api-versions monitoring.coreos.com/v1/PrometheusRule -f environments/$e/values.yaml \
 #       | yq 'select(.kind == "PrometheusRule") | .spec' > tests/slo/rendered/shortener-$e.yaml
 #   done
-#   PROMETHEUS_IMAGE=$(yq '.jobs.validate.steps[] | select(.env.PROMETHEUS_IMAGE) | .env.PROMETHEUS_IMAGE' .github/workflows/validate.yml)
 #   docker run --rm -v "$PWD/tests/slo:/slo:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" test rules /slo/shortener-slo.test.yaml
 #
 # 두 환경의 규칙 파일을 함께 읽는다. 실제 Prometheus도 하나가 dev와 prod를 함께 보므로, 한 환경의 장애가 다른 환경의 알림을 울리지 않는지도 함께 본다.
@@ -251,3 +252,63 @@ tests:
                 오류 예산은 요청의 0.5%다.
                 1시간·5분 비율이 모두 예산의 14.4배(7.2%)를 넘었거나 6시간·30분 비율이 모두 6배(3%)를 넘었다.
                 이 속도가 이어지면 30일치 예산이 14.4배에서는 약 2일, 6배에서는 5일 만에 바닥난다.
+
+  - name: (f) 롤아웃 중 le="0.3" 버킷이 없는 옛 파드와 있는 새 파드가 한 창에 섞여도 지연 알림은 울리지 않는다
+    interval: 1m
+    input_series:
+      # dev: 360분까지는 그 경계를 넣기 전의 이미지로 뜬 옛 파드가 분당 1000건을 받는다(le="0.3" 버킷이 없다).
+      # 360분에 새 이미지의 파드로 바뀌고(옛 파드가 사라져 361분에 stale 표시가 붙는다), 새 파드가 분당 1000건을 모두 0.3초 안에 처리한다.
+      # 그 경계가 든 이미지를 처음 배포할 때(prod 승격 포함)와 경계가 없는 태그로 되돌릴 때 이렇게 섞인다.
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", pod="shortener-dev-old", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
+        values: '0+1000x360 stale'
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", pod="shortener-dev-new", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
+        values: '_x360 0+1000x60'
+      - series: 'http_server_requests_seconds_bucket{namespace="shortener-dev", job="shortener-dev", pod="shortener-dev-new", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302", le="0.3"}'
+        values: '_x360 0+1000x60'
+    promql_expr_test:
+      # 359분: le 버킷이 있는 계열이 아직 없어서 느린 요청 비율도 없다.
+      - expr: namespace_job:http_server_requests_slow:ratio_rate30m
+        eval_time: 359m
+        exp_samples: []
+      # 375분: 30분 창의 요청은 옛 파드(346~360분)와 새 파드가 반씩이다. 분모가 버킷이 있는 새 파드의 요청만 세므로 느린 비율은 0이다
+      # (분모가 모든 계열을 세면 약 50%가 되어 지연 알림이 울린다).
+      - expr: round(namespace_job:http_server_requests_slow:ratio_rate30m, 0.0001)
+        eval_time: 375m
+        exp_samples:
+          - labels: '{namespace="shortener-dev", job="shortener-dev"}'
+            value: 0
+      # 420분까지 지연 알림이 한 번도 pending조차 되지 않았다.
+      - expr: count_over_time(ALERTS{alertname="ShortenerLatencyBudgetBurn"}[420m])
+        eval_time: 420m
+        exp_samples: []
+
+  - name: (g) 앱이 le="0.3" 버킷을 내보내지 않으면 느린 요청 비율이 비고 지연 알림도 울리지 않는다
+    interval: 1m
+    input_series:
+      # dev: 그 경계를 넣기 전의 앱. 기본 퍼센타일 히스토그램 버킷 중 0.3초에 가장 가까운 경계는 0.357913941초인데, 규칙은 다른 경계를 세지 않는다.
+      # 요청의 절반이 0.357913941초(그러니 0.3초도)를 넘어도 지연 SLO는 잴 수 없어서 비율이 빈다. 경계가 있는지는 앱 저장소의 테스트가
+      # /actuator/prometheus에서 확인한다(OpsEndpointsTest).
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
+        values: '0+1000x70'
+      - series: 'http_server_requests_seconds_bucket{namespace="shortener-dev", job="shortener-dev", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302", le="0.357913941"}'
+        values: '0+500x70'
+    promql_expr_test:
+      - expr: namespace_job:http_server_requests_slow:ratio_rate5m
+        eval_time: 70m
+        exp_samples: []
+      - expr: namespace_job:http_server_requests_slow:ratio_rate6h
+        eval_time: 70m
+        exp_samples: []
+      # 5xx 비율은 버킷과 상관없이 기록된다(5xx가 없으니 0).
+      - expr: namespace_job:http_server_requests_errors:ratio_rate5m
+        eval_time: 70m
+        exp_samples:
+          - labels: 'namespace_job:http_server_requests_errors:ratio_rate5m{namespace="shortener-dev", job="shortener-dev"}'
+            value: 0
+      - expr: count_over_time(ALERTS{alertname="ShortenerLatencyBudgetBurn"}[70m])
+        eval_time: 70m
+        exp_samples: []
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: ShortenerLatencyBudgetBurn
+        exp_alerts: []
