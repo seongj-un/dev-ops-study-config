@@ -205,7 +205,7 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 | **합계** | **110m** | **304Mi** | **1280Mi** |
 
 - application-controller·repo-server의 메모리 한도는 4단계에서 256Mi에서 512Mi로 올렸다. kube-prometheus-stack은 CRD가 커서(가장 큰 것이 JSON으로 약 486KiB)
-  컨트롤러가 캐시에 들고 있는 양이 늘고, repo-server 안에서 도는 `helm pull`·`helm template`이 이 차트에서 최대 RSS 약 190MiB·130MiB를 쓴다(로컬에서 잰 값과 계산은 `bootstrap/argocd/values.yaml`).
+  컨트롤러가 캐시에 들고 있는 양이 늘고, repo-server 안에서 도는 `helm pull`·`helm template`이 이 차트에서 최대 RSS를 각각 195MiB·134MiB까지 쓴다(로컬에서 잰 값과 계산은 `bootstrap/argocd/values.yaml`).
   EC2에서는 부트스트랩이 ArgoCD가 이미 설치돼 있으면 건너뛰므로, 이 값은 인스턴스를 새로 만들 때 적용된다. 떠 있는 클러스터에 바로 넣으려면
   부트스트랩 2번의 `helm upgrade --install`을 다시 돌린다(EC2에서는 위에 적은 대로 `--set server.ingress.enabled=false`도 함께 준다).
 

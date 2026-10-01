@@ -83,8 +83,8 @@ repoServer:
   # Git 저장소를 복제해 두고 helm template으로 매니페스트를 만들어 컨트롤러에 돌려준다. git·helm 프로세스를 띄울 때 메모리가 잠깐 튄다(위 reposerver.parallelism.limit).
   # 한도 512Mi = 작은 차트(shortener)만 렌더링할 때 잡은 256Mi + kube-prometheus-stack 몫 256Mi(4단계에서 올렸다). repo-server는 차트 저장소의 차트를
   # helm pull로 받아 두고 helm template으로 렌더링하는데, 둘 다 이 컨테이너 안의 자식 프로세스라 그 메모리가 이 한도에 함께 세어진다.
-  # 이 차트로 ArgoCD와 같은 명령을 돌려 잰 helm 프로세스의 최대 RSS(로컬 맥, Helm 4.3.0, /usr/bin/time -l로 각 5번):
-  #   helm pull --repo(차트 저장소의 index.yaml 약 6.3MB를 읽는다) 173~193MiB, helm template --include-crds(이 저장소의 값) 116~134MiB.
+  # 이 차트로 ArgoCD와 같은 명령을 돌려 잰 helm 프로세스의 최대 RSS(로컬 맥, Helm 4.3.0, /usr/bin/time -l로 각 10번):
+  #   helm pull --repo(차트 저장소의 index.yaml 약 6.3MB를 읽는다) 173~195MiB, helm template --include-crds(이 저장소의 값) 112~134MiB.
   # 256Mi에서는 helm pull 하나만으로 repo-server 자신에게 60Mi 남짓만 남고, helm template 뒤에는 repo-server가 그 출력(YAML 5.0MiB)을 객체로 푼다(이 몫은 재지 못했다).
   resources:
     requests:
