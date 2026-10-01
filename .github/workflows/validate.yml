@@ -255,3 +255,30 @@ jobs:
           done
           # 고르는 식이 깨져 아무것도 검사하지 않고 통과하는 일을 막는다.
           [ "$checked" -gt 0 ] || { echo "::error::chart 소스가 있는 Application을 argocd/apps에서 하나도 찾지 못했다"; exit 1; }
+
+      # platform/dashboards(monitoring-dashboards Application)를 ArgoCD처럼 kustomize로 렌더링해 스키마로 검사하고, 대시보드 JSON 파일을 jq로 검사한다.
+      #   1) jq: 파일마다 JSON으로 읽히고, 객체이며 uid·title이 문자열인지 본다. 깨진 JSON은 사이드카가 넣어도 Grafana가 읽지 못하고 로그에 오류만 남긴다.
+      #      uid가 없으면 Grafana가 대시보드를 읽을 때마다 새 uid를 만들어(Grafana의 DB는 emptyDir이라 파드가 다시 뜨면 처음부터 읽는다) 대시보드 주소(/d/<uid>)가 바뀐다.
+      #   2) kustomize build: ArgoCD가 하는 렌더링이다. kustomization.yaml의 오류(목록에 있는데 없는 파일 등)가 여기서 걸린다.
+      #      러너 이미지에 미리 깔린 kustomize(5.8.1, 2026-09 기준)를 쓴다. ArgoCD v3.5.3에 들어 있는 kustomize도 5.8.1이다(ArgoCD 저장소의 hack/tool-versions.sh).
+      #      러너 이미지가 갱신되어 버전이 달라지면 이 단계 출력의 첫 줄(kustomize version)에서 보인다.
+      #   3) kubeconform: 렌더링 결과(ConfigMap)를 내장 리소스 스키마로 검사한다(-strict).
+      - name: 대시보드 렌더링 + 스키마 검사, JSON 검사 (platform/dashboards)
+        run: |
+          set -euo pipefail
+          kustomize version
+          status=0
+          for file in platform/dashboards/*.json; do
+            if jq -e 'type == "object" and (.uid | type == "string") and (.title | type == "string")' "$file" > /dev/null; then
+              echo "$file: JSON이고 uid·title이 있다"
+            else
+              echo "::error file=$file::JSON으로 읽히지 않거나(위 jq의 오류) uid·title이 문자열이 아니다"
+              status=1
+            fi
+          done
+          [ "$status" = 0 ] || exit 1
+          kustomize build platform/dashboards > "$RUNNER_TEMP/dashboards.yaml"
+          docker run -i --rm "$KUBECONFORM_IMAGE" \
+            -strict -summary \
+            -schema-location "$K8S_SCHEMA_LOCATION" \
+            -kubernetes-version "$KUBERNETES_VERSION" - < "$RUNNER_TEMP/dashboards.yaml"
