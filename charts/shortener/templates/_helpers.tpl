@@ -122,3 +122,36 @@ REDIS_PORT: {{ .Values.redis.port | quote }}
 SHORTENER_BASE_URL: {{ .Values.baseUrl | quote }}
 SHORTENER_CACHE_TTL: {{ .Values.cacheTtl | quote }}
 {{- end }}
+
+{{- /*
+지연 SLO의 기준(slo.latency.thresholdSeconds)을 히스토그램 le 레이블의 값으로 바꾼다. PromQL의 le="..." 매처는 문자열을 글자 그대로 비교하므로
+Prometheus에 저장된 값과 정확히 같아야 한다. Prometheus 3은 수집할 때 le 값을 OpenMetrics의 실수 표기로 정규화해 저장한다: 0.3은 "0.3", 1은 "1.0"이다.
+Helm은 값 파일의 1(1.0으로 적어도 마찬가지다)을 "1"로 출력하므로, 소수점도 지수 표기(e)도 없으면 ".0"을 붙여 저장된 값과 맞춘다.
+*/}}
+{{- define "shortener.sloLatencyLe" -}}
+{{- $le := .Values.slo.latency.thresholdSeconds | toString -}}
+{{- if not (regexMatch "[.e]" $le) -}}
+{{- $le = printf "%s.0" $le -}}
+{{- end -}}
+{{- $le -}}
+{{- end }}
+
+{{- /*
+SLO 번 레이트 알림의 조건식(PromQL). 가용성·지연 알림이 같은 식을 쓴다. 이 모양의 이유는 prometheusrule.yaml 머리말의 [번 레이트]·[다중 창]에 있다.
+기준은 미리 계산한 숫자가 아니라 "14.4 * (1 - 99.5 / 100)"처럼 목표에서 PromQL이 계산하게 적는다: 식에 목표가 그대로 보이고, 목표를 바꾸면 기준도 함께 바뀐다.
+and·or는 양쪽에서 레이블(namespace, job)이 같은 시계열끼리 짝짓는다. 식의 값은 or의 왼쪽(1시간 비율)이 있으면 그것이고, 없으면 오른쪽(6시간 비율)이다.
+인자: dict "record" <기록 규칙 이름 중 :ratio_rate<창> 앞부분> "namespace" <네임스페이스> "job" <job> "objective" <목표(%)>
+*/}}
+{{- define "shortener.sloBurnRateAlertExpr" -}}
+(
+  {{ .record }}:ratio_rate1h{namespace="{{ .namespace }}", job="{{ .job }}"} > (14.4 * (1 - {{ .objective }} / 100))
+  and
+  {{ .record }}:ratio_rate5m{namespace="{{ .namespace }}", job="{{ .job }}"} > (14.4 * (1 - {{ .objective }} / 100))
+)
+or
+(
+  {{ .record }}:ratio_rate6h{namespace="{{ .namespace }}", job="{{ .job }}"} > (6 * (1 - {{ .objective }} / 100))
+  and
+  {{ .record }}:ratio_rate30m{namespace="{{ .namespace }}", job="{{ .job }}"} > (6 * (1 - {{ .objective }} / 100))
+)
+{{- end }}
