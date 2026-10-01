@@ -58,7 +58,7 @@ Terraform이 만드는 리소스는 15개다: VPC, IGW, 서브넷, 라우트 테
 | `admin_cidr` | (필수) | k3s API(6443)에 접속할 내 IP. 반드시 `/32` |
 | `region` | `ap-northeast-2` | 리소스를 만들 리전 |
 | `instance_type` | `m7i-flex.large` | 2 vCPU, 8 GiB. Free Tier 대상 유형이지만 이 계정은 유료 플랜이라 시간당 과금된다([비용](#비용)) |
-| `k3s_version` | `v1.35.8+k3s1` | 로컬 k3d와 같은 버전. v1.35.5+k3s1은 EC2 첫 부팅에서 k3s가 재시작을 되풀이해서 올렸다(`variables.tf`의 주석) |
+| `k3s_version` | `v1.35.8+k3s1` | 로컬 k3d와 같은 버전. v1.35.5+k3s1은 EC2 첫 부팅에서 k3s가 재시작을 되풀이해서 올렸다([k3s가 재시작을 되풀이할 때](#k3s가-재시작을-되풀이할-때)) |
 | `helm_version` | `v4.3.0` | ArgoCD 설치에만 쓰는 도구 |
 | `argocd_chart_version` | `10.9.4` | `bootstrap/argocd/values.yaml`이 가정하는 차트 버전 |
 | `duckdns_token_parameter` | `/dev-ops-study/duckdns-token` | 토큰을 담은 SSM 파라미터 이름(`/`로 시작) |
@@ -123,7 +123,7 @@ terraform apply aws.tfplan
 |---|---|---|
 | 약 0:30~0:45 | cloud-init이 runcmd에서 `devops-bootstrap.service`를 시작한다 | `시작 (이전 완료: 없음)`, `STEP: 1/8 unzip` |
 | 약 1:30~2:30 | DuckDNS 이름이 새 IP를 가리킨다 | `STEP: 3/8 DuckDNS` 다음의 `DuckDNS: <서브도메인>.duckdns.org -> <IP>` |
-| 약 2:30~4:00 | k3s 설치, 노드 Ready | `확인: k3s 노드 Ready` |
+| 약 2:30~4:00 | k3s 설치, 안정 확인(5초 간격 6번 연속 통과, 약 30초) | `확인: k3s 안정(6번 연속 통과, NRestarts …)` |
 | 약 6~9분 | ArgoCD 설치와 루트 Application 적용이 끝나 부트스트랩 완료 | `완료(…초)`. `/var/lib/devops-bootstrap.done`이 생긴다 |
 | 약 9~13분 | ArgoCD가 dev·prod 앱을 동기화해 `Synced`가 된다(앱, PostgreSQL, Redis 이미지 내려받기 포함) | 로그에는 없다. `kubectl -n argocd get applications`로 본다 |
 
@@ -148,21 +148,22 @@ aws ssm get-command-invocation --region ap-northeast-2 --instance-id "$INSTANCE_
 
 - 인스턴스가 SSM에 등록되기 전(부팅 뒤 1~2분)에는 `send-command`가 `InvalidInstanceId`로 실패한다. 잠시 뒤 다시 한다.
 - 다른 명령도 같은 방법으로 보낸다. `--parameters`의 `commands` 목록만 바꾸고 나머지 두 줄은 그대로 쓴다. 명령은 root로 돈다.
-- 로그에는 단계마다 `STEP: <번호>/8 <이름>` 줄이 있어서 마지막 `STEP:`이 지금 단계다. `STEP: 6/8 ArgoCD`에서 오래 머무는 것은 정상이다(`helm --wait`가 최대 10분 기다린다). 단계가 실패하면 `실패: STEP <단계>, <줄>번 줄, 종료 코드 <코드>: <명령>` 줄이 남는다(줄 번호는 인스턴스의 `/usr/local/sbin/devops-bootstrap` 기준).
+- 로그에는 단계마다 `STEP: <번호>/8 <이름>` 줄이 있어서 마지막 `STEP:`이 지금 단계다. `STEP: 4/8 k3s`와 `STEP: 6/8 ArgoCD`에서 오래 머무는 것은 정상이다(k3s 안정 확인이 최대 10분, `helm --wait`가 최대 10분 기다린다). k3s 안정 확인은 기다리는 이유가 바뀔 때마다 `대기: <이유>` 줄을 남긴다. 단계가 실패하면 `실패: STEP <단계>, <줄>번 줄, 종료 코드 <코드>: <명령>` 줄이 남는다(줄 번호는 인스턴스의 `/usr/local/sbin/devops-bootstrap` 기준).
 - `state:`와 `done:` 읽는 법:
 
 | 출력 | 뜻 |
 |---|---|
-| `state: activating` | 부트스트랩이 도는 중이다. 실패한 뒤 60초 재시작을 기다리는 동안도 `activating`이라, 로그 끝에 `실패:` 줄이 있는지 함께 본다 |
+| `state: activating` | 부트스트랩이 도는 중이다. 실패한 뒤 90초 재시작을 기다리는 동안도 `activating`이라, 로그 끝에 `실패:` 줄이 있는지 함께 본다 |
 | `state: inactive`, `done: <시각>` | 이번 부팅의 부트스트랩이 끝났다. 끝난 oneshot 서비스는 `active`가 아니라 `inactive`로 돌아간다 |
 | `state: inactive`, `done:` 비어 있음 | 아직 시작 전이다(cloud-init이 runcmd에 닿기 전) |
-| `state: failed` | 2시간 안에 3번 실패해서 systemd가 재시작을 멈췄다. 로그의 마지막 `STEP:`과 `실패:` 줄로 원인을 고친 뒤 아래처럼 다시 돌린다 |
+| `state: failed` | 3시간 안에 10번 시작해 모두 실패해서 systemd가 재시작을 멈췄다. 로그의 마지막 `STEP:`과 `실패:` 줄로 원인을 고친 뒤 아래처럼 다시 돌린다 |
 
 완료 표시(`/var/lib/devops-bootstrap.done`)는 부트스트랩이 시작할 때마다 지워지고 끝까지 성공해야 다시 생긴다. 그래서 `done:`에 시각이 있으면 이번 부팅의 실행이 성공한 것이다.
 
 ### 실패한 부트스트랩 다시 돌리기
 
-systemd는 실패한 부트스트랩을 60초 뒤 다시 시작하되 2시간 안에 3번(첫 시작 포함)까지만 한다. 아래 명령의 `INSTANCE_ID`는 [진행 확인](#진행-확인)의 첫 줄로 정한다. 그 2시간 안에는 손으로 한 `systemctl start`도 시작 제한(`start-limit-hit`)으로 거부되므로 `systemctl reset-failed`로 횟수를 먼저 지운다. `--no-block`은 설치가 끝나기를 기다리지 않고 바로 돌아오게 한다. 진행은 위 확인 명령으로 본다.
+systemd는 실패한 부트스트랩을 90초 뒤 다시 시작하되, 첫 시작부터 3시간 안에 10번(첫 시작 포함)까지만 한다. 재시도 사이 대기만 13.5분(9 × 90초)이라 금방 실패하는 일시적 문제(API가 잠깐 끊김, 내려받기 실패)도 시도 시간을 더해 20분 넘게 다시 해 본다. 예전 값(60초, 2시간에 3번)은 첫 부팅에서 약 3분 만에 포기했다. 시도마다 `TimeoutStartSec`(60분)까지 걸리면 3시간 안에 10번이 차지 않고, 3시간이 지나면 횟수를 처음부터 다시 세므로 재시도가 멈추지 않는다.
+아래 명령의 `INSTANCE_ID`는 [진행 확인](#진행-확인)의 첫 줄로 정한다. 그 3시간 안에는 손으로 한 `systemctl start`도 시작 제한(`start-limit-hit`)으로 거부되므로 `systemctl reset-failed`로 횟수를 먼저 지운다. `--no-block`은 설치가 끝나기를 기다리지 않고 바로 돌아오게 한다. 진행은 위 확인 명령으로 본다.
 
 ```bash
 aws ssm send-command --region ap-northeast-2 --instance-ids "$INSTANCE_ID" \
@@ -175,8 +176,8 @@ aws ssm send-command --region ap-northeast-2 --instance-ids "$INSTANCE_ID" \
 
 ### 재부팅할 때
 
-인스턴스를 재부팅하거나 멈췄다 시작하면 부트스트랩이 다시 돈다. 이미 된 단계는 건너뛰고 DuckDNS 갱신과 k3s Ready 대기만 하므로 보통 30~60초 걸린다.
-이 서비스는 `WantedBy=multi-user.target`인 oneshot이라 **재부팅할 때마다 부팅 완료(`multi-user.target`)가 부트스트랩이 끝나기를 기다린다.** 보통 30~60초이고, 단계가 멈추면 최악에는 `TimeoutStartSec`(45분)까지 기다린다.
+인스턴스를 재부팅하거나 멈췄다 시작하면 부트스트랩이 다시 돈다. 이미 된 단계는 건너뛰고 DuckDNS 갱신과 k3s 안정 확인(5초 간격 6번 연속, 최소 약 30초)만 하므로 보통 1분 안팎 걸린다.
+이 서비스는 `WantedBy=multi-user.target`인 oneshot이라 **재부팅할 때마다 부팅 완료(`multi-user.target`)가 부트스트랩이 끝나기를 기다린다.** 보통 1분 안팎이고, 단계가 멈추면 최악에는 `TimeoutStartSec`(60분)까지 기다린다.
 의도한 동작이다. k3s와 SSM 에이전트는 이 서비스를 기다리지 않고 함께 뜨므로, 그동안에도 앱이 올라오고 SSM 명령이 된다.
 
 ## 접속하기
@@ -269,9 +270,11 @@ terraform destroy \
 |---|---|
 | 부트스트랩 로그에 `경고: DuckDNS 갱신 실패`가 있고 이름이 새 IP를 가리키지 않는다 | 토큰 파라미터가 없거나 이름·리전이 틀렸거나(`ParameterNotFound`), 토큰이나 서브도메인이 틀렸다(DuckDNS가 `KO`). `plan`·`apply`는 이것을 잡지 못한다. [준비물](#준비물) 4번의 `describe-parameters`로 파라미터를 확인한다. 오류 내용은 첫 실행분이 부트스트랩 로그에, 그 뒤 타이머 실행분이 `journalctl -u duckdns-update -n 20 --no-pager`에 있다. 고치면 타이머가 5분 안에 다시 갱신한다. |
 | 로그 끝이 `실패: STEP 2/8 AWS CLI, … gpgv …`이고 그 위에 `BAD signature` 또는 `Can't check signature: No public key`가 있다 | AWS CLI zip의 서명 검사가 실패했다. 내려받기가 깨진 것이면 systemd의 재시작에서 풀린다. `No public key`가 계속되면 AWS가 서명 키를 바꾼 것이다: [AWS CLI 설치 문서](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)의 공개 키 블록으로 `cloud-init.yaml.tftpl`의 `/etc/devops/aws-cli.asc`와 `test/container-checks.sh`의 지문을 고친다. `user_data`가 바뀌므로 인스턴스가 교체된다. |
-| 로그 끝이 `실패: STEP 6/8 ArgoCD, …`이고 그 위에 `another operation (install/upgrade/rollback) is in progress`가 있다 | 첫 ArgoCD 설치가 중간에 끊겨(재부팅, 시간 초과) Helm 릴리스가 `pending-install`에 걸렸다. 부트스트랩은 릴리스가 `deployed`가 아니면 다시 설치하는데, Helm은 이 상태의 릴리스를 건드리지 않는다. 릴리스를 지우고 부트스트랩을 다시 돌린다(아래 명령). |
+| 로그 끝이 `실패: k3s가 600초 안에 안정되지 않았다(마지막 이유: …)`다 | k3s가 뜨지 않거나 재시작을 되풀이한다. [k3s가 재시작을 되풀이할 때](#k3s가-재시작을-되풀이할-때)를 본다. |
+| 로그에 `ArgoCD 릴리스가 pending-install: uninstall하고 다시 설치`(또는 `… rollback`)가 있다 | 정상이다. 앞선 시도의 helm이 작업 도중 끊겨(k3s API가 끊김, 재부팅, 시간 초과) 릴리스가 `pending-*`나 `failed`로 남은 것을 6단계가 정리했다. Helm은 마지막 리비전이 `pending-*`이면 upgrade를 `another operation (install/upgrade/rollback) is in progress`로 거부하고, 그 helm이 이미 없어도 상태가 남아 저절로 풀리지 않는다. 그래서 성공했던 리비전(`deployed`, `superseded`)이 있으면 그리로 `rollback`하고, 없으면(첫 설치가 끊기거나 실패했다) `uninstall`한 뒤 다시 설치한다. 지워도 ArgoCD의 CRD는 남고(차트가 지우지 않게 표시해 둔다), 다시 설치할 때 그대로 이어받는다. 릴리스 기록은 `export HOME=/root KUBECONFIG=/etc/rancher/k3s/k3s.yaml` 뒤 `helm -n argocd history argocd`로 본다. |
+| 로그 끝이 `실패: STEP 6/8 ArgoCD, …`이고 그 위에 `another operation (install/upgrade/rollback) is in progress`가 있다 | 6단계가 릴리스 상태를 본 뒤에 다른 helm 작업이 시작됐다. 부트스트랩은 잠금으로 한 번에 하나만 돌므로 손으로 돌린 helm이 겹친 것이다. 그 작업이 끝나면 systemd의 재시도(90초 뒤)가 이어서 한다. |
 | `kubectl get pods -A`에 `ErrImagePull`이나 `ImagePullBackOff`가 있고 `kubectl describe pod`의 이벤트에 `toomanyrequests`가 보인다 | Docker Hub가 로그인하지 않은 내려받기를 IP마다 횟수로 제한한다. Docker Hub에서 받는 것은 k3s 기본 구성 요소(`rancher/...`: Traefik, CoreDNS 등)와 앱의 PostgreSQL·Redis다(ArgoCD 이미지는 quay.io와 ECR Public이라 무관하다). 기다리면 된다: 제한이 풀리면 kubelet이 다시 받아 저절로 뜬다. |
-| [진행 확인](#진행-확인)의 상태가 `state: failed`다 | 2시간 안에 3번 실패해서 systemd가 재시작을 멈췄다. 로그의 마지막 `STEP:`·`실패:` 줄로 원인을 고친 뒤 [실패한 부트스트랩 다시 돌리기](#실패한-부트스트랩-다시-돌리기)의 명령을 쓴다(`systemctl reset-failed`가 먼저다). |
+| [진행 확인](#진행-확인)의 상태가 `state: failed`다 | 3시간 안에 10번 시작해 모두 실패해서 systemd가 재시작을 멈췄다. 로그의 마지막 `STEP:`·`실패:` 줄로 원인을 고친 뒤 [실패한 부트스트랩 다시 돌리기](#실패한-부트스트랩-다시-돌리기)의 명령을 쓴다(`systemctl reset-failed`가 먼저다). |
 | `send-command`가 `InvalidInstanceId`로 실패한다 | 인스턴스가 아직 SSM에 등록되지 않았다(부팅 뒤 1~2분). `aws ssm describe-instance-information --region ap-northeast-2`에 인스턴스가 `Online`으로 나올 때까지 기다린다. |
 | `ssm start-session`이 `TargetNotConnected`로 실패한다 | 위와 같은 이유다. `Online`이 될 때까지 기다린다. |
 | `ssm start-session`이 `SessionManagerPlugin is not found`로 실패한다 | 로컬에 Session Manager 플러그인이 없다. 설치하거나(`brew install --cask session-manager-plugin`), 이 문서의 `send-command` 방법을 쓴다. |
@@ -282,22 +285,34 @@ terraform destroy \
 | `plan`이 인스턴스 교체를 보여 준다 | 설계대로다. `user_data`가 바뀌면(`cloud-init.yaml.tftpl`이나 `bootstrap/argocd/values.yaml`의 값을 고치면) 인스턴스를 교체한다(`user_data_replace_on_change`). 인스턴스 안의 데이터는 사라진다. |
 | 새 AMI를 쓰고 싶다 | `ami`는 `ignore_changes`라서 Canonical이 새 이미지를 내도 plan에 나타나지 않는다. `terraform apply -replace=aws_instance.k3s`로 일부러 교체한다(다음 `apply`는 어차피 그때의 최신 AMI로 만든다). |
 
-Helm 릴리스가 `pending-install`에 걸렸을 때. 첫 명령이 릴리스 상태를 출력하고(`STATUS: pending-install`), 릴리스를 지운 뒤 부트스트랩을 다시 시작한다. 지워도 ArgoCD의 CRD는 남고(차트가 지우지 않게 표시해 둔다), 다시 설치할 때 그대로 이어받는다.
+### k3s가 재시작을 되풀이할 때
 
-```bash
-aws ssm send-command --region ap-northeast-2 --instance-ids "$INSTANCE_ID" \
-  --document-name AWS-RunShellScript \
-  --parameters '{"commands":["export HOME=/root KUBECONFIG=/etc/rancher/k3s/k3s.yaml","helm -n argocd status argocd || true","helm -n argocd uninstall argocd","systemctl reset-failed devops-bootstrap","systemctl start --no-block devops-bootstrap"]}' \
-  --query Command.CommandId --output text
-```
+4단계는 k3s가 안정될 때까지 기다린다. 5초 간격으로 확인해 6번 연속 아래가 모두 맞아야 넘어가고(약 30초), 하나라도 어긋나면 처음부터 다시 센다. 상한은 600초다.
+
+- API 서버의 `/readyz`가 `ok`를 돌려준다. 저장된 객체가 아니라 지금 살아 있는 API 서버의 답이다.
+- 노드가 `Ready`이고 `node.cloudprovider.kubernetes.io/uninitialized` taint가 없다. 내장 cloud-controller-manager(CCM)를 쓰면 k3s가 kubelet을 `--cloud-provider=external`로 띄워 kubelet이 노드를 처음 등록할 때 이 taint를 붙이고, CCM이 노드를 초기화해야 지운다.
+- 그동안 k3s 서비스의 `NRestarts`(systemd가 `Restart=`로 다시 시작한 횟수)가 그대로다.
+
+노드의 `Ready` 한 번으로 넘어가지 않는 이유: Node의 Ready 조건은 kubelet이 마지막으로 써 둔 값이고, 그것을 `Unknown`으로 바꾸는 노드 수명 주기 컨트롤러는 kubelet 소식이 일정 시간(`node-monitor-grace-period`) 끊겨야 움직인다. k3s는 API 서버·컨트롤러·kubelet이 한 프로세스라 함께 죽고 함께 살아나서, 재시작을 되풀이하는 동안에도 `Ready=True`가 남는다. 예전 부트스트랩은 이 값 한 번으로 넘어가서 helm이 `127.0.0.1:6443` `connection refused`로 실패했다.
+
+기다리는 동안 이유가 바뀔 때마다 로그에 `대기: <이유>` 줄이 남는다. 마지막 이유로 어디서 막혔는지 본다(확인 명령은 [진행 확인](#진행-확인)의 `send-command`로 보낸다).
+
+| 이유 | 뜻 |
+|---|---|
+| `k3s가 다시 시작됐다(NRestarts a -> b)` | k3s 프로세스가 죽고 있다. 원인은 `journalctl -u k3s -n 100 --no-pager`에 있다 |
+| `CCM이 아직 노드를 초기화하지 않았다: …` | k3s 안의 CCM이 노드를 초기화하지 못했다. `journalctl -u k3s --no-pager \| grep -i cloud-controller`로 본다 |
+| `/readyz: …` | API 서버가 아직 준비되지 않았거나(시작 직후) 내려가 있다 |
+
+2026-10-01 첫 부팅(`v1.35.5+k3s1`)이 이 경우였다. k3s에 들어 있는 CCM이 쓸 권한이 아직 없을 때 configmap `extension-apiserver-authentication`을 읽다가 forbidden을 받고 끝났고, k3s는 그 컨트롤러가 끝나면 프로세스 전체를 끝내서 재시작이 되풀이됐다(인스턴스를 띄우고 12분 뒤 `NRestarts` 59).
+업스트림 이슈 [k3s-io/k3s#7328](https://github.com/k3s-io/k3s/issues/7328)이고 [PR #14201](https://github.com/k3s-io/k3s/pull/14201)로 고쳐져 `v1.35.6+k3s1`부터 들어 있어서, 그 수정이 든 가장 새 안정 v1.35 릴리스인 `v1.35.8+k3s1`(2026-08-27)로 올렸다. 같은 버전의 로컬 k3d(맥)에서는 나지 않았다: 시간 순서에 달린 경쟁이라 빠른 맥에서는 권한이 먼저 생기고, 2 vCPU EC2에서는 CCM이 먼저 읽었다.
 
 ## 이 스택의 설계 메모
 
-- **`user_data`는 gzip으로 압축해서 넘긴다**(`user_data_base64 = base64gzip(...)`). EC2는 user data를 base64로 바꾸기 전 바이트 기준 16 KiB까지만 받는다. 렌더링한 cloud-init은 한글 주석(UTF-8에서 글자당 3바이트), AWS CLI 서명 키, 스크립트가 들어가서 원문이 이미 한도를 넘는다(2026-10-01 기준 약 21.8 KB).
-  압축하면 약 10.2 KB이고 한도는 이 압축본에 걸린다. `test/render.sh`가 Terraform과 같은 식으로 압축본을 만들어 크기를 검사하고, cloud-init의 함수로 풀어 원문과 같은지도 본다. cloud-init은 gzip으로 압축된 user data를 스스로 풀어서 처리한다. `plan`에서 `user_data_base64`가 긴 base64 문자열로 보이는 것은 정상이다.
+- **`user_data`는 gzip으로 압축해서 넘긴다**(`user_data_base64 = base64gzip(...)`). EC2는 user data를 base64로 바꾸기 전 바이트 기준 16 KiB까지만 받는다. 렌더링한 cloud-init은 한글 주석(UTF-8에서 글자당 3바이트), AWS CLI 서명 키, 스크립트가 들어가서 원문이 이미 한도를 넘는다(2026-10-01 기준 약 27.9 KB).
+  압축하면 약 12.5 KB이고 한도는 이 압축본에 걸린다. `test/render.sh`가 Terraform과 같은 식으로 압축본을 만들어 크기를 검사하고, cloud-init의 함수로 풀어 원문과 같은지도 본다. cloud-init은 gzip으로 압축된 user data를 스스로 풀어서 처리한다. `plan`에서 `user_data_base64`가 긴 base64 문자열로 보이는 것은 정상이다.
   다만 압축 결과의 바이트는 Terraform을 빌드한 Go 버전에 따라 달라질 수 있다. Terraform을 올린 뒤 살아 있는 인스턴스에 `plan`하면 내용이 같아도 교체가 제안될 수 있다. 그 교체는 `apply`하지 말고 그 세션이 끝난 뒤 `destroy`한다.
 - **`user_data_replace_on_change = true`.** cloud-init은 첫 부팅 때 한 번만 실행해서, `user_data`만 바꾸면 바뀐 스크립트가 실행되지 않은 채 반영된 것처럼 보인다. 교체하면 항상 현재 코드가 만든 그대로 부팅한다.
-- **설치는 cloud-init이 아니라 systemd 서비스가 한다.** cloud-init의 `write_files`·`runcmd`는 인스턴스의 첫 부팅에만 돈다. 그래서 cloud-init은 파일을 쓰고 `devops-bootstrap.service`를 켜기만 하고, 그 서비스가 부팅마다 돌며 이미 된 단계는 건너뛴다. 실패하면 systemd가 60초 뒤 다시 시작한다(2시간 안에 3번까지).
+- **설치는 cloud-init이 아니라 systemd 서비스가 한다.** cloud-init의 `write_files`·`runcmd`는 인스턴스의 첫 부팅에만 돈다. 그래서 cloud-init은 파일을 쓰고 `devops-bootstrap.service`를 켜기만 하고, 그 서비스가 부팅마다 돌며 이미 된 단계는 건너뛴다. 실패하면 systemd가 90초 뒤 다시 시작한다(3시간 안에 10번까지).
 - **k3s 인증서에 공인 IP를 넣지 않는다.** 멈췄다 시작할 때마다 바뀌는 IP 대신 DuckDNS 이름을 넣는다([접속하기](#접속하기)에 이유와 우회 방법).
 - **NAT 없이 공개 서브넷.** NAT Gateway는 시간당 요금과 처리 데이터 요금이 붙는다. 대신 인스턴스가 공인 IP를 직접 가지므로 들어오는 길을 보안 그룹으로 좁게 닫는다.
 - **보안 그룹 규칙은 `aws_vpc_security_group_*_rule`로 하나씩 만든다.** 그룹 안의 인라인 규칙은 섞어 쓰면 서로 덮어쓰고, 규칙별 ID·설명·태그를 다루기 어렵다. 보안 그룹과 규칙의 `description`은 영문 ASCII만 허용되어서 한글 설명은 코드 주석에 있다.

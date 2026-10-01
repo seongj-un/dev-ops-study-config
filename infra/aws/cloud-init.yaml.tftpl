@@ -171,7 +171,48 @@ write_files:
       curl -fsSL --retry 5 -o "$WORK/k3s-install.sh" https://get.k3s.io
       INSTALL_K3S_VERSION=$K3S_VERSION sh "$WORK/k3s-install.sh" server --tls-san "$DUCKDNS_SUBDOMAIN.duckdns.org" --write-kubeconfig-mode 0600
     fi
-    retry "k3s 노드 Ready" 300 kubectl wait --for=condition=Ready node --all --timeout=5s
+    # k3s가 안정될 때까지 기다린다. API의 답 한 번으로는 부족하다: Node의 Ready 조건은 kubelet이 마지막으로 써 둔 값이고, 그것을 Unknown으로
+    # 바꾸는 노드 수명 주기 컨트롤러는 kubelet 소식이 일정 시간(node-monitor-grace-period) 끊겨야 움직인다. k3s는 API 서버·컨트롤러·kubelet이
+    # 한 프로세스라 함께 죽고 함께 살아나서, 재시작을 되풀이하는 동안에도 Ready=True가 남는다(v1.35.5+k3s1의 첫 부팅이 그랬다. variables.tf).
+    # 그래서 5초 간격으로 6번 연속(약 30초) 아래가 모두 맞아야 넘어가고, 하나라도 어긋나면 처음부터 다시 센다. 상한은 600초다.
+    #  - /readyz가 ok: 저장된 객체가 아니라 지금 살아 있는 API 서버가 답한다.
+    #  - 노드가 Ready이고 node.cloudprovider.kubernetes.io/uninitialized taint가 없다: 내장 클라우드 컨트롤러 매니저(CCM)를 쓰면 k3s가 kubelet을
+    #    --cloud-provider=external로 띄워 kubelet이 노드를 처음 등록할 때 이 taint를 붙이고, CCM이 노드를 초기화해야 지운다.
+    #  - k3s 서비스의 NRestarts(systemd가 Restart=로 다시 시작한 횟수)가 그동안 그대로다.
+    k3s_check() {
+      local r
+      if ! r=$(kubectl get --raw=/readyz --request-timeout=5s 2>&1) || [ "$r" != ok ]; then
+        echo "/readyz: $(printf '%s' "$r" | head -n 1 | cut -c 1-200)"; return 1
+      fi
+      if ! r=$(kubectl get nodes --request-timeout=5s -o jsonpath='{range .items[*]}{.metadata.name} Ready={.status.conditions[?(@.type=="Ready")].status} {.spec.taints[*].key}{"\n"}{end}' 2>&1); then
+        echo "노드 조회: $(printf '%s' "$r" | head -n 1 | cut -c 1-200)"; return 1
+      fi
+      case $r in
+        '') echo "등록된 노드가 없다"; return 1 ;;
+        *node.cloudprovider.kubernetes.io/uninitialized*) echo "CCM이 아직 노드를 초기화하지 않았다: $r"; return 1 ;;
+      esac
+      if printf '%s\n' "$r" | grep -qv ' Ready=True '; then echo "Ready가 아닌 노드가 있다: $r"; return 1; fi
+    }
+    k3s_settle() {
+      local end ok=0 base now r why='' last=''
+      end=$(($(date +%s) + 600))
+      base=$(systemctl show -p NRestarts --value k3s)
+      while :; do
+        now=$(systemctl show -p NRestarts --value k3s)
+        if [ "$now" = "$base" ] && r=$(k3s_check); then
+          ok=$((ok + 1))
+          [ "$ok" -lt 6 ] || break
+        else
+          if [ "$now" = "$base" ]; then why=$r; else why="k3s가 다시 시작됐다(NRestarts $base -> $now)"; fi
+          ok=0 base=$now
+          [ "$why" = "$last" ] || { log "대기: $why"; last=$why; }
+        fi
+        [ "$(date +%s)" -lt "$end" ] || fail "k3s가 600초 안에 안정되지 않았다(마지막 이유: $why). k3s 로그는 journalctl -u k3s"
+        sleep 5
+      done
+      log "확인: k3s 안정(6번 연속 통과, NRestarts $now)"
+    }
+    k3s_settle
 
     # 5. Helm: 고정한 버전의 공식 tarball을 get.helm.sh의 .sha256sum으로 검사한다. 같은 곳에서 받은 체크섬이라
     # 전송 중 깨지거나 잘린 파일은 잡지만, 배포 서버의 파일이 통째로 바뀐 경우까지 막지는 못한다.
@@ -193,9 +234,36 @@ write_files:
     # UI는 맥에서 kubectl -n argocd port-forward svc/argocd-server 8080:80 을 띄우고 http://localhost:8080으로 본다. 인터넷을 건너는 구간은
     # k3s API(6443)의 TLS뿐이다(4단계 --tls-san으로 붙고, 6443은 보안 그룹이 관리자 IP에만 연다).
     # configs.cm.url(ArgoCD의 외부 주소): 값 파일의 로컬 Ingress 주소 대신 위 port-forward 주소로 맞춘다.
-    # deployed이면 건너뛴다: 값이 바뀌면 user data가 바뀌어 인스턴스를 새로 만들므로 같은 인스턴스에서는 값이 그대로다.
+    # 릴리스의 상태(helm list가 주는 마지막 리비전의 상태)를 먼저 본다. JSON은 python3로 읽는다(cloud-init이 python3 프로그램이라 Ubuntu에 늘 있다).
+    #  - deployed이면 건너뛴다: 값이 바뀌면 user data가 바뀌어 인스턴스를 새로 만들므로 같은 인스턴스에서는 값이 그대로다.
+    #  - pending-install·pending-upgrade·pending-rollback: helm이 작업 도중 끊겼다(API가 끊김, 재부팅, 시간 초과). Helm은 마지막 리비전이
+    #    pending이면 다른 작업이 진행 중이라 보고 upgrade를 거부하는데("another operation ... is in progress"), 그 helm이 이미 없어도 상태가
+    #    남아 저절로 풀리지 않는다. failed(--wait 시간 초과 등)와 uninstalling(지우다 끊김)도 함께 정리한다.
+    #  - 정리: 성공했던 리비전(deployed, 또는 그 뒤에 밀려난 superseded)이 있으면 그 가운데 마지막 것으로 rollback한다. 돌고 있는 ArgoCD를
+    #    지우지 않고 마지막으로 성공한 설정으로 되돌린다(rollback은 pending 상태에서도 된다). 그런 리비전이 없으면(첫 설치가 끊기거나 실패했다)
+    #    uninstall한다: 되돌아갈 곳이 없으니 반쯤 만든 리소스를 지우고 첫 부팅과 같은 설치를 다시 한다. --wait는 지운 리소스가 실제로 사라질
+    #    때까지 기다린다(지워지는 중인 같은 이름의 객체가 남아 있으면 설치가 실패한다). CRD는 차트가 남기게 표시해 둬서 지워지지 않는다.
+    # 정리한 뒤 상태가 deployed가 아닐 때만 설치한다(rollback이 성공하면 이미 deployed다).
     step "6/8 ArgoCD"
-    if helm list -n argocd --deployed -q 2>/dev/null | grep -x argocd >/dev/null; then
+    argocd_status() {
+      helm list -n argocd --filter '^argocd$' -o json |
+        python3 -c 'import json, sys; r = json.load(sys.stdin); print(r[0]["status"] if r else "")'
+    }
+    st=$(argocd_status)
+    case $st in
+      pending-install|pending-upgrade|pending-rollback|failed|uninstalling)
+        rev=$(helm history argocd -n argocd -o json |
+          python3 -c 'import json, sys; print(max([r["revision"] for r in json.load(sys.stdin) if r["status"] in ("deployed", "superseded")], default=""))')
+        if [ "$st" != uninstalling ] && [ -n "$rev" ]; then
+          log "ArgoCD 릴리스가 $st: 성공했던 리비전 $rev(으)로 rollback"
+          helm rollback argocd "$rev" -n argocd --wait --timeout 10m
+        else
+          log "ArgoCD 릴리스가 $st: uninstall하고 다시 설치"
+          helm uninstall argocd -n argocd --wait --timeout 5m
+        fi
+        st=$(argocd_status) ;;
+    esac
+    if [ "$st" = deployed ]; then
       log "건너뜀: ArgoCD 설치됨"
     else
       log "ArgoCD 설치 (argo-cd $ARGOCD_CHART_VERSION)"
@@ -252,27 +320,31 @@ write_files:
     OnUnitActiveSec=5min
     [Install]
     WantedBy=timers.target
-# 부트스트랩: 부팅마다 돈다. 실패하면 60초 뒤 다시 하되 2시간 안에 3번(첫 시작 포함)까지만 시작한다. 그 2시간 안에는 손으로 한
+# 부트스트랩: 부팅마다 돈다. 실패하면 90초 뒤 다시 하되, 첫 시작부터 3시간 안에 10번(첫 시작 포함)까지만 시작하고 넘으면 failed로 멈춘다.
+# 재시도 사이 대기만 13.5분(9 × 90초)이라 금방 실패하는 일시적 문제도 20분 넘게 다시 해 보고(전에는 60초·3번이라 약 3분 만에 멈췄다),
+# 4단계 상한(600초)에서 실패하는 시도도 대기를 더해 한 번에 약 12분이라 10번이 3시간 안에 든다. 시도마다 TimeoutStartSec까지 걸리면
+# 3시간 안에 10번이 차지 않고, 3시간이 지나면 횟수를 처음부터 다시 세므로 재시도가 멈추지 않는다. 그 3시간 안에는 손으로 한
 # systemctl start도 시작 제한에 걸려 거부되므로, systemctl reset-failed devops-bootstrap으로 횟수를 지운 뒤 시작하거나
 # /usr/local/sbin/devops-bootstrap을 직접 돌린다. 진행은 /var/log/devops-bootstrap.log, 성공하면 /var/lib/devops-bootstrap.done이 생긴다.
-# oneshot은 시작 제한 시간이 기본으로 꺼져 있어서 45분으로 묶는다. 스크립트의 대기 상한(apt 잠금·retry 제한·DuckDNS 120초·
-# helm --wait 10분)을 다 더해도 30분이 안 되어 내려받기·설치 시간을 더해도 남는다. 45분에 끊기는 것은 상한이 없는 단계(내려받기,
-# k3s 설치 스크립트)가 멈췄을 때다. WantedBy=multi-user.target인 oneshot이라 재부팅마다 부팅 완료(multi-user.target)가 이 실행을
-# 기다린다(보통 30~60초). 의도한 것이고, k3s와 SSM 에이전트는 이 서비스를 기다리지 않고 함께 뜬다.
+# oneshot은 시작 제한 시간이 기본으로 꺼져 있어서 60분으로 묶는다. 스크립트의 대기 상한을 다 더하면 약 47분이다: apt 약 7분, DuckDNS 2분,
+# k3s 안정 확인 약 10분, helm 정리와 설치 최대 25분(uninstall 5분. 설치의 --timeout 10m은 pre-install 훅 Job 대기와 리소스 대기에 따로 걸린다),
+# CRD·루트 앱 약 3분. 내려받기·설치 시간을 더해도 60분 안에 들고, 60분에 끊기는 것은 상한이 없는 단계(내려받기, k3s 설치 스크립트)가 멈췄을 때다.
+# WantedBy=multi-user.target인 oneshot이라 재부팅마다 부팅 완료(multi-user.target)가 이 실행을 기다린다(k3s 안정 확인 30초를 포함해 보통 1분 안팎).
+# 의도한 것이고, k3s와 SSM 에이전트는 이 서비스를 기다리지 않고 함께 뜬다.
 - path: /etc/systemd/system/devops-bootstrap.service
   content: |
     [Unit]
     Description=Bootstrap k3s, ArgoCD and the app-of-apps (idempotent, every boot)
     Wants=network-online.target
     After=network-online.target
-    StartLimitIntervalSec=2h
-    StartLimitBurst=3
+    StartLimitIntervalSec=3h
+    StartLimitBurst=10
     [Service]
     Type=oneshot
     ExecStart=/usr/local/sbin/devops-bootstrap
-    TimeoutStartSec=45min
+    TimeoutStartSec=60min
     Restart=on-failure
-    RestartSec=60s
+    RestartSec=90s
     [Install]
     WantedBy=multi-user.target
 # 첫 부팅에 한 번: 새 유닛 파일을 읽히고(daemon-reload) 부트스트랩을 켜서(enable) 다음 부팅부터는 systemd가 돌리게 한다.
