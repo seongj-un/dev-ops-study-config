@@ -132,14 +132,14 @@ for env in dev prod; do
   kubectl -n shortener-$env create secret generic shortener-db --from-literal=password="$(openssl rand -base64 24)"
 done
 
-# 3-1. 모니터링 Secret: Grafana 관리자(비밀번호는 무작위), Alertmanager가 읽는 Discord 웹훅 주소(SSM에 등록해 둔 값).
-#      값은 파이프로만 넘긴다(명령줄 인자는 ps로 보이고, 화면에 찍으면 터미널 기록에 남는다)
+# 3-1. 모니터링 Secret 두 개. 이름과 키는 platform/kube-prometheus-stack/values.yaml이 정한다:
+#      grafana-admin(키 admin-user, admin-password), alertmanager-discord(키 webhook-url).
+#      EC2에서는 부트스트랩 스크립트가 만든다(웹훅은 SSM 파라미터 /dev-ops-study/discord-webhook-url의 값). 손으로 만들 때는 비밀번호를 무작위로 두고,
+#      웹훅은 실제 주소 대신 가짜 주소로 둔다(Alertmanager는 뜨고 Discord 알림만 실패한다). 비밀번호는 파이프로 넘긴다(명령줄 인자는 ps로 보인다)
 kubectl create namespace monitoring
 openssl rand -hex 16 | tr -d '\n' | kubectl -n monitoring create secret generic grafana-admin \
   --from-literal=admin-user=admin --from-file=admin-password=/dev/stdin
-aws ssm get-parameter --region ap-northeast-2 --with-decryption --name /dev-ops-study/discord-webhook-url \
-  --query Parameter.Value --output text | tr -d '\n' \
-  | kubectl -n monitoring create secret generic alertmanager-discord --from-file=webhook-url=/dev/stdin
+kubectl -n monitoring create secret generic alertmanager-discord --from-literal=webhook-url=https://discord.invalid/webhook-not-configured
 
 # 4. 루트 Application 적용: 여기서부터 ArgoCD가 argocd/apps를 읽어 dev·prod와 모니터링을 만든다 (손으로 하는 마지막 단계)
 kubectl apply -f argocd/root.yaml
@@ -150,6 +150,9 @@ kubectl apply -f argocd/root.yaml
   Secret이 없으면 앱·PostgreSQL 파드가 `CreateContainerConfigError`로 멈춰 있다가 Secret이 생기면 시작한다.
 - 3-1의 Secret도 같다. `grafana-admin`이 없으면 Grafana 파드가 `CreateContainerConfigError`(환경 변수로 읽는다), `alertmanager-discord`가 없으면
   Alertmanager 파드가 `ContainerCreating`(볼륨으로 붙인다)에 머문다. EC2에서는 부트스트랩 스크립트가 루트 Application보다 먼저 만든다(`infra/aws/README.md`).
+- 모니터링(kube-prometheus-stack, 메모리 요청만 약 1GiB)은 EC2 클러스터(메모리 8GiB)를 위한 것이다. 로컬 k3d의 Docker VM(2.84GiB)은 앱만으로도 메모리가 모자라
+  EC2로 옮겼으므로(아래 메모리 메모) 그 위에는 자리가 없다. 루트 Application은 argocd/apps를 모두 배포하므로 로컬 k3d에서도 모니터링 Application이 생긴다.
+  그래도 로컬에서 띄운다면 3-1의 두 Secret을 위처럼 무작위 비밀번호와 가짜 웹훅 주소로 만든다.
 - 로컬 k3d에 이전 단계에서 `helm install`로 직접 설치한 `shortener` 릴리스(`shortener` 네임스페이스)가 남아 있으면 먼저 지운다. 로컬용으로 덮어쓴 prod 호스트(`shortener.localhost`)와
   같은 호스트를 쓰는 Ingress가 둘이 되면 요청이 어느 쪽으로 갈지 보장되지 않는다. EC2에는 그런 릴리스가 없다.
 
