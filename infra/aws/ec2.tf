@@ -47,7 +47,7 @@ resource "aws_instance" "k3s" {
     volume_size = 30
 
     # 디스크 암호화. kms_key_id를 지정하지 않으면 계정의 기본 EBS 암호화 키(바꾸지 않았다면 AWS 관리형 aws/ebs)를 쓰고, 이 키는 별도 요금이 없다(고객 관리형 KMS 키는 월 요금이 붙는다).
-    # 디스크에는 k3s 상태(Secret 포함)와 부팅 중에 만든 DB 비밀번호가 있어서, 저장된 데이터를 디스크 수준에서 암호화해 둔다.
+    # 디스크에는 k3s 상태(Secret 포함)가 있고, 거기에 부팅 중에 만든 DB·Grafana 비밀번호와 SSM에서 읽은 Discord 웹훅 URL이 들어 있어서, 저장된 데이터를 디스크 수준에서 암호화해 둔다.
     # 볼륨이나 스냅샷이 의도와 다르게 다른 곳에 붙거나 공유되더라도 KMS 키를 쓸 권한이 없으면 읽을 수 없다.
     encrypted = true
 
@@ -69,23 +69,24 @@ resource "aws_instance" "k3s" {
   # user_data가 아니라 user_data_base64로, gzip으로 압축해서 넘긴다. 이유는 크기 한도다:
   #  - EC2는 user data를 base64로 인코딩하기 전 바이트 기준 16384바이트(16 KiB)까지만 받는다. 프로바이더도 user_data 인자는 plan에서 이를 검사한다
   #    ("expected length of user_data to be in the range (0 - 16384)"). 바이트 수라서 한글(UTF-8에서 글자당 3바이트)이 많으면 빨리 닿는다.
-  #    이 템플릿은 한글 주석, AWS CLI 서명 키, 스크립트가 들어가서 렌더링 원문이 이미 한도를 넘는다(2026-10-01 기준 약 29.1 KB).
-  #  - base64gzip은 문자열을 gzip으로 압축한 다음 base64로 인코딩한다. 같은 시점에 압축본은 약 12.9 KB(base64로는 약 17.3 KB)다.
+  #    이 템플릿은 한글 주석, AWS CLI 서명 키, 스크립트가 들어가서 렌더링 원문이 이미 한도를 넘는다(2026-10-01 기준 약 32.3 KB).
+  #  - base64gzip은 문자열을 gzip으로 압축한 다음 base64로 인코딩한다. 같은 시점에 압축본은 약 13.8 KB(base64로는 약 18.5 KB)다.
   #    압축본은 문자열(UTF-8)이 아닌 바이너리라서 user_data가 아니라 user_data_base64 인자로 넘긴다.
   #  - 한도는 base64를 푼 바이트, 곧 압축본의 크기에 적용된다. 원문 크기는 상관없다. test/render.sh가 이와 같은 식으로 압축본을 만들어 크기를 검사한다.
   #  - cloud-init은 gzip으로 압축된 user data를 스스로 알아보고 풀어서 원래의 cloud-config로 처리한다(render.sh가 cloud-init의 함수로 풀어 확인한다).
   # 주의: 압축 결과의 바이트는 Terraform을 빌드한 Go 버전에 따라 달라질 수 있다. Terraform을 올린 뒤 살아 있는 인스턴스에 plan하면, 내용이 같아도 user_data_base64가 바뀐 것으로 보여
   # 교체가 제안될 수 있다. 이 실습은 쓸 때 만들고 끝나면 destroy하므로 감수한다: 원인이 압축 결과뿐인 교체 제안은 apply하지 말고, 그 세션이 끝난 뒤 destroy한다.
   user_data_base64 = base64gzip(templatefile("${path.module}/cloud-init.yaml.tftpl", {
-    aws_region           = var.region
-    duckdns_subdomain    = var.duckdns_subdomain
-    ssm_parameter_name   = var.duckdns_token_parameter
-    k3s_version          = var.k3s_version
-    helm_version         = var.helm_version
-    argocd_chart_version = var.argocd_chart_version
-    argocd_values        = file("${path.module}/../../bootstrap/argocd/values.yaml")
-    config_repo_url      = var.config_repo_url
-    config_repo_ref      = var.config_repo_ref
+    aws_region                     = var.region
+    duckdns_subdomain              = var.duckdns_subdomain
+    ssm_parameter_name             = var.duckdns_token_parameter
+    discord_webhook_parameter_name = var.discord_webhook_parameter
+    k3s_version                    = var.k3s_version
+    helm_version                   = var.helm_version
+    argocd_chart_version           = var.argocd_chart_version
+    argocd_values                  = file("${path.module}/../../bootstrap/argocd/values.yaml")
+    config_repo_url                = var.config_repo_url
+    config_repo_ref                = var.config_repo_ref
   }))
 
   # user_data(여기서는 user_data_base64)가 바뀌면 인스턴스를 교체(삭제 후 재생성)한다. cloud-init은 user_data를 인스턴스의 첫 부팅 때 한 번만 실행하므로(인스턴스가 바뀔 때만 다시 실행한다),
@@ -97,7 +98,7 @@ resource "aws_instance" "k3s" {
   # 아래 리소스와의 순서는 보장하지 않는다(이들을 이 리소스가 참조하지 않기 때문이다). 순서가 어긋나면 인스턴스가 먼저 떠서 첫 네트워크 호출이 실패할 수 있어서 명시한다:
   #  - 라우트 테이블 연결: 기본 경로(0.0.0.0/0 → IGW)가 이 서브넷에 적용된 뒤여야 인터넷에 나간다.
   #  - 아웃바운드 규칙: Terraform이 기본 "모두 허용" 아웃바운드를 지웠으므로 이 규칙이 생기기 전에는 나가는 트래픽이 모두 막힌다.
-  #  - 역할의 정책 둘: 인스턴스가 뜬 직후 SSM에서 토큰을 읽고 SSM 에이전트가 등록하려면 권한이 먼저 붙어 있어야 한다.
+  #  - 역할의 정책 둘: 부팅 중에 SSM에서 DuckDNS 토큰(3단계)과 Discord 웹훅 URL(7단계)을 읽고, SSM 에이전트가 등록하려면 권한이 먼저 붙어 있어야 한다.
   depends_on = [
     aws_route_table_association.public,
     aws_vpc_security_group_egress_rule.all,

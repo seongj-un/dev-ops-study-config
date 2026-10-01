@@ -6,7 +6,8 @@
 # EC2 user data 한도(16384바이트)는 ec2.tf가 base64gzip으로 압축해 넘기는 gzip 바이트에 걸린다. 압축 전 원문은 16KB를 넘어도 된다.
 # test/render.sh가 Terraform과 같은 압축본을 만들어 그 크기와 압축을 푼 결과를 보고, 스크립트가 렌더링 전후로 같은지도 검사한다.
 write_files:
-# Terraform이 넘긴 값(스크립트가 source 한다). 비밀은 없다: DuckDNS 토큰은 SSM 파라미터 이름만 적고 값은 부팅 때 읽는다.
+# Terraform이 넘긴 값(스크립트가 source 한다). 비밀은 없다: DuckDNS 토큰과 Discord 웹훅 URL은 SSM 파라미터 이름만 적고 값은 부팅 때 읽는다.
+# SSM_PARAMETER_NAME은 DuckDNS 토큰, DISCORD_WEBHOOK_PARAMETER_NAME은 Discord 웹훅 URL(Alertmanager의 알림 주소)의 파라미터 이름이다.
 # regex()는 값 전체가 패턴에 맞으면 그 값을, 아니면 plan에서 오류를 낸다: root가 source 하는 파일에 셸 문법이 끼어들지 못한다.
 # ROOT_APP_URL: https://github.com/<owner>/<repo>[.git]의 raw 주소 https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<경로>
 - path: /etc/devops/bootstrap.env
@@ -14,6 +15,7 @@ write_files:
   content: |
     AWS_REGION=${regex("^[a-z0-9-]+$", aws_region)}
     SSM_PARAMETER_NAME=${regex("^[A-Za-z0-9_./-]+$", ssm_parameter_name)}
+    DISCORD_WEBHOOK_PARAMETER_NAME=${regex("^[A-Za-z0-9_./-]+$", discord_webhook_parameter_name)}
     DUCKDNS_SUBDOMAIN=${regex("^[a-z0-9-]+$", duckdns_subdomain)}
     K3S_VERSION=${regex("^v[0-9]+[.][0-9]+[.][0-9]+[+]k3s[0-9]+$", k3s_version)}
     HELM_VERSION=${regex("^v[0-9]+[.][0-9]+[.][0-9]+$", helm_version)}
@@ -89,7 +91,7 @@ write_files:
   permissions: "0755"
   content: |
     #!/bin/bash
-    # 이 인스턴스를 GitOps 노드로 만든다: AWS CLI → DuckDNS → k3s → Helm → ArgoCD → DB Secret → 루트 Application.
+    # 이 인스턴스를 GitOps 노드로 만든다: AWS CLI → DuckDNS → k3s → Helm → ArgoCD → Secret(DB, 모니터링) → 루트 Application.
     # devops-bootstrap.service가 부팅마다 돌린다. 단계마다 결과가 이미 있으면 건너뛰므로 손으로 다시 돌려도 된다.
     set -euo pipefail
     # 손으로 돌린 것과 서비스가 겹치면 helm 설치가 두 번 돌 수 있어서 한 번에 하나만 돌게 한다.
@@ -137,7 +139,7 @@ write_files:
       apt-get -o DPkg::Lock::Timeout=180 install -y -q unzip
     fi
 
-    # 2. AWS CLI v2(SSM에서 DuckDNS 토큰을 읽는다): AWS가 배포하는 zip의 설치 스크립트가 /usr/local/aws-cli에 풀고 /usr/local/bin/aws를 만든다.
+    # 2. AWS CLI v2(SSM에서 DuckDNS 토큰과 Discord 웹훅 URL을 읽는다): AWS가 배포하는 zip의 설치 스크립트가 /usr/local/aws-cli에 풀고 /usr/local/bin/aws를 만든다.
     # 버전을 고정하지 않은 최신 zip이라, 같은 주소에 .sig를 붙인 PGP 서명을 AWS CLI 팀 키(/etc/devops/aws-cli.asc)로 검사하고 틀리면 풀기 전에 멈춘다.
     # gpgv는 apt가 저장소 서명 검사에 쓰는 도구라 늘 있다. 키는 ASCII armor라서 머리줄(-----)·빈 줄·체크섬 줄(=)을 빼고 base64를 풀어 키링으로 만든다.
     step "2/8 AWS CLI"
@@ -282,12 +284,13 @@ write_files:
         --wait --timeout 10m
     fi
 
-    # 7. DB 비밀번호 Secret: 없을 때만 만든다. 있는 것을 새 값으로 바꾸면 PostgreSQL 데이터(PVC)에 이미 들어간 비밀번호와 어긋난다.
-    # 비밀번호는 파이프로만 흐른다: 명령줄 인자(ps)·로그·임시 파일에 쓰지 않는다. tr은 openssl이 끝에 붙이는 줄바꿈을 뺀다.
+    # 7. Secret: 앱의 DB 비밀번호, 모니터링의 Grafana admin 비밀번호와 Discord 웹훅 URL. 모두 없을 때만 만든다. 있는 것을 새 값으로 바꾸면
+    # DB는 PostgreSQL 데이터(PVC)에 이미 들어간 비밀번호와 어긋나고, Grafana admin 비밀번호는 재시도·재부팅마다 달라진다.
+    # 값은 파이프로만 흐른다: 명령줄 인자(ps)·로그·임시 파일에 쓰지 않는다. tr은 openssl이 끝에 붙이는 줄바꿈을 뺀다.
     # 저장은 된다: Secret은 k3s 데이터 저장소(/var/lib/rancher/k3s/server/db, 암호화된 EBS 볼륨)에 들어간다. k3s는 기본으로 Secret을
     # 따로 암호화하지 않으므로(base64일 뿐이다) 이 값을 지키는 것은 EBS 암호화다.
     # 네임스페이스를 미리 만드는 것은 ArgoCD가 앱을 띄우기 전에 Secret을 넣어 두려는 것이다(CreateNamespace=true는 있는 것을 건드리지 않는다).
-    step "7/8 DB Secret"
+    step "7/8 Secret"
     for ns in shortener-dev shortener-prod; do
       kubectl get namespace "$ns" >/dev/null 2>&1 || kubectl create namespace "$ns"
       if kubectl -n "$ns" get secret shortener-db >/dev/null 2>&1; then
@@ -296,6 +299,31 @@ write_files:
         openssl rand -hex 16 | tr -d '\n' | kubectl -n "$ns" create secret generic shortener-db --from-file=password=/dev/stdin
       fi
     done
+    # monitoring/grafana-admin: Grafana의 admin 계정이다. 비밀번호는 위 DB 비밀번호와 같은 방법으로 만든다(무작위 32자 hex).
+    # monitoring/alertmanager-discord: Alertmanager가 알림을 보낼 Discord 웹훅 URL이다. 이 URL을 아는 사람은 누구나 채널에 글을 올릴 수 있어서
+    # DuckDNS 토큰과 같게 다룬다: SSM의 SecureString에서 읽어 변수에만 담고(출력하지 않는다. set -x도 쓰지 않는다) kubectl의 표준 입력으로 넣는다.
+    # printf는 bash 내장 명령이라 exec되지 않아서 값이 ps(/proc/<pid>/cmdline)에 나타나지 않는다. aws가 실패하면 표준 오류에는 실패 이유만 있고
+    # 값은 없어서 로그에 그대로 남는다. timeout 120: SSM이 응답하지 않아도 여기서 2분 넘게 붙잡히지 않는다.
+    # 못 읽으면(파라미터 없음, 권한·복호화 오류, 시간 초과, 빈 값) 부팅을 멈추지 않고 자리표시자 URL로 Secret을 만들고 경고를 남긴다. Alertmanager는 이 Secret을
+    # 볼륨으로 마운트해서 Secret이 없으면 파드가 뜨지 못한다. 자리표시자(.invalid는 예약된 최상위 도메인이라 어디에도 풀리지 않는다)가 있으면 뜨고 Discord 알림만 가지 않는다.
+    # 한번 만든 Secret은 건너뛰므로 자리표시자는 SSM에 값을 만든 뒤에도 저절로 바뀌지 않는다. 바꾸는 절차는 README에 있다.
+    kubectl get namespace monitoring >/dev/null 2>&1 || kubectl create namespace monitoring
+    if kubectl -n monitoring get secret grafana-admin >/dev/null 2>&1; then
+      log "건너뜀: monitoring/grafana-admin 있음"
+    else
+      openssl rand -hex 16 | tr -d '\n' | kubectl -n monitoring create secret generic grafana-admin \
+        --from-literal=admin-user=admin --from-file=admin-password=/dev/stdin
+    fi
+    if kubectl -n monitoring get secret alertmanager-discord >/dev/null 2>&1; then
+      log "건너뜀: monitoring/alertmanager-discord 있음"
+    else
+      hook=$(timeout 120 aws ssm get-parameter --with-decryption --region "$AWS_REGION" --name "$DISCORD_WEBHOOK_PARAMETER_NAME" --query Parameter.Value --output text) || hook=
+      if [ -z "$hook" ]; then
+        log "경고: Discord 웹훅 URL을 SSM에서 읽지 못했다($DISCORD_WEBHOOK_PARAMETER_NAME. 이유는 위의 aws 오류, 없으면 시간 초과나 빈 값이다). alertmanager-discord에 자리표시자 URL을 넣었다: Alertmanager는 뜨지만 Discord 알림은 가지 않는다"
+        hook=https://discord.invalid/webhook-not-configured
+      fi
+      printf '%s' "$hook" | kubectl -n monitoring create secret generic alertmanager-discord --from-file=webhook-url=/dev/stdin
+    fi
 
     # 8. 루트 Application: ArgoCD가 이것을 읽어 argocd/apps의 dev·prod Application을 만들고, 그 뒤 배포는 모두 ArgoCD가 한다.
     # CRD가 Established가 되기 전에 적용하면 "no matches for kind Application"으로 실패해서 먼저 기다린다.
@@ -334,9 +362,9 @@ write_files:
 # 3시간 안에 10번이 차지 않고, 3시간이 지나면 횟수를 처음부터 다시 세므로 재시도가 멈추지 않는다. 그 3시간 안에는 손으로 한
 # systemctl start도 시작 제한에 걸려 거부되므로, systemctl reset-failed devops-bootstrap으로 횟수를 지운 뒤 시작하거나
 # /usr/local/sbin/devops-bootstrap을 직접 돌린다. 진행은 /var/log/devops-bootstrap.log, 성공하면 /var/lib/devops-bootstrap.done이 생긴다.
-# oneshot은 시작 제한 시간이 기본으로 꺼져 있어서 60분으로 묶는다. 스크립트의 대기 상한을 다 더하면 약 47분이다: apt 약 7분, DuckDNS 2분,
+# oneshot은 시작 제한 시간이 기본으로 꺼져 있어서 60분으로 묶는다. 스크립트의 대기 상한을 다 더하면 약 49분이다: apt 약 7분, DuckDNS 2분,
 # k3s 안정 확인 약 10분, helm 정리와 설치 최대 25분(uninstall 5분. 설치의 --timeout 10m은 pre-install 훅 Job 대기와 리소스 대기에 따로 걸린다),
-# CRD·루트 앱 약 3분. 내려받기·설치 시간을 더해도 60분 안에 들고, 60분에 끊기는 것은 상한이 없는 단계(내려받기, k3s 설치 스크립트)가 멈췄을 때다.
+# Discord 웹훅 URL 읽기 2분, CRD·루트 앱 약 3분. 내려받기·설치 시간을 더해도 60분 안에 들고, 60분에 끊기는 것은 상한이 없는 단계(내려받기, k3s 설치 스크립트)가 멈췄을 때다.
 # WantedBy=multi-user.target인 oneshot이라 재부팅마다 부팅 완료(multi-user.target)가 이 실행을 기다린다(k3s 안정 확인 30초를 포함해 보통 1분 안팎).
 # 의도한 것이고, k3s와 SSM 에이전트는 이 서비스를 기다리지 않고 함께 뜬다.
 - path: /etc/systemd/system/devops-bootstrap.service

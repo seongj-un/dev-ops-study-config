@@ -17,9 +17,10 @@ NO_DOCKER=1 infra/aws/test/render.sh
 | 검사 | 왜 |
 | --- | --- |
 | 시험용 값으로 렌더링, `config_repo_url` 끝의 `.git` 유무와 무관하게 결과가 같은지 | 템플릿 문법 오류와 raw 주소 계산을 plan 전에 잡는다 |
-| 셸 문법이 끼어들 수 있는 값 7개가 렌더링에서 거부되는지 | `bootstrap.env`는 root가 `source` 한다. 템플릿의 `regex()`가 막아야 한다 |
+| 셸 문법이 끼어들 수 있는 값(서브도메인, 리전, 두 SSM 파라미터 이름, 버전, 저장소 주소, ref)이 렌더링에서 거부되는지 | `bootstrap.env`는 root가 `source` 한다. 템플릿의 `regex()`가 막아야 한다 |
 | `ec2.tf`와 같은 `base64gzip(templatefile(...))`을 만들어 base64를 푼 gzip이 16384바이트 이하인지, 압축을 풀면 원문과 같은지 | EC2 user data 한도는 base64로 바꾸기 전 바이트(여기서는 gzip 압축본)로 16KB다. 압축 전 원문의 크기는 참고로만 출력한다 |
 | 스크립트·유닛·키가 렌더링 전후로 같은지 | 스크립트에 Terraform 보간(`${`, `%{`)이 섞이면 Terraform이 글자를 바꾼다 |
+| `bootstrap.env`의 두 SSM 파라미터 이름(`SSM_PARAMETER_NAME`, `DISCORD_WEBHOOK_PARAMETER_NAME`)이 넘긴 값과 같은지 | 둘이 바뀌어 들어가면 DuckDNS 토큰이 Alertmanager의 Discord 웹훅 URL이 된다 |
 | `argocd-values.yaml`의 값이 `bootstrap/argocd/values.yaml`과 같은지 | 템플릿은 주석 줄·빈 줄만 뺀다. 블록 스칼라 안의 `#` 줄처럼 값이 바뀌는 경우를 잡는다 |
 | shellcheck(`koalaman/shellcheck:stable`) | 렌더링된 스크립트와 이 디렉터리의 스크립트 |
 | `cloud-init schema`, `systemd-analyze verify`(ubuntu:24.04) | 인스턴스와 같은 배포판의 도구로 user data와 유닛 파일을 본다 |
