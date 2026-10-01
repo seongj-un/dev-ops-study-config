@@ -257,16 +257,30 @@ jobs:
           [ "$checked" -gt 0 ] || { echo "::error::chart 소스가 있는 Application을 argocd/apps에서 하나도 찾지 못했다"; exit 1; }
 
       # platform/dashboards(monitoring-dashboards Application)를 ArgoCD처럼 kustomize로 렌더링해 스키마로 검사하고, 대시보드 JSON 파일을 jq로 검사한다.
-      #   1) jq: 파일마다 JSON으로 읽히고, 객체이며 uid·title이 문자열인지 본다. 깨진 JSON은 사이드카가 넣어도 Grafana가 읽지 못하고 로그에 오류만 남긴다.
+      #   1) kustomize: ArgoCD v3.5.3에 들어 있는 것과 같은 5.8.1(ArgoCD 저장소의 hack/tool-versions.sh)을 릴리스에서 내려받고 SHA-256을 맞춰 본 뒤 쓴다.
+      #      러너 이미지에도 kustomize가 깔려 있지만(2026-09 기준 5.8.1) 러너 이미지가 갱신되면 버전이 저절로 바뀐다. 그 버전이 5.8.1인지 비교해 아니면 실패시키는
+      #      방법도 있지만, 그러면 러너 이미지가 바뀌는 날 이 필수 검사가 PR의 내용과 상관없이 실패한다. 내려받기는 그날도 늘 같은 바이너리를 쓴다. ArgoCD 이미지도
+      #      같은 방식이다(Dockerfile의 hack/install.sh kustomize가 같은 릴리스 파일을 받아 아래와 같은 체크섬으로 확인한다). ubuntu-24.04 러너는 x86-64라 linux_amd64를 받는다.
+      #      KUSTOMIZE_SHA256은 릴리스의 checksums.txt와 ArgoCD 저장소(v3.5.3)의 hack/installers/checksums/kustomize_5.8.1_linux_amd64.tar.gz.sha256이 같은 값이다.
+      #      Dependabot이 갱신해 주지 않으니, ArgoCD를 올려 그 kustomize 버전이 바뀌면 두 값을 함께 바꾼다(체크섬은 새 릴리스의 checksums.txt에서 읽는다).
+      #   2) jq: 파일마다 JSON으로 읽히고, 객체이며 uid·title이 문자열인지 본다. 깨진 JSON은 사이드카가 넣어도 Grafana가 읽지 못하고 로그에 오류만 남긴다.
       #      uid가 없으면 Grafana가 대시보드를 읽을 때마다 새 uid를 만들어(Grafana의 DB는 emptyDir이라 파드가 다시 뜨면 처음부터 읽는다) 대시보드 주소(/d/<uid>)가 바뀐다.
-      #   2) kustomize build: ArgoCD가 하는 렌더링이다. kustomization.yaml의 오류(목록에 있는데 없는 파일 등)가 여기서 걸린다.
-      #      러너 이미지에 미리 깔린 kustomize(5.8.1, 2026-09 기준)를 쓴다. ArgoCD v3.5.3에 들어 있는 kustomize도 5.8.1이다(ArgoCD 저장소의 hack/tool-versions.sh).
-      #      러너 이미지가 갱신되어 버전이 달라지면 이 단계 출력의 첫 줄(kustomize version)에서 보인다.
-      #   3) kubeconform: 렌더링 결과(ConfigMap)를 내장 리소스 스키마로 검사한다(-strict).
+      #   3) kustomize build: ArgoCD가 하는 렌더링이다. kustomization.yaml의 오류(목록에 있는데 없는 파일 등)가 여기서 걸린다.
+      #   4) kubeconform: 렌더링 결과(ConfigMap)를 내장 리소스 스키마로 검사한다(-strict).
       - name: 대시보드 렌더링 + 스키마 검사, JSON 검사 (platform/dashboards)
+        env:
+          KUSTOMIZE_VERSION: v5.8.1
+          KUSTOMIZE_SHA256: 029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d
         run: |
           set -euo pipefail
-          kustomize version
+          archive="kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/$KUSTOMIZE_VERSION/$archive"
+          # 체크섬이 다르면 sha256sum이 실패하고(set -e) 내려받은 파일은 쓰지 않는다.
+          echo "$KUSTOMIZE_SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" kustomize
+          kustomize="$RUNNER_TEMP/kustomize"
+          "$kustomize" version
           status=0
           for file in platform/dashboards/*.json; do
             if jq -e 'type == "object" and (.uid | type == "string") and (.title | type == "string")' "$file" > /dev/null; then
@@ -277,7 +291,7 @@ jobs:
             fi
           done
           [ "$status" = 0 ] || exit 1
-          kustomize build platform/dashboards > "$RUNNER_TEMP/dashboards.yaml"
+          "$kustomize" build platform/dashboards > "$RUNNER_TEMP/dashboards.yaml"
           docker run -i --rm "$KUBECONFORM_IMAGE" \
             -strict -summary \
             -schema-location "$K8S_SCHEMA_LOCATION" \

@@ -104,9 +104,10 @@ monitoring:
 sidecar:
   rules:
     enabled: false
-# 사이드카를 끄면 Loki는 쿠버네티스 API를 쓰지 않는다(복제본끼리는 memberlist로 찾는다). namespaced: true면 빈 ClusterRole·ClusterRoleBinding도 만들지 않고,
-# ServiceAccount 토큰도 파드에 넣지 않는다.
+# 사이드카를 끄면 Loki는 쿠버네티스 API를 쓰지 않는다(복제본끼리는 memberlist로 찾는다). namespaced: true면 사이드카가 꺼진 지금 Role·ClusterRole을 하나도 만들지 않는다
+# (false면 규칙이 빈 ClusterRole과 그 ClusterRoleBinding이 생긴다).
 rbac:
   namespaced: true
 serviceAccount:
+  # ServiceAccount 토큰을 파드에 넣지 않는다(차트 기본값 true). API를 쓰지 않으니 필요 없다.
   automountServiceAccountToken: false

@@ -311,7 +311,10 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 ```
 
 - **Alloy**(`platform/alloy/values.yaml`)가 자기 노드의 파드를 찾아 컨테이너 로그를 쿠버네티스 API로 따라 읽는다(`kubectl logs -f`와 같은 길).
-  흔한 방식인 "노드의 로그 파일을 hostPath로 붙여 읽기"는 쓰지 않는다: 이 클러스터는 hostNetwork·hostPath 파드를 띄우지 않는다(node-exporter와 같은 이유. `infra/aws/README.md`).
+  흔한 방식인 "노드의 로그 파일(`/var/log/pods`)을 hostPath로 붙여 읽기"는 쓰지 않는다. 그러면 Alloy가 RBAC와 상관없이 노드에 있는 모든 파드의 로그 파일을 직접 읽고
+  (그 파일을 읽으려고 보통 root로 띄운다), API로 읽으면 무엇을 읽을 수 있는지가 RBAC(`pods/log`)로 정해지고 노드의 파일은 하나도 보지 않는다.
+  hostNetwork도 쓰지 않는다. 이 클러스터의 불변식은 hostNetwork 파드를 띄우지 않는 것 하나다(IMDS의 홉 제한을 비켜 가므로. `infra/aws/README.md`).
+  hostPath·hostPort를 쓰는 파드는 따로 있다: node-exporter(`/proc`·`/sys`·`/`), k3s servicelb의 `svclb-traefik`(hostPort 80·443), local-path의 볼륨 도우미 파드.
 - **레이블은 다섯 개뿐이다**: `namespace`, `pod`, `container`, `app`(파드의 `app.kubernetes.io/name`), `level`. 레이블 값의 조합마다 스트림(색인 단위)이 생기므로
   값이 많은 것(요청 ID, URL 등)은 올리지 않는다. `level`은 앱 컨테이너(`app="shortener", container="shortener"`. 같은 차트의 PostgreSQL·Redis 파드도 `app="shortener"`다)의
   줄만 ECS JSON으로 읽어 `log.level`에서 올린다. 실제 줄에서 레벨은 중첩 객체다: `{"@timestamp":…,"log":{"level":"INFO","logger":…},"message":…}`.
@@ -519,7 +522,7 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | kube-prometheus-stack 차트 | 91.8.2 (Prometheus Operator v0.94.1. 이미지 태그도 이 차트 버전이 정한다) | `argocd/apps/kube-prometheus-stack.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
 | Loki 차트 | `grafana/loki` 7.3.0 (Loki 3.6.11. 이 차트는 이제 GEL용이고 OSS용은 grafana-community로 옮겨 갔다: 값 파일 맨 위 주석) | `argocd/apps/loki.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
 | Alloy 차트 | `grafana/alloy` 1.13.0 (Alloy v1.20.0, config-reloader v0.94.0) | `argocd/apps/alloy.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
-| kustomize (CI) | 5.8.1 (고정하지 않았다: ubuntu-24.04 러너 이미지에 미리 깔린 것. ArgoCD v3.5.3에 들어 있는 kustomize와 같다) | `validate.yml` 대시보드 단계가 출력의 첫 줄에 버전을 찍는다 |
+| kustomize (CI) | v5.8.1 (릴리스 파일을 받아 SHA-256으로 확인한다. ArgoCD v3.5.3에 들어 있는 kustomize와 같다) | `validate.yml` 대시보드 단계의 `KUSTOMIZE_VERSION`·`KUSTOMIZE_SHA256` |
 | CustomResourceDefinition 객체의 스키마 | yannh/kubernetes-json-schema 커밋 `8df8a88`의 `-local` 디렉터리 (`-standalone`에는 없다) | `validate.yml` 플랫폼 차트 단계의 `K8S_LOCAL_SCHEMA_LOCATION` |
 
 액션은 Dependabot이 SHA와 버전 주석을 함께 올려 준다. 나머지는 손으로 올린다(`.github/dependabot.yml` 참고).
@@ -555,6 +558,6 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | Grafana 파드가 `CreateContainerConfigError` | `monitoring`에 `grafana-admin` Secret이 없다. 부트스트랩 3-1대로 만든다 |
 | Alertmanager 파드가 `ContainerCreating`에 머문다 | `monitoring`에 `alertmanager-discord` Secret이 없어 볼륨을 붙이지 못한다(`kubectl -n monitoring describe pod`의 이벤트에 `FailedMount`). 부트스트랩 3-1대로 만든다 |
 | kube-prometheus-stack 동기화가 `metadata.annotations: Too long`으로 실패한다 | Application의 `syncOptions`에서 `ServerSideApply=true`가 빠졌다(위 "모니터링") |
-| Grafana의 로그 패널이 비어 있거나 Loki 데이터 소스가 오류 | `kubectl -n monitoring get pods`로 `loki-0`이 Ready인지(뜬 뒤 준비까지 1분 안쪽), `alloy-*` 파드가 Running인지 본다. Alloy UI(위 "로그")에서 컴포넌트가 healthy인지와 읽고 있는 대상을, `kubectl -n monitoring logs ds/alloy -c alloy`에서 `loki.write`의 전송 오류를 본다 |
+| Grafana의 로그 패널이 비어 있거나 Loki 데이터 소스가 오류 | `kubectl -n monitoring get pods`로 `loki-0`이 Ready인지(뜬 뒤 준비까지 1분 안쪽), `alloy-*` 파드가 Running인지 본다. Alloy UI(위 "로그")에서 컴포넌트가 healthy인지와 읽고 있는 대상을, `kubectl -n monitoring logs ds/alloy -c alloy`에서 `loki.write`의 전송 오류를 본다. 단, Alloy 파드가 새로 뜬 직후 나오는 `final error sending batch, no retries left, dropping data` ... `status=400` ... `entry too far behind`는 문제가 아니다: 각 컨테이너의 로그 파일을 처음부터 다시 보내다가 그 스트림의 가장 새 줄보다 1시간 넘게 오래된 줄(이미 저장된 줄)을 Loki가 거절한 것이고, 같은 묶음의 다른 줄은 저장된다(`platform/alloy/values.yaml`의 mounts 주석) |
 | Alloy 로그에 `forbidden` | Alloy의 ClusterRole(`platform/alloy/values.yaml`의 `rbac`)에 그 컴포넌트가 쓰는 권한이 없다. 컴포넌트를 더했다면 필요한 권한도 더한다(차트 values.yaml의 rbac 주석에 컴포넌트별 권한이 있다) |
 | Discord로 알림이 오지 않는다 | Alertmanager UI(port-forward)에 그 경보가 있는지, 경로(위 "경보가 가는 길")에 맞는지 본다. `kubectl -n monitoring logs alertmanager-kube-prometheus-stack-alertmanager-0 -c alertmanager`에 notify 오류가 있으면 웹훅 주소 Secret을 확인한다(바꾸는 방법은 `infra/aws/README.md`) |
