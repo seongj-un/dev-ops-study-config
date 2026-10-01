@@ -1,0 +1,59 @@
+# 모니터링 Application: kube-prometheus-stack 차트(Prometheus Operator, Prometheus, Alertmanager, Grafana, kube-state-metrics, node-exporter)를
+# platform/kube-prometheus-stack/values.yaml 값으로 monitoring 네임스페이스에 배포한다. 루트 Application(argocd/root.yaml)이 이 파일을 읽어 클러스터에 Application을 만든다.
+#
+# 앱(shortener-*)과 다른 점: 차트가 이 저장소가 아니라 외부 Helm 차트 저장소에 있다. 그래서 소스를 둘 쓴다(multi-source).
+#   1) 차트 저장소의 차트(버전 고정)   2) 이 저장소(값 파일만 꺼내 쓴다. ref로 이름을 붙이고 1)이 $values/로 가리킨다)
+# 차트를 이 저장소에 복사해 두지 않아도 되고, 값은 앱의 환경 값처럼 이 저장소에서 PR로 바꾼다.
+# 차트 버전을 올릴 때는 아래 targetRevision과 값 파일 맨 위의 버전 표기를 함께 바꾸고, 차트 README의 업그레이드 안내(메이저 버전마다 CRD를 어떻게 올리는지)를 먼저 읽는다.
+# CI(validate.yml)는 차트 저장소·이름·버전·값 파일을 이 파일에서 읽어 렌더링하므로 따로 고칠 곳이 없다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  # ArgoCD는 이 이름을 Helm 릴리스 이름으로 쓴다(helm.releaseName을 따로 주지 않으면 기본 동작이다). 값 파일의 fullnameOverride와 같은 이름이다.
+  name: kube-prometheus-stack
+  # 루트 Application이 만드는 Application 리소스는 argocd 네임스페이스에 있어야 ArgoCD가 읽는다.
+  namespace: argocd
+spec:
+  # ArgoCD가 기본으로 만들어 두는 프로젝트(저장소·클러스터·네임스페이스 제한 없음).
+  project: default
+  sources:
+    # Helm 차트 저장소(index.yaml을 내놓는 HTTP 저장소)다. chart와 targetRevision으로 받을 차트를 고른다. 여기서 targetRevision은 브랜치가 아니라 차트 버전이다.
+    # ArgoCD는 이 차트를 받아 helm template으로 렌더링하고(Helm 릴리스는 만들지 않는다), 차트의 crds/ 디렉터리에 있는 CRD도 함께 적용한다(helm.skipCrds의 기본값 false).
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: kube-prometheus-stack
+      # 정확한 버전으로 고정한다(91.* 같은 범위를 쓰면 새 차트가 나올 때 저절로 올라간다). 이미지 태그도 이 차트 버전이 정한다(값 파일 맨 위 주석).
+      targetRevision: 91.8.2
+      helm:
+        valueFiles:
+          # $values는 아래 ref: values 소스(이 저장소의 main)의 루트다. 차트의 기본 values.yaml 위에 이 파일이 덮어써진다.
+          # 파일이 없으면 ArgoCD가 매니페스트를 만들지 못해 동기화가 멈춘다. CI가 머지 전에 이 경로의 파일이 있는지 확인한다.
+          - $values/platform/kube-prometheus-stack/values.yaml
+    # 값 파일을 꺼내 쓰는 소스. ref만 있고 path가 없으므로 ArgoCD는 이 소스를 매니페스트로 렌더링하지 않고, 다른 소스가 $values로 참조하게만 한다.
+    # main을 읽으므로 값 파일을 고친 PR이 머지되면 다음 폴링에서 반영된다(앱과 같다).
+    - repoURL: https://github.com/seongj-un/dev-ops-study-config.git
+      targetRevision: main
+      ref: values
+  destination:
+    # 이 ArgoCD가 떠 있는 클러스터 자신(in-cluster)을 가리키는 고정 주소다.
+    server: https://kubernetes.default.svc
+    # 모니터링 구성요소는 모두 이 네임스페이스에 둔다. 예외: 차트가 CoreDNS 수집용 Service를, Operator가 kubelet 수집용 Service를 kube-system에 만든다.
+    namespace: monitoring
+  syncPolicy:
+    # 자동 동기화와 prune·selfHeal은 앱과 같다(argocd/apps/shortener-dev.yaml 참고). 실패하면 ArgoCD의 기본 재시도(최대 5번)를 한다.
+    automated:
+      # Git에서 사라진 리소스를 클러스터에서도 지운다. CRD도 대상이다: 렌더링 결과에서 CRD가 빠지면(crds.enabled를 끄는 등) CRD가 지워지고,
+      # CRD가 지워지면 그 종류의 리소스가 모든 네임스페이스에서 함께 지워진다(앱 차트의 ServiceMonitor·PrometheusRule 포함). 그래서 crds.enabled는 끄지 않는다.
+      prune: true
+      # 손으로 바꾼 것을 Git의 내용으로 되돌린다. Prometheus·Alertmanager의 StatefulSet은 ArgoCD가 아니라 Operator가 Prometheus·Alertmanager 리소스를 보고 만든다.
+      # ArgoCD는 추적 어노테이션(argocd.argoproj.io/tracking-id)이 자기 자신을 가리키는 리소스만 관리하므로 Operator가 고치는 StatefulSet과 다투지 않는다.
+      selfHeal: true
+    syncOptions:
+      # destination.namespace(monitoring)가 없으면 동기화할 때 만든다. 부트스트랩이 Secret(grafana-admin, alertmanager-discord)을 넣으려고
+      # 미리 만들어 둔 네임스페이스는 건드리지 않으므로 충돌하지 않는다.
+      - CreateNamespace=true
+      # 서버 쪽 적용(kubectl apply --server-side). 기본인 클라이언트 쪽 적용은 적용한 객체 전체를 JSON으로
+      # kubectl.kubernetes.io/last-applied-configuration 어노테이션에 넣어 두고 다음 적용 때 3-way 병합의 기준으로 쓰는데, 어노테이션은 객체 하나에
+      # 합쳐서 256KiB(262144바이트)까지다. 이 차트의 CRD 중 6개가 그보다 크다(가장 큰 prometheuses CRD가 JSON으로 약 486KiB).
+      # 그래서 클라이언트 쪽 적용은 "metadata.annotations: Too long"으로 실패한다. 서버 쪽 적용은 이 어노테이션을 쓰지 않고,
+      # API 서버가 필드마다 누가 적용했는지(metadata.managedFields)를 기록해 병합한다.
+      - ServerSideApply=true

@@ -1,4 +1,4 @@
-# app-of-apps의 루트 Application. 이 저장소의 argocd/apps 디렉터리를 감시하고, 거기 있는 Application 매니페스트(shortener-dev, shortener-prod)를
+# app-of-apps의 루트 Application. 이 저장소의 argocd/apps 디렉터리를 감시하고, 거기 있는 Application 매니페스트(shortener-dev, shortener-prod, kube-prometheus-stack 등)를
 # 클러스터에 만들어 준다. 환경을 하나 더 늘리려면 argocd/apps에 Application 파일을 추가하는 PR을 머지하면 되고, 클러스터에 손댈 필요가 없다.
 #
 # 이 파일만 클러스터에 손으로 한 번 적용한다(ArgoCD를 설치한 뒤): kubectl apply -f argocd/root.yaml

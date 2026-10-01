@@ -1,0 +1,227 @@
+# kube-prometheus-stack 값: Helm 차트 prometheus-community/kube-prometheus-stack 91.8.2 (Prometheus Operator v0.94.1).
+# ArgoCD의 kube-prometheus-stack Application(argocd/apps/kube-prometheus-stack.yaml)이 차트의 기본값 위에 이 파일을 얹어 monitoring 네임스페이스에 배포한다.
+# 적지 않은 값은 그 차트 버전의 기본값이다: helm show values prometheus-community/kube-prometheus-stack --version 91.8.2
+#
+# 이미지는 차트 버전이 정하는 태그를 그대로 쓴다(Prometheus v3.15.0, Alertmanager v0.34.1, Operator·config-reloader v0.94.1, Grafana 13.2.3,
+# kube-state-metrics v2.20.0, node-exporter v1.12.1). 앱 차트처럼 이미지마다 태그@다이제스트로 고정하지 않는다: 이 차트는 Operator·CRD·이미지를
+# 서로 맞춰 둔 묶음이라 고정의 단위가 차트 버전이다(이미지만 따로 고정하면 차트를 올릴 때 Operator와 CRD·이미지가 어긋날 수 있다).
+#
+# 접속: Grafana·Prometheus·Alertmanager에 Ingress를 만들지 않는다(차트 기본값도 꺼짐). 80 포트는 인터넷에 열린 평문 HTTP라서 Ingress를 만들면
+# 로그인 화면과 관리 API를 그대로 내놓게 된다. HTTPS를 붙이기 전(6단계)에는 kubectl port-forward로만 본다(README의 모니터링 절).
+# 리소스: 모든 컨테이너에 요청과 메모리 한도를 두고 CPU 한도는 두지 않는다(앱 차트와 같은 이유: CPU 한도는 CFS 쿼터 스로틀링을 부른다).
+# 값은 클러스터에서 잰 것이 아니라 이 규모(노드 1개, 파드 수십 개)를 가정한 추정이다. 띄운 뒤 kubectl top pods -n monitoring으로 보고 고친다. 합계는 README에 있다.
+#
+# 이 파일에는 빈 줄을 두지 않는다(환경 값 파일과 같은 yq 모양. validate 워크플로가 yq '.'로 다시 써도 그대로인지 검사한다).
+#
+# 리소스 이름의 접두사(차트의 fullname). 비워 두어도 릴리스 이름(Application 이름 kube-prometheus-stack)에 차트 이름이 들어 있어 같은 값이 되지만,
+# 릴리스 이름과 상관없이 고정한다: Service 이름(port-forward 대상, Grafana 데이터 소스와 Alertmanager의 주소)이 이 값에서 나온다.
+# 하위 차트(Grafana, kube-state-metrics, node-exporter)는 이 값을 쓰지 않고 릴리스 이름으로 이름을 만든다(예: kube-prometheus-stack-grafana).
+fullnameOverride: kube-prometheus-stack
+# --- k3s에 맞춘 것 ---
+# k3s는 kube-controller-manager·kube-scheduler·kube-proxy를 파드가 아니라 k3s 프로세스 하나 안에서 돌리고, etcd는 아예 없다
+# (서버 하나를 --cluster-init 없이 띄워 데이터 저장소가 SQLite다). 차트 기본값은 kube-system에서 이 컴포넌트의 파드(예: component=kube-scheduler 레이블)를
+# 골라 수집하는데, 고를 파드가 없으니 수집 대상이 비고 up 시계열이 생기지 않는다. 그러면 absent(up{job="kube-scheduler"})로 쓴 KubeSchedulerDown 같은
+# critical 경보가 영원히 울려 Discord로 4시간마다 다시 간다. 그래서 수집을 끈다. enabled: false이면 그 컴포넌트의 Service·ServiceMonitor·대시보드·규칙이 함께 빠진다.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+defaultRules:
+  # 위 네 컴포넌트의 기본 규칙(경보·기록 규칙)도 끈다. 이 차트 버전은 규칙 파일마다 컴포넌트의 enabled도 함께 검사해서(templates/prometheus/rules-1.14)
+  # 위 enabled: false만으로도 이 규칙들이 빠진다. 그래도 따로 끄는 것은 의도를 값에 드러내고, 차트가 그 연결을 바꾸더라도 영원히 울리는 경보가 돌아오지 않게 하려는 것이다.
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeProxy: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+prometheusOperator:
+  admissionWebhooks:
+    # PrometheusRule을 적용할 때 미리 검사하는 Operator의 어드미션 웹훅을 끈다. 켜 두면 차트가 Helm 훅 Job 두 개로 자체 서명 인증서 Secret을 만들고
+    # 웹훅 설정(Validating·MutatingWebhookConfiguration)의 caBundle을 클러스터에서 직접 고쳐 쓴다. Git에 없는 값이 Job으로 들어가는 구조이고,
+    # ArgoCD는 설치와 업그레이드를 구분하지 못해 이 훅 Job들을 동기화할 때마다 PreSync·PostSync로 다시 돌린다.
+    # 꺼도 잘못된 규칙은 Operator가 Prometheus 설정에 넣지 않고 건너뛰고(Operator 로그), 앱 차트의 SLO 규칙은 CI의 promtool이 머지 전에 검사한다.
+    enabled: false
+  tls:
+    # Operator 자신의 HTTPS(웹훅 요청을 받는 포트)도 끈다. 켜 두면 Operator 파드가 위 훅 Job이 만드는 인증서 Secret(kube-prometheus-stack-admission)을
+    # 볼륨으로 붙이는데, 웹훅을 끄면 그 Secret이 생기지 않아 파드가 ContainerCreating에 머문다. 끄면 Operator는 HTTP 8080으로 지표를 내놓는다.
+    enabled: false
+  # Operator: Prometheus·Alertmanager 리소스를 보고 StatefulSet과 설정 Secret을 만들고, ServiceMonitor·PrometheusRule을 모아 Prometheus 설정으로 바꾼다.
+  # 클러스터의 Secret·ConfigMap 등을 감시하는 캐시가 메모리의 대부분이다. 차트가 GOGC=30을 넣어 GC를 자주 돌린다.
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+  prometheusConfigReloader:
+    # Operator가 Prometheus·Alertmanager 파드에 넣는 config-reloader(설정·규칙 파일이 바뀌면 다시 읽게 한다)와 init-config-reloader 컨테이너의 리소스.
+    # 차트가 이 값을 Operator의 인자(--config-reloader-*)로 넘긴다. CPU 한도가 없으면 인자가 0이 되고, Operator는 0을 "한도를 두지 않음"으로 읽는다.
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        memory: 64Mi
+prometheus:
+  prometheusSpec:
+    # 데이터 보존: 3일과 4GB 중 먼저 닿는 쪽까지. 이 클러스터는 공부하는 동안만 띄우고 끝나면 인스턴스째 없애서 30일치를 쌓을 일이 없다.
+    # 그래서 SLO의 30일 오류 예산 대신 대시보드는 소진 속도(burn rate)와 1h·6h·1d 가용성을 보여 주고, 경보도 1h·6h 창까지만 쓴다(README).
+    retention: 3d
+    # Prometheus의 크기 단위는 2의 거듭제곱이라 4GB는 4GiB다. WAL과 head 청크도 이 크기에 세어지지만, 크기를 맞추려고 지우는 것은 오래된 블록뿐이다.
+    # 볼륨은 local-path라 PVC 크기(아래 5Gi)를 강제하지 않는다(노드 디스크의 디렉터리일 뿐이다). 그래서 디스크 사용의 실제 상한은 이 값이고, 5Gi와의 차이를 여유로 둔다.
+    retentionSize: 4GB
+    # 수집 주기와 규칙 평가 주기. Operator의 기본값(CRD의 default)도 30s지만, SLO 규칙의 가장 짧은 창(5m)과 Grafana 데이터 소스의 timeInterval(차트가 이 값을 넣는다)이
+    # 이 주기를 전제로 하므로 적어 둔다. rate()는 창 안에 샘플이 둘 이상 있어야 값을 내므로 창은 이 주기의 두 배보다 길어야 한다.
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    # 아래 다섯 값이 true(차트 기본값)이면 차트가 셀렉터를 release: kube-prometheus-stack 레이블로 채워서, 그 레이블이 없는 ServiceMonitor·PrometheusRule 등을
+    # Prometheus가 무시한다. false로 두면 셀렉터가 비어({}) 모두를 고르고, 네임스페이스 셀렉터도 비어 있어(차트 기본값) 모든 네임스페이스에서 찾는다.
+    # 그래서 앱 차트가 shortener-dev·shortener-prod 네임스페이스에 만드는 ServiceMonitor·SLO 규칙에 이 릴리스의 레이블을 붙이지 않아도 된다.
+    ruleSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+    # 데이터 볼륨. Operator가 StatefulSet의 volumeClaimTemplates로 PVC를 만들고, k3s 기본 StorageClass(local-path)가 노드 디렉터리에 볼륨을 만든다.
+    # 파드가 다시 떠도 데이터가 남고, 인스턴스를 없애면 함께 사라진다. 이 PVC는 StatefulSet이 만든 것이라 ArgoCD가 지우지 않는다(앱의 PostgreSQL PVC와 같다).
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 5Gi
+    # 메모리는 활성 시계열 수에 비례한다(최근 약 2시간치를 head 블록으로 메모리에 들고 있다). 요청 512Mi는 이 규모에서 예상하는 평소 사용량이다(추정).
+    # 한도 1Gi는 재시작할 때 WAL을 다시 읽는 동안과 긴 창([1d]~[30d])을 읽는 기본 규칙을 평가할 때 늘어나는 몫을 둔 것이다.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        memory: 1Gi
+alertmanager:
+  # Alertmanager 설정(alertmanager.yaml). 차트가 이 값으로 Secret(alertmanager-kube-prometheus-stack-alertmanager)을 만들고 Operator가 Alertmanager에 넣는다.
+  # Helm은 값 파일을 합칠 때 맵은 키 단위로 합치고 리스트는 통째로 바꾼다. 그래서 여기 적지 않은 global(resolve_timeout 5m)·templates·inhibit_rules는
+  # 차트 기본값 그대로 남는다. inhibit_rules(같은 namespace·alertname에서 critical이 울리면 warning·info를 누르는 것 등 4개)는 일부러 건드리지 않았다.
+  # 반대로 route.routes와 receivers는 리스트라서 아래 내용이 차트 기본값을 통째로 대신한다.
+  config:
+    route:
+      # 아래 경로 어디에도 걸리지 않은 경보는 null(아무 데도 보내지 않는 수신자)로 간다. 기본 규칙의 warning·info 경보는 Alertmanager UI에서만 본다.
+      receiver: 'null'
+      # 같은 alertname·namespace의 경보를 한 알림으로 묶는다(namespace가 다르면 dev와 prod의 같은 경보도 따로 간다).
+      group_by:
+        - alertname
+        - namespace
+      # 새 묶음의 첫 알림은 30초 모았다가 보낸다. 이미 보낸 묶음에 경보가 더해지거나 풀리면 5분 간격으로 다시 보내고,
+      # 아무 변화 없이 계속 울리면 4시간마다 다시 알린다.
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      # 위에서부터 차례로 보고 처음 맞는 경로 하나로만 보낸다(continue의 기본값 false). 그래서 service="shortener"이면서 critical인 경보도 한 번만 간다.
+      routes:
+        # Watchdog은 경보 파이프라인이 살아 있음을 보이려고 늘 울리는 경보이고, InfoInhibitor는 info 경보를 누르는 데만 쓰는 경보라 보내지 않는다.
+        - receiver: 'null'
+          matchers:
+            - alertname =~ "Watchdog|InfoInhibitor"
+        # 앱의 SLO 경보(앱 차트의 PrometheusRule이 service: shortener 레이블을 붙인다).
+        - receiver: discord
+          matchers:
+            - service = "shortener"
+        # 그 밖의 critical 경보(차트의 기본 규칙. 예: KubeAPIErrorBudgetBurn, PrometheusBadConfig)도 Discord로 보낸다.
+        - receiver: discord
+          matchers:
+            - severity = "critical"
+    receivers:
+      - name: 'null'
+      - name: discord
+        discord_configs:
+          # 웹훅 주소는 Git에 두지 않는다(주소만 알면 누구나 그 채널에 글을 쓸 수 있다). 부트스트랩이 SSM의 값으로 Secret alertmanager-discord(키 webhook-url)를 만들고,
+          # 아래 alertmanagerSpec.secrets가 그 Secret을 /etc/alertmanager/secrets/<Secret 이름>/<키> 파일로 붙인다. Alertmanager는 알림을 보낼 때마다 이 파일을 읽는다.
+          - webhook_url_file: /etc/alertmanager/secrets/alertmanager-discord/webhook-url
+            # 경보가 풀렸을 때(RESOLVED)도 알린다. discord_configs의 기본값도 true지만 SLO 정의에 맞춰 적어 둔다.
+            send_resolved: true
+  alertmanagerSpec:
+    # 위 discord 수신자가 읽는 Secret. Operator가 /etc/alertmanager/secrets/alertmanager-discord/에 키 이름을 파일 이름으로 붙인다.
+    # Secret이 없으면 파드가 볼륨을 붙이지 못해 뜨지 않으므로, 부트스트랩이 루트 Application보다 먼저 만든다(SSM 값을 못 읽으면 쓸모없는 주소로라도 만든다).
+    secrets:
+      - alertmanager-discord
+    # 알림 기록과 사일런스는 emptyDir(차트 기본값)에 둔다. 파드가 다시 뜨면 사라지므로 울리고 있던 경보가 한 번 더 알려질 수 있다.
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 128Mi
+grafana:
+  # 관리자 계정은 부트스트랩이 만드는 Secret grafana-admin(키 admin-user·admin-password, 비밀번호는 무작위)에서 읽는다.
+  # 이 값이 없으면 하위 차트가 비밀번호 Secret을 직접 만든다: adminPassword를 적으면 그 값이 공개 저장소에 남고, 비워 두면 템플릿이 무작위 값을 만든다.
+  # 무작위 값은 클러스터에서 기존 Secret을 조회(lookup)해 재사용하는데, ArgoCD의 렌더링은 클러스터를 조회하지 않아 렌더링할 때마다 새 값이 나온다.
+  # 그러면 Secret이 늘 OutOfSync이고 동기화할 때마다 비밀번호가 바뀐다.
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  # Grafana 자신의 DB(SQLite)는 PVC 없이 emptyDir에 둔다(하위 차트 기본값과 같지만 적어 둔다). 대시보드는 Git에서(아래 sidecar),
+  # 데이터 소스는 차트가 만드는 ConfigMap에서 오므로 DB가 지워져도 다시 만들어진다. UI에서 손으로 바꾼 것(저장한 대시보드, 사용자 설정)은 파드가 다시 뜨면 사라진다.
+  persistence:
+    enabled: false
+  # 사이드카가 ConfigMap·Secret을 읽는 권한. 하위 차트 기본값(false)은 ClusterRole이라 클러스터의 모든 Secret(다른 네임스페이스의 DB 비밀번호 포함)을 읽을 수 있다.
+  # 사이드카는 monitoring 네임스페이스만 보므로(아래 searchNamespace) 그 네임스페이스의 Role로 줄인다.
+  rbac:
+    namespaced: true
+  # 차트의 기본 데이터 소스(Prometheus, Alertmanager)에 Loki를 더한다. 대시보드의 로그 패널이 uid로 찾으므로 uid를 고정한다.
+  # 주소는 Loki 차트(릴리스 loki, SingleBinary)가 만드는 Service다. Loki를 배포하기 전에는 이 데이터 소스만 조회가 실패하고 나머지는 영향이 없다.
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      uid: loki
+      url: http://loki.monitoring.svc.cluster.local:3100
+      access: proxy
+  sidecar:
+    dashboards:
+      # 레이블 grafana_dashboard: "1"이 붙은 ConfigMap을 찾아 대시보드로 넣는다. 차트의 기본 대시보드와 이 저장소의 대시보드(monitoring-dashboards Application)가 이 방식이다.
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      # 차트 기본값 ALL(모든 네임스페이스)을 monitoring으로 좁힌다. 대시보드 ConfigMap은 모두 이 네임스페이스에 둔다.
+      searchNamespace: monitoring
+    # 사이드카 컨테이너(대시보드용, 데이터 소스용 2개)에 같은 값이 하나씩 붙는다.
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+  # helm test용 파드(helm.sh/hook: test)를 만들지 않는다. ArgoCD는 test 훅을 건너뛰어 어차피 배포되지 않는다(README의 helm test 훅 설명).
+  testFramework:
+    enabled: false
+  # 하위 차트가 메모리 한도의 90%를 GOMEMLIMIT로 넣는다(goMemLimit 기본값). Go 런타임이 그 근처에서 GC를 서둘러 한도에 닿기 전에 메모리를 돌려받는다.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+# 쿠버네티스 객체의 상태(파드 재시작 수, Deployment의 준비된 파드 수 등)를 지표로 내놓는다. 기본 규칙(KubePodCrashLooping 등)이 이 지표를 쓴다.
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+# 노드의 CPU·메모리·디스크·네트워크를 지표로 내놓는다(DaemonSet이라 노드마다 하나).
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
