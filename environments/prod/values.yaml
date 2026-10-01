@@ -1,8 +1,10 @@
 # prod 환경 값. ArgoCD의 shortener-prod Application(argocd/apps/shortener-prod.yaml)이 차트 기본값(charts/shortener/values.yaml) 위에
-# 이 파일을 얹어 shortener-prod 네임스페이스에 배포한다. 여기에는 차트 기본값과 다른 것만 적는다.
+# 이 파일을 얹어 shortener-prod 네임스페이스에 배포한다. 여기에는 이 환경에서 정한 값을 적는다: 차트 기본값과 다른 것, 그리고 같더라도 일부러 적어 두는 것(아래 autoscaling, resources).
 #
-# prod도 로컬 클러스터에서는 dev와 같은 크기로 띄운다: 파드 1개(HPA 끔), 앱 메모리 요청 256Mi·한도 384Mi (차트 기본값은 HPA로 파드 1~2개, 요청 384Mi·한도 512Mi).
-# dev와 다른 점은 이미지 태그를 올리는 방법(prod는 PR로 승격)과 호스트 이름·공개 주소뿐이다. 비교는 environments/dev/values.yaml의 머리말에 있다.
+# 클러스터는 EC2 m7i-flex.large(2 vCPU, 메모리 8GiB) 한 대의 k3s이고(ap-northeast-2), dev·prod 두 환경과 ArgoCD가 이 노드 하나를 나눠 쓴다.
+# 로컬 k3d 클러스터(Docker VM 2.84GiB)는 dev 롤링 업데이트 중에 메모리가 모자라서 프로젝트를 EC2로 옮겼고 멈춰 두었다. 그래서 prod의 HPA를 다시 켜고 앱 메모리를 차트 기본값(요청 384Mi·한도 512Mi)으로 되돌렸다.
+# 로컬 k3d로 다시 띄우려면 baseUrl·ingress.host를 *.localhost 이름으로, HPA와 앱 메모리를 예전 크기로 덮어써야 한다(README의 메모리 메모).
+# dev와 다른 점은 이미지 태그를 올리는 방법(prod는 PR로 승격), 호스트 이름·공개 주소, prod만 HPA가 켜져 있다는 것, 그리고 prod의 PostgreSQL이 더 크다는 것(맨 아래 postgresql)이다. 앞의 셋의 비교는 environments/dev/values.yaml의 머리말에 있다.
 #
 # 이 파일에도 dev 파일처럼 빈 줄이 하나도 없다. yq는 값을 고쳐 다시 쓸 때 키 사이의 빈 줄을 지우므로(dev 파일 머리말 참고),
 # 처음부터 그 모양으로 커밋해 두어야 yq로 승격할 때도 바뀌는 줄이 태그 하나뿐이다.
@@ -14,30 +16,67 @@ image:
   # 이 파일을 지켜 주는 것은 룰셋이 아니라 그 스크립트의 절제다.
   # 값은 따옴표로 감싼다: dev 파일과 같은 형식으로 두어 SHA를 통째로 복사·붙여넣을 수 있게 하고, 숫자나 지수 표기로 읽히지 않게 한다.
   tag: "3d911e42d788f0021a82e8e973b1335a412220f2"
-# 응답의 shortUrl 앞에 붙는 공개 주소. Ingress로 들어오는 주소와 같아야 한다 (k3d가 맥의 8090 포트를 Traefik에 이어 준다: clusters/local/k3d.yaml).
-baseUrl: http://shortener.localhost:8090
+# 응답의 shortUrl 앞에 붙는 공개 주소. Ingress로 들어오는 주소와 같아야 한다. DuckDNS 이름 dev-ops-study가 EC2 노드의 IP를 가리키고, 그 노드의 80 포트로 들어온 요청을 k3s 기본 Traefik이 받는다.
+# 평문 HTTP의 기본 포트(80)라서 주소에 포트 번호가 없다. HTTPS는 나중에 cert-manager로 붙인다(붙이면 이 주소도 https로 바꾼다).
+baseUrl: http://dev-ops-study.duckdns.org
 ingress:
-  # *.localhost는 루프백으로 해석되므로 /etc/hosts를 고치지 않아도 된다. dev(shortener-dev.localhost)와 다른 이름이어야 Traefik이 요청을 나눈다.
-  host: shortener.localhost
-# 파드 1개로 고정하고 HPA를 끈다: autoscaling.enabled가 false이면 차트가 HPA를 만들지 않고 Deployment에 replicas를 적으므로(replicaCount) 그 값이 쓰인다.
-# 이유는 이 로컬 클러스터의 메모리 예산이다. dev와 prod 두 벌이 ArgoCD와 함께 한 Docker VM에 뜬다.
-#   - Docker VM은 약 2.84GiB(약 2908MiB)이고, 그중 사용자의 다른 컨테이너가 약 600MiB, 빈 클러스터(k3s·Traefik 등)가 약 770MiB를 써서 이 클러스터의 워크로드에 쓸 여유는 약 1.5GiB다.
-#   - 그 안에 ArgoCD(메모리 요청 약 304Mi)와 환경 두 벌(각각 앱 + PostgreSQL + Redis, 요청 416Mi)이 들어가 요청 합이 1136Mi다. 한도(limits) 합은 2304Mi로 여유를 넘는다.
-#     한도는 상한일 뿐 평소 사용량은 훨씬 작다는 것에 기대는 예산이라, 실제 사용량은 띄운 뒤에 잰다(README의 메모리 메모).
-#   - 롤링 업데이트 중에는 그 환경의 앱 JVM 파드가 하나 더 뜬다(maxSurge 1, 요청 256Mi·한도 384Mi). HPA가 prod를 2개로 늘려 둔 채 롤링 업데이트를 하면 prod의 앱 JVM만 3개가 된다.
-# HPA(파드 1~2개)는 prod를 EC2로 옮기는 6단계에서 다시 켠다. HPA 자체는 2단계에서 이미 연습했다.
+  # DuckDNS에 등록한 이름 그대로다. dev(dev.dev-ops-study.duckdns.org)도 같은 IP로 들어오므로, 이름이 달라야 Traefik이 Host 헤더로 요청을 나눈다.
+  host: dev-ops-study.duckdns.org
+# HPA를 켠다(파드 1~3개). autoscaling.enabled가 true이면 차트가 HPA를 만들고 Deployment에는 replicas를 적지 않으므로 파드 수는 HPA가 정한다. 그래서 replicaCount는 이 파일에 적지 않는다(쓰이지 않는다).
+# 최대 3개는 이 노드의 메모리 예산으로 정했다. 앱과 Redis는 차트 기본값의 요청·한도로, prod의 PostgreSQL은 아래 postgresql에서 키운 값으로 계산한다(단위 Mi):
+#   - 노드: m7i-flex.large의 8GiB = 8192. 명목 크기라 실제 MemTotal은 조금 작고 호스트 OS도 메모리를 쓴다(띄운 뒤 free -m으로 확인한다).
+#   - k3s와 기본 구성요소(Traefik 등): 약 800. 로컬 k3d의 빈 클러스터에서 잰 약 770을 올려 잡은 값이고 EC2에서는 재지 않았다.
+#   - ArgoCD: 요청 합 304, 한도 합 768 (README의 ArgoCD 표).
+#   - 앱 파드 하나는 요청 384·한도 512, Redis는 32/128이다. PostgreSQL은 dev가 차트 기본값 128/256이고, prod는 아래 postgresql에서 키운 256/512다.
+#   - dev(앱 1개 + PostgreSQL 128/256 + Redis 32/128): 요청 544, 한도 896. prod(앱 3개 + PostgreSQL 256/512 + Redis 32/128): 요청 1440, 한도 2176.
+#   - 롤링 업데이트 중에는 환경마다 앱 파드가 하나 더 뜬다(maxSurge 1): 요청 +384, 한도 +512. 차트의 파드 템플릿을 고치면 두 환경이 같은 main의 차트를 읽으므로 동시에 롤링된다.
+#   한도 합의 최악은 800 + 768 + 896 + 2176 + 512 + 512 = 5664이다(모든 컨테이너가 한도까지 쓰고, prod가 3개인 채 두 환경이 동시에 롤링하는 경우. 같은 경우의 요청 합은 3856).
+#   8192 - 5664 = 2528(약 2.5GiB)이 남는다. 4단계 모니터링에 계획한 약 1.5GiB(1536, 추정)를 빼도 992가 남는다.
+# 한도는 상한일 뿐 평소 사용량은 훨씬 작다: 2단계에서 한도 512Mi로 띄웠을 때 유휴 상태의 앱 파드는 약 320Mi였다. 실제 값은 띄운 뒤 kubectl top pods -A --sort-by=memory로 잰다.
+# prod가 최대까지 늘 수 있다고 보고 예산을 잡았다: 2단계에서는 새 파드가 뜬 직후 HPA가 앱을 1개에서 2개로 늘렸다가 5분쯤 뒤에 줄이는 일이 여러 번 있었다(콜드 JVM의 CPU 급증 때문으로 추정하지만 그 순간의 CPU는 재지 않았다).
+# 메모리 말고 DB 커넥션도 파드 수를 받쳐 줘야 한다: 앱 파드마다 Hikari 풀이 커넥션을 10개씩 잡아서 최대 4개(3개 + 롤링 업데이트 중 1개)면 40개다.
+# 차트 PostgreSQL의 max_connections(30)로는 모자라서 prod는 아래 postgresql에서 60으로 키웠다(계산은 거기에 있다). 목표 CPU 사용률(70%)은 차트 기본값이다.
 autoscaling:
-  enabled: false
-replicaCount: 1
-# 앱 컨테이너의 리소스: dev와 같다(요청 cpu 100m·memory 256Mi, 한도 memory 384Mi). 차트 기본값은 요청 memory 384Mi·한도 512Mi다.
-# JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 -XX:MaxRAMPercentage=75.0)라서 한도 384Mi에서는 288Mi다. 나머지 96Mi는 메타스페이스·스레드 스택·코드 캐시 같은 힙 밖 몫이다.
-# 이 수치가 빠듯한지는 띄운 뒤 kubectl top pods로 보고, OOMKilled(exit 137)가 보이면 한도를 올린다. 자세한 근거는 environments/dev/values.yaml의 resources 위 주석에 있다.
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 3
+# 앱 컨테이너의 리소스: 요청 cpu 100m·memory 384Mi, 한도 memory 512Mi. 차트 기본값과 같은 값이지만 일부러 적어 둔다:
+# 위 예산 계산이 기대는 값이라 계산과 값을 한 파일에서 읽게 하고, 차트 기본값을 고쳐도 이 크기가 저절로 바뀌지 않게 하려는 것이다(로컬 Docker VM에서는 요청 256Mi·한도 384Mi로 줄여 덮어썼다).
+# JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 -XX:MaxRAMPercentage=75.0)라서 한도 512Mi에서는 384Mi이고, 나머지 128Mi에 메타스페이스·스레드 스택·코드 캐시 같은 힙 밖 메모리가 들어간다.
+# 부하 때 OOMKilled(exit 137)가 보이면 한도를 올린다(힙 상한도 한도의 75%로 따라 오른다). cpu 요청 100m는 HPA가 CPU 사용률(%)을 셈하는 분모이기도 하다(차트 values.yaml의 resources 주석).
 resources:
   requests:
     cpu: 100m
-    memory: 256Mi
-  limits:
     memory: 384Mi
+  limits:
+    memory: 512Mi
 database:
   # DB 비밀번호가 든 Secret의 이름 (키는 password). Secret은 Git에 없다: 클러스터의 shortener-prod 네임스페이스에 손으로 만든다 (README의 부트스트랩).
   existingSecret: shortener-db
+# 클러스터 안의 PostgreSQL을 prod 크기로 키운다. 차트 기본값(max_connections=30)은 앱 파드 최대 2개(커넥션 20개)에 맞춘 값이라서, 최대 3개에 롤링 업데이트 중 1개가 더 뜨는 prod를 받지 못한다.
+# dev는 파드 1개에 롤링 업데이트 중 1개를 더한 2개(커넥션 20개)라 차트 기본값(30)으로 충분해서 덮어쓰지 않는다.
+postgresql:
+  # postgres -c 이름=값 인자다. Helm은 맵을 키 단위로 합치지만 리스트는 통째로 바꾸므로, 이 목록은 차트 기본값(shared_buffers=32MB, max_connections=30)과 합쳐지지 않고 그것을 대신한다.
+  # max_connections=60은 커넥션 예산에서 나왔다:
+  #   - 앱 파드마다 Hikari 풀이 커넥션을 10개씩 연다. 앱이 풀 크기를 정하지 않아 최대 10개가 기본값이고, 최소 유휴 수(minimumIdle)의 기본값이 최대와 같아서 풀은 시작하자마자 10개를 모두 열고 줄어들지도 않는다.
+  #   - prod는 HPA로 최대 3개이고 롤링 업데이트 중에는 maxSurge 1로 하나가 더 떠서 최대 4개 × 10 = 40개가 동시에 열린다. 차트 기본값(30)에서는 파드 3개가 30개를 다 잡고 있어서 4번째 파드는 첫 커넥션부터 "sorry, too many clients already"로 거절당한다.
+  #   - 40에 더해 풀 밖의 커넥션이 있다: 사람이 psql로 붙는 세션, pg_isready 프로브가 잠깐씩 여는 커넥션, 롤링 업데이트에서 내려가는 옛 파드가 풀을 닫기 전에 새 파드가 풀을 여는 겹침(옛 파드의 풀 10개까지)이다.
+  #     마이그레이션(Flyway)은 앱과 같은 DataSource를 써서 풀의 10개 안에서 돌므로 따로 더하지 않는다.
+  #   - superuser_reserved_connections(기본 3)는 max_connections 중 슈퍼유저 전용으로 남겨 두는 자리라서, 일반 계정은 60 - 3 = 57개까지만 쓴다. 40 + 10(겹침) + psql·프로브 몇 개는 이 57 안에 든다.
+  #     지금 앱 계정(shortener)은 슈퍼유저라서 예약 자리까지 쓸 수 있지만(공식 이미지는 POSTGRES_USER로 만든 계정을 슈퍼유저로 만든다) 57을 기준으로 잡았다: 나중에 앱 계정을 일반 계정으로 바꿔도 예산이 그대로 맞는다.
+  # shared_buffers는 메모리 한도에 대한 비율을 차트와 같게 맞춘 값이다(32MB/256Mi = 64MB/512Mi = 1/8).
+  args:
+    - -c
+    - shared_buffers=64MB
+    - -c
+    - max_connections=60
+  # 메모리: PostgreSQL은 연결마다 백엔드 프로세스를 하나씩 띄워 메모리를 쓰고, 거기에 연결 수와 상관없이 한 번 잡히는 공유 메모리(shared_buffers)가 더해진다. 최대 60개 연결 + 64MB + 기본 프로세스들이 한도 안에 들어야 한다.
+  # 차트의 요청·한도(128Mi·256Mi)는 shared_buffers 32MB·연결 30개에 맞춘 크기다. prod는 둘 다 두 배가 되므로 요청·한도도 두 배(256Mi·512Mi)로 키웠다. 요청 : 한도 = 1 : 2는 차트와 같다.
+  # 로컬(arm64) Docker에서 이 인자로 띄워 쟀다(EC2에서는 재지 않았다): 연결이 없을 때 PostgreSQL 프로세스 9개가 합쳐 약 28MB, 쿼리를 하나씩 돌리는 연결 40개를 맺으면 약 81MB(연결당 약 1.3MB)였다.
+  # 앱이 쿼리를 돌린 연결은 이보다 더 쓰고 shared_buffers는 차면 64MB까지 늘어나므로, 한도는 이 값보다 훨씬 크게 잡았다. 띄운 뒤 kubectl top pods -n shortener-prod로 확인한다.
+  # cpu 요청은 적지 않았다: 맵은 키 단위로 합쳐지므로 차트 기본값(50m)이 그대로 남는다.
+  resources:
+    requests:
+      memory: 256Mi
+    limits:
+      memory: 512Mi
