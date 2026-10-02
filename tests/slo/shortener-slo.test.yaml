@@ -2,7 +2,7 @@
 # 정한 시각(eval_time)에 울리는 알림(alert_rule_test)과 PromQL 결과(promql_expr_test)를 기대값과 비교한다.
 # 규칙 파일은 저장소에 없고 차트를 렌더링해서 만든다(rendered/는 .gitignore). validate 워크플로의 "SLO 규칙 검사" 단계가 하는 일을 로컬에서 하려면 저장소 루트에서:
 #   KUBERNETES_VERSION=$(yq '.jobs.validate.env.KUBERNETES_VERSION' .github/workflows/validate.yml)
-#   PROMETHEUS_IMAGE=$(yq '.jobs.validate.steps[] | select(.env.PROMETHEUS_IMAGE) | .env.PROMETHEUS_IMAGE' .github/workflows/validate.yml)
+#   PROMETHEUS_IMAGE=$(yq '.jobs.validate.env.PROMETHEUS_IMAGE' .github/workflows/validate.yml)
 #   mkdir -p tests/slo/rendered
 #   for e in dev prod; do
 #     helm template shortener-$e charts/shortener -n shortener-$e --kube-version "$KUBERNETES_VERSION" \

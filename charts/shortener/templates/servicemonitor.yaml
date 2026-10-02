@@ -23,4 +23,12 @@ spec:
     - port: management
       path: /actuator/prometheus
       interval: {{ .Values.metrics.serviceMonitor.interval }}
+  {{- /*
+  podTargetLabels: 파드의 레이블 rollouts-pod-template-hash를 수집한 시계열에 rollouts_pod_template_hash 레이블로 붙인다(Prometheus 레이블 이름에는 -를 쓸 수 없어 _로 바뀐다).
+  Argo Rollouts가 Rollout의 파드에 붙이는 레이블이고, 값은 그 파드를 띄운 ReplicaSet(파드 템플릿)의 해시라서 카나리 파드와 stable 파드를 가른다.
+  카나리 분석(analysistemplate.yaml)이 이것으로 카나리 파드의 요청만 고른다. Deployment로 배포될 때는 파드에 이 레이블이 없어 아무 레이블도 붙지 않는다.
+  SLO 규칙과 대시보드(platform/dashboards)는 파드의 계열을 sum으로 합쳐 읽으므로 이 레이블이 더해져도 결과가 같다.
+  */}}
+  podTargetLabels:
+    - rollouts-pod-template-hash
 {{- end }}

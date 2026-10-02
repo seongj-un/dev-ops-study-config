@@ -1,0 +1,108 @@
+# 카나리 분석 쿼리(charts/shortener/templates/analysistemplate.yaml)의 단위 테스트. promtool이 가짜 시계열(input_series)을 넣고 쿼리를 계산해서 기대값과 비교한다.
+# 쿼리는 Prometheus 규칙이 아니라 AnalysisTemplate 안의 문자열이라서, validate 워크플로의 "카나리 분석 쿼리 검사" 단계가 렌더링 결과에서 쿼리를 꺼내
+# 자리표시자 {{args.canary-hash}}를 테스트용 해시 canary로 바꾸고, 기록 규칙 하나(canary:http_server_requests_errors:ratio_rate1m)로 감싸 rendered/에 둔다(.gitignore).
+# 클러스터에서는 Argo Rollouts가 자리표시자를 카나리 ReplicaSet의 해시(예: 7c9d6b5f48)로 채운다. 로컬에서 돌리는 명령은 README의 카나리 배포에 있다.
+#
+# Argo Rollouts가 쿼리 결과를 판정하는 조건(successCondition)은 promtool이 계산하지 못한다. 여기서는 쿼리가 내는 값만 확인하고, 그 값의 판정은 이렇다:
+#   비율 0.05 이상 → 실패, 0.05 미만·NaN·빈 결과 → 성공 (analysistemplate.yaml 머리말의 [판정])
+# 표본 간격(interval)과 평가 주기는 클러스터의 수집 주기와 같은 30초다. 쿼리의 창이 1분이라 계열마다 창 안에 표본이 2개 들어가는지가 결과를 바꾸기 때문이다.
+# 값 표기: 'a+bxn'은 a에서 시작해 b씩 n번 늘린 n+1개의 표본, 'axn'은 a를 n+1번 되풀이한 것, '_'는 그 시각에 표본이 없다는 뜻이다.
+# 계열의 레이블은 쿼리에 필요한 것과 pod만 적었다. rollouts_pod_template_hash는 ServiceMonitor의 podTargetLabels가 붙이는 레이블이다.
+# 장애 주입(fault.errorRate)의 500은 라우팅 전에 응답해서 uri="UNKNOWN"으로 기록된다.
+rule_files:
+  - rendered/shortener-dev.yaml
+  - rendered/shortener-prod.yaml
+evaluation_interval: 30s
+tests:
+  - name: (a) 카나리 파드 요청의 30%가 5xx면 비율이 0.3이다(실패). stable 파드, actuator 요청, 다른 환경은 섞이지 않는다
+    interval: 30s
+    input_series:
+      # dev 카나리 파드: 30초마다 리다이렉트(302) 35건과 장애 주입 500 15건 → 5xx 30%
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", rollouts_pod_template_hash="canary", pod="shortener-dev-canary-1", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
+        values: '0+35x10'
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", rollouts_pod_template_hash="canary", pod="shortener-dev-canary-1", method="GET", uri="UNKNOWN", status="500"}'
+        values: '0+15x10'
+      # actuator 요청은 SLI에서 빠진다. 지금 앱에서는 별도 포트라 이 계열이 없지만, 생겨서 섞였다면 비율이 약 77%가 되었을 것이다.
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", rollouts_pod_template_hash="canary", pod="shortener-dev-canary-1", method="GET", uri="/actuator/health", status="503"}'
+        values: '0+100x10'
+      # dev stable 파드: 정상 요청만 받는다. 섞였다면 카나리의 오류가 묽어져 비율이 15 ÷ 100 = 15%로 보였을 것이다.
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", rollouts_pod_template_hash="stable", pod="shortener-dev-stable-1", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
+        values: '0+50x10'
+      # prod 카나리 파드(해시가 우연히 같다고 쳐도 namespace·job이 다르다): 모든 요청이 500이다. dev의 비율에 섞이지 않고 prod의 쿼리만 1을 낸다.
+      - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", rollouts_pod_template_hash="canary", pod="shortener-prod-canary-1", method="GET", uri="UNKNOWN", status="500"}'
+        values: '0+10x10'
+    promql_expr_test:
+      # round(…, 0.0001)은 부동소수점 꼬리(0.3이 0.30000000000000004로 나오는 것)를 자른다.
+      - expr: round(canary:http_server_requests_errors:ratio_rate1m, 0.0001)
+        eval_time: 5m
+        exp_samples:
+          - labels: '{namespace="shortener-dev", job="shortener-dev"}'
+            value: 0.3
+          - labels: '{namespace="shortener-prod", job="shortener-prod"}'
+            value: 1
+
+  - name: (b) stable 파드에만 5xx가 있으면 카나리의 비율은 0이다(성공). 5xx 계열이 없는 카나리는 분자를 0으로 채운다
+    interval: 30s
+    input_series:
+      # dev 카나리 파드: 정상 요청만 받는다. 앱은 상태 코드마다 첫 응답 때 계열을 만들므로 500 계열이 아예 없다.
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", rollouts_pod_template_hash="canary", pod="shortener-dev-canary-1", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
+        values: '0+50x10'
+      # dev stable 파드: 요청의 절반이 500이다(새 버전 탓이 아니다).
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", rollouts_pod_template_hash="stable", pod="shortener-dev-stable-1", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
+        values: '0+25x10'
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", rollouts_pod_template_hash="stable", pod="shortener-dev-stable-1", method="POST", uri="/api/v1/urls", status="500"}'
+        values: '0+25x10'
+    promql_expr_test:
+      # 0으로 채우지 않았다면 분자가 비어서 결과도 비었을 것이다(판정은 같은 성공이지만 측정값이 "요청 없음"과 구분되지 않는다).
+      - expr: canary:http_server_requests_errors:ratio_rate1m
+        eval_time: 5m
+        exp_samples:
+          - labels: 'canary:http_server_requests_errors:ratio_rate1m{namespace="shortener-dev", job="shortener-dev"}'
+            value: 0
+
+  - name: (c) 카나리 파드가 요청을 받은 적은 있지만 최근 1분에 없으면 비율이 NaN(0 ÷ 0)이다(성공)
+    interval: 30s
+    input_series:
+      # dev 카나리 파드: 2분까지 30초마다 50건, 그 뒤로는 요청이 없다(계열은 남아 있고 값이 그대로다).
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", rollouts_pod_template_hash="canary", pod="shortener-dev-canary-1", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
+        values: '0+50x4 200x6'
+    promql_expr_test:
+      # 2분: 요청이 있고 5xx가 없다.
+      - expr: canary:http_server_requests_errors:ratio_rate1m
+        eval_time: 2m
+        exp_samples:
+          - labels: 'canary:http_server_requests_errors:ratio_rate1m{namespace="shortener-dev", job="shortener-dev"}'
+            value: 0
+      # 5분: 최근 1분의 요청이 0건이다. NaN은 자기 자신과도 같지 않아서 "x != bool x"가 1이면 x는 NaN이다(promtool은 기대값 NaN을 직접 비교하지 못한다).
+      - expr: canary:http_server_requests_errors:ratio_rate1m != bool canary:http_server_requests_errors:ratio_rate1m
+        eval_time: 5m
+        exp_samples:
+          - labels: '{namespace="shortener-dev", job="shortener-dev"}'
+            value: 1
+
+  - name: (d) 새 카나리 파드는 첫 요청 계열이 생기고 표본이 2개가 되기 전까지 결과가 비고(성공), 그다음 측정부터 비율이 나온다
+    interval: 30s
+    input_series:
+      # dev stable 파드: 내내 정상 요청을 받는다.
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", rollouts_pod_template_hash="stable", pod="shortener-dev-stable-1", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
+        values: '0+50x10'
+      # dev 카나리 파드: 3분에 처음 수집된다(그 전에는 요청을 받지 않아 계열이 없었다). 30초마다 302 40건, 500 10건 → 5xx 20%
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", rollouts_pod_template_hash="canary", pod="shortener-dev-canary-1", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
+        values: '_x6 40+40x4'
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", rollouts_pod_template_hash="canary", pod="shortener-dev-canary-1", method="GET", uri="UNKNOWN", status="500"}'
+        values: '_x6 10+10x4'
+    promql_expr_test:
+      # 2분 30초: 카나리 계열이 아직 없다. stable 파드의 요청이 있어도 결과는 비어 있다.
+      - expr: canary:http_server_requests_errors:ratio_rate1m
+        eval_time: 150s
+        exp_samples: []
+      # 3분: 첫 표본 하나뿐이라 rate가 값을 내지 못한다.
+      - expr: canary:http_server_requests_errors:ratio_rate1m
+        eval_time: 3m
+        exp_samples: []
+      # 3분 30초: 1분 창에 표본이 2개가 되어 비율이 나온다.
+      - expr: round(canary:http_server_requests_errors:ratio_rate1m, 0.0001)
+        eval_time: 210s
+        exp_samples:
+          - labels: '{namespace="shortener-dev", job="shortener-dev"}'
+            value: 0.2

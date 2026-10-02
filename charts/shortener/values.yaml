@@ -21,7 +21,7 @@ image:
   # latest처럼 가리키는 이미지가 바뀌는 태그를 쓴다면 파드를 시작할 때마다 레지스트리를 확인하는 Always가 필요하다.
   pullPolicy: IfNotPresent
 
-# 파드 수. autoscaling.enabled가 true이면 이 값은 쓰이지 않는다(Deployment에 replicas를 아예 적지 않고 HPA가 정한다).
+# 파드 수. autoscaling.enabled가 true이면 이 값은 쓰이지 않는다(Deployment·Rollout에 replicas를 아예 적지 않고 HPA가 정한다).
 replicaCount: 1
 
 # 응답의 shortUrl 앞에 붙는 공개 주소 → 환경 변수 SHORTENER_BASE_URL.
@@ -101,6 +101,24 @@ slo:
     # 그런 경계가 없으면 버킷 계열이 없어서 비율이 비고, 지연 알림은 아무 경고 없이 영영 울리지 않는다.
     # 앱의 기본 퍼센타일 히스토그램 버킷에는 0.3초가 없어서, 앱이 management.metrics.distribution.slo.http.server.requests로 100ms·300ms·1s 경계를 따로 넣는다.
     thresholdSeconds: 0.3
+
+# 카나리 배포(Argo Rollouts). 켜면 앱을 Deployment 대신 Argo Rollouts의 Rollout으로 만든다(templates/rollout.yaml): 새 버전을 파드의 절반에 먼저 올리고(카나리)
+# 그 파드들의 5xx 비율을 Prometheus로 재서, 5% 이상인 측정이 두 번이면 배포를 중단하고 옛 버전으로 되돌린다(templates/analysistemplate.yaml).
+# Rollout·AnalysisTemplate은 Argo Rollouts가 설치하는 CRD라서, 켜 두어도 클러스터가 두 kind를 모두 알 때만 Rollout을 만들고 그 전에는 Deployment를 만든다
+# (templates/rollout.yaml 머리말의 [조건부 생성]).
+rollout:
+  # 기본은 끈다: Argo Rollouts가 없는 클러스터(예: 로컬 k3d)에는 Rollout을 읽을 쪽이 없다. 이 저장소의 dev·prod는 환경 값 파일에서 켠다.
+  enabled: false
+  analysis:
+    # 분석이 묻는 Prometheus의 주소. Argo Rollouts 컨트롤러가 클러스터 안에서 묻는다. 이 저장소에서는 kube-prometheus-stack이 monitoring 네임스페이스에 만드는 Prometheus의 Service다.
+    # 분석은 ServiceMonitor(위 metrics.serviceMonitor)가 수집한 앱 메트릭을 읽는다. 수집되지 않으면 결과가 늘 비어서, 분석은 "판단할 요청이 없다"로 보고 통과시킨다.
+    prometheusAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+
+# 장애 주입(5단계 카나리 연습) → 앱의 환경 변수 SHORTENER_FAULT_ERROR_RATE. 앱이 서비스 포트(8080)의 요청 중 이 비율(0~1)에 HTTP 500을 돌려준다.
+# 0 이상 1 이하의 소수를 문자열로 적는다(예: "0.5"는 요청의 절반). 그 밖의 값이면 템플릿이 실패한다. "0"이면 장애를 넣지 않는다.
+# 이 값을 올리는 커밋이 "나쁜 버전"을 흉내 낸다: 파드 템플릿이 바뀌므로 카나리로 배포되어 카나리 파드만 500을 내고, 분석이 그것을 잡아 배포를 되돌린다(README의 카나리 배포).
+fault:
+  errorRate: "0"
 
 # 앱이 접속하는 PostgreSQL. 값은 앱의 환경 변수 DB_HOST·DB_PORT·DB_NAME·DB_USERNAME·DB_PASSWORD가 된다.
 # name·username·비밀번호는 클러스터 안의 PostgreSQL을 처음 만들 때(빈 데이터 디렉터리를 초기화할 때) 그 DB와 계정을 만드는 데도 쓰인다.

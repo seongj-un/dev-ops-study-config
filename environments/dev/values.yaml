@@ -8,7 +8,7 @@
 # dev와 prod(environments/prod/values.yaml)의 차이
 #   - 이미지 태그를 올리는 방법: dev는 앱 저장소의 CI가 main에 머지될 때마다 자동으로 바꾼다(아래 image.tag). prod는 사람이 PR로 바꾼다(승격).
 #   - 호스트 이름과 공개 주소: dev는 dev.dev-ops-study.duckdns.org, prod는 dev-ops-study.duckdns.org
-#   - 파드 수: dev는 1개 고정(HPA 없음), prod는 HPA가 1~3개로 조절한다. 앱 메모리는 같다(요청 384Mi·한도 512Mi, 차트 기본값과 같은 값).
+#   - 파드 수: dev는 2개 고정(HPA 없음), prod는 HPA가 2~3개로 조절한다. 앱 메모리는 같다(요청 384Mi·한도 512Mi, 차트 기본값과 같은 값).
 #     두 환경이 한 노드의 메모리를 나눠 쓰는 예산 계산은 environments/prod/values.yaml의 autoscaling 위 주석에 있다.
 #
 # 이 파일에는 빈 줄이 하나도 없고, 설명은 모두 그 설명이 붙는 키 바로 위 줄에 있다. CI가 쓰는 yq는 값을 고쳐 다시 쓸 때 키 사이의 빈 줄을 지운다(yq 4.53.6에서 확인).
@@ -28,11 +28,13 @@ baseUrl: http://dev.dev-ops-study.duckdns.org
 ingress:
   # prod(dev-ops-study.duckdns.org)와 같은 IP로 들어오므로, 이름이 달라야 Traefik이 Host 헤더로 요청을 나눈다.
   host: dev.dev-ops-study.duckdns.org
-# 파드 1개로 고정한다. autoscaling.enabled가 false이면 차트가 HPA를 만들지 않고 Deployment에 replicas를 적으므로(replicaCount) 그 값이 쓰인다(차트 기본값은 HPA를 켠다).
-# dev는 prod로 승격하기 전에 확인하는 환경이라 부하에 맞춰 늘릴 이유가 없다. 노드의 메모리 예산도 dev 앱 1개(롤링 업데이트 중에는 2개)를 전제로 계산했다(environments/prod/values.yaml의 autoscaling 위 주석).
+# 파드 2개로 고정한다. autoscaling.enabled가 false이면 차트가 HPA를 만들지 않고 워크로드(Rollout, Argo Rollouts가 없으면 Deployment)에 replicas를 적으므로(replicaCount)
+# 그 값이 쓰인다(차트 기본값은 HPA를 켠다). dev는 prod로 승격하기 전에 확인하는 환경이라 부하에 맞춰 늘릴 이유는 없다.
+# 2개인 것은 prod(HPA 최소 2개)와 같은 파드 수로 카나리를 확인하고(setWeight 50 → 카나리 1개·stable 1개), 파드 하나가 죽어도(5단계 장애 훈련) 다른 하나가 요청을 받게 하려는 것이다.
+# 노드의 메모리 예산과 PostgreSQL의 커넥션 예산은 dev 앱 2개(배포 중에는 maxSurge 1로 3개)를 전제로 계산했다(environments/prod/values.yaml의 autoscaling 위 주석, 아래 postgresql).
 autoscaling:
   enabled: false
-replicaCount: 1
+replicaCount: 2
 # 앱 컨테이너의 리소스: 요청 cpu 100m·memory 384Mi, 한도 memory 512Mi (prod도 같다). 차트 기본값과 같은 값이지만 일부러 적어 둔다:
 # 메모리 예산 계산(environments/prod/values.yaml의 autoscaling 위 주석)이 기대는 값이라 계산과 값을 한 곳에서 읽게 하고, 차트 기본값을 고쳐도 이 크기가 저절로 바뀌지 않게 하려는 것이다.
 # 로컬 Docker VM(2.84GiB)에서는 요청 256Mi·한도 384Mi로 줄여 덮어썼다. 메모리 8GiB인 EC2 노드에서는 줄일 이유가 없어 기본값으로 되돌렸다.
@@ -49,6 +51,23 @@ resources:
 database:
   # DB 비밀번호가 든 Secret의 이름 (키는 password). Secret은 Git에 없다: 클러스터의 shortener-dev 네임스페이스에 손으로 만든다 (README의 부트스트랩).
   existingSecret: shortener-db
+# 클러스터 안의 PostgreSQL의 커넥션 상한을 늘린다. 차트 기본값(max_connections=30)은 앱 파드 최대 2개(커넥션 20개)에 맞춘 값이라서, 앱 2개에 배포 중 1개가 더 뜨는 dev를 받지 못한다.
+postgresql:
+  # postgres -c 이름=값 인자다. 리스트는 차트 기본값과 합쳐지지 않고 통째로 바뀌므로(environments/prod/values.yaml의 같은 주석) shared_buffers도 차트 기본값(32MB) 그대로 다시 적는다.
+  # max_connections=50은 커넥션 예산에서 나왔다(Hikari 풀과 예약 자리의 설명은 environments/prod/values.yaml의 postgresql 위 주석):
+  #   - 앱 파드마다 Hikari 풀이 커넥션을 10개씩 연다. dev는 2개이고 배포(카나리) 중에는 maxSurge 1로 하나가 더 떠서 최대 3개 × 10 = 30개다.
+  #     카나리 파드가 Ready가 되기를 기다리는 동안, 그리고 승격·중단에서 늘릴 쪽을 먼저 띄우고 줄일 쪽을 아직 내리지 않은 동안 3개가 된다.
+  #   - 여기에 내려가는 파드가 풀을 닫기 전에 다음 파드가 풀을 여는 겹침(10개까지)과 psql·pg_isready 프로브 몇 개를 더하면 40개 남짓이다.
+  #   - 50에서 superuser_reserved_connections(3)를 뺀 47개가 일반 계정의 몫이라 그 안에 든다. 차트 기본값(30)이면 파드 3개의 풀만으로 일반 계정의 몫(27)을 넘는다.
+  # 메모리는 차트 기본값(요청 128Mi·한도 256Mi)을 그대로 쓴다. prod 파일의 측정(쿼리를 하나씩 돌리는 연결 40개에서 프로세스 합 약 81MB)에 shared_buffers 32MB가
+  # 다 차는 것을 더해도 약 113MB라 한도 안에 든다. 앱이 쿼리를 돌린 연결은 이보다 더 쓰므로 띄운 뒤 kubectl top pods -n shortener-dev로 확인한다.
+  # 이 인자를 바꾸면 StatefulSet의 파드 템플릿이 바뀌어 PostgreSQL 파드가 다시 뜬다. 처음 넣는 동기화는 Deployment에서 Rollout으로 옮기는 동기화와 같아서,
+  # 그동안(수십 초) dev의 DB를 쓰는 요청이 실패한다(README의 카나리 배포 > Deployment에서 옮기기).
+  args:
+    - -c
+    - shared_buffers=32MB
+    - -c
+    - max_connections=50
 # 관측(4단계): 이 릴리스의 메트릭 수집(ServiceMonitor)과 SLO 규칙·알림(PrometheusRule)을 켠다. SLO 목표(가용성 99.5%, 요청의 99%가 0.3초 안)는 차트 기본값을 쓴다.
 # 둘 다 kube-prometheus-stack이 설치하는 CRD라서, CRD가 아직 없는 새 클러스터에서는 차트가 만들지 않고 CRD가 생긴 뒤 ArgoCD가 다시 렌더링할 때 추가된다
 # (차트 templates/prometheusrule.yaml 머리말의 [조건부 생성]).
@@ -57,3 +76,14 @@ metrics:
     enabled: true
 slo:
   enabled: true
+# 카나리 배포(5단계): 앱을 Argo Rollouts의 Rollout으로 배포한다. 새 버전은 파드 2개 중 1개(카나리)에 먼저 올라가고, 2분 대기 뒤 전체로 바뀐다.
+# 그 사이 카나리 파드의 5xx 비율이 5% 이상인 측정이 두 번이면(또는 카나리 파드가 5분 안에 Ready가 되지 못하면) Argo Rollouts가 배포를 중단하고 옛 버전으로 되돌린다.
+# 카나리 분석은 위 ServiceMonitor가 수집한 메트릭을 읽는다(README의 카나리 배포).
+# Rollout도 CRD라서 Argo Rollouts가 아직 없는 새 클러스터에서는 차트가 지금처럼 Deployment를 만들고, CRD가 생긴 뒤 다시 렌더링할 때 Rollout으로 바뀐다.
+rollout:
+  enabled: true
+# 장애 주입 비율(0~1, 따옴표로 감싼 문자열). "나쁜 버전" 연습은 이 값을 올리는 PR(예: "0.5")이다: 파드 템플릿이 바뀌어 카나리로 배포되고, 카나리 파드만 요청의 그 비율에 500을 돌려준다.
+# 카나리 동안 요청이 흘러야 분석이 그 5xx를 본다(요청이 없으면 통과한다). 연습이 끝나면 그 PR의 커밋을 git revert로 되돌린다.
+# 되돌리기 전에는 앱 저장소 CI가 올리는 새 이미지 태그도 이 값과 함께 카나리로 올라가서 다시 중단된다.
+fault:
+  errorRate: "0"

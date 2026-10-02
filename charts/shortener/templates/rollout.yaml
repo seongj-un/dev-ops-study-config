@@ -1,0 +1,86 @@
+{{- /*
+앱 Rollout(Argo Rollouts의 CRD). rollout.enabled가 켜져 있고 클러스터에 Argo Rollouts가 있으면 Deployment(deployment.yaml) 대신 이것을 만든다.
+Rollout은 Deployment처럼 ReplicaSet으로 파드를 띄우지만, 파드 템플릿이 바뀌면 새 버전을 한 번에 바꾸지 않고 아래 strategy.canary의 단계대로 올린다.
+파드 템플릿은 Deployment와 같은 _helpers.tpl의 shortener.appPodTemplate이다. Argo Rollouts는 자기가 만든 ReplicaSet과 파드에 rollouts-pod-template-hash 레이블
+(파드 템플릿의 해시)을 붙여 버전(stable, 카나리)을 구분한다.
+
+[카나리] 트래픽 라우터(서비스 메시, Ingress 컨트롤러의 가중치 기능)를 쓰지 않는 기본 카나리다. 앱 Service는 stable 파드와 카나리 파드를 구분하지 않고 함께 고르므로
+  요청은 파드 수의 비율로 나뉜다. 그래서 가중치(setWeight)는 파드 수로 맞춘다.
+  - 0단계 setWeight 50: 새 버전의 ReplicaSet(카나리)을 만들고 카나리를 전체 파드의 절반으로 맞춘다. 파드 2개면 카나리 1·stable 1, 3개면 카나리 2·stable 2다
+    (3개는 절반으로 나뉘지 않아서 maxSurge 1로 한 개를 더 띄워 2·2를 만든다). 카나리 파드가 Ready가 되어야 다음 단계로 간다(못 되면 아래 진행 기한에 걸려 중단된다).
+  - 1단계 pause 2m: 2분 기다린다. 아래 분석이 이 단계부터 카나리 파드의 5xx 비율을 잰다.
+  - 단계가 끝나면 전체 승격: 카나리를 전체 파드 수로 늘리고 옛 stable 파드를 내린다. 카나리가 새 stable이 되면 분석도 끝난다.
+  Rollout을 처음 만들 때(stable이 아직 없을 때)와 stable과 같은 파드 템플릿으로 되돌릴 때는 단계 없이 바로 그 버전을 전체로 띄운다.
+  파드 템플릿 밖의 변경(Service, Ingress 등)은 카나리 없이 동기화하자마자 반영된다. ConfigMap의 값은 파드 템플릿의 체크섬 어노테이션을 바꾸므로 카나리를 거친다.
+
+[분석] 0단계가 끝나면(startingStep 1) Argo Rollouts가 AnalysisTemplate <릴리스>-error-rate(analysistemplate.yaml)로 백그라운드 AnalysisRun을 만든다.
+  인자 canary-hash에는 카나리 ReplicaSet의 rollouts-pod-template-hash(podTemplateHashValue: Latest)가 들어가서, 분석이 카나리 파드의 요청만 고른다.
+  0단계부터 재지 않는 것은 카나리 파드가 뜨는 동안에는 잴 요청이 없기 때문이다. 분석은 1단계부터 승격이 끝날 때까지 돌고, 실패하면 Rollout은 그 자리에서 중단(abort)된다.
+
+[중단] 트래픽 라우터가 없는 기본 카나리에서 중단은 "stable로 되돌아가는 롤링 업데이트"다: 카나리의 가중치를 0으로 보고, Ready 파드가 spec.replicas 아래로
+  줄지 않게(maxUnavailable 0) stable을 원래 파드 수로 다시 늘리면서 카나리 파드를 내린다. 그래서 다시 띄운 stable 파드가 Ready가 될 때까지 카나리 파드도 요청을 받는다.
+  abortScaleDownDelaySeconds(중단 뒤 카나리를 내리기 전의 대기)와 scaleDownDelaySeconds(승격 뒤 옛 파드를 내리기 전의 대기)는 트래픽 라우터가 있을 때만 쓰는 값이라
+  적지 않는다. Argo Rollouts(v1.10.0)는 기본 카나리에서 두 값을 0으로 다루고, scaleDownDelaySeconds를 적으면 Rollout을 InvalidSpec으로 거부한다.
+  중단된 Rollout은 Git의 파드 템플릿(나쁜 버전)을 그대로 둔 채 stable로만 돈다. Git에서 되돌리거나 고친 커밋을 올려야 다시 배포된다(README의 카나리 배포).
+
+[조건부 생성] Rollout과 AnalysisTemplate은 Argo Rollouts의 Helm 차트가 설치하는 CRD다. 클러스터가 두 kind를 모두 알 때만 만드는 이유는 prometheusrule.yaml 머리말의
+  [조건부 생성]과 같다(CRD가 없는 클러스터에서 동기화 전체가 실패하지 않게). 둘 중 하나만 확인하면 Rollout이 분석 템플릿 없이 만들어져 InvalidSpec으로 멈출 수 있다.
+  ArgoCD는 API 목록을 "그룹/버전"과 "그룹/버전/Kind"로 넘기는데, argoproj.io/v1alpha1은 ArgoCD 자신의 CRD(Application 등)의 그룹/버전이라 Argo Rollouts가 없어도 늘 있다.
+  그래서 Kind까지 붙인 문자열로 확인해야 한다. Argo Rollouts를 나중에 설치하면 API 목록이 바뀌어 다시 렌더링되고 Deployment가 Rollout으로 바뀐다
+  (옮기는 동안 Rollout의 파드가 Ready가 될 때까지 옛 Deployment의 파드가 요청을 받게 하는 것은 argocd/apps/shortener-<환경>.yaml의 PruneLast다).
+*/ -}}
+{{- if include "shortener.rolloutEnabled" . }}
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ include "shortener.fullname" . }}
+  labels:
+    {{- include "shortener.labels" (dict "ctx" . "component" "app" "version" .Values.image.tag) | nindent 4 }}
+spec:
+  {{- /*
+  autoscaling이 켜져 있으면 replicas를 적지 않는다(이유는 deployment.yaml과 같다: HPA와 ArgoCD가 서로 값을 되돌리는 다툼을 막는다).
+  비워 두면 Argo Rollouts가 처음에 1을 써 넣고(HPA가 쓰는 scale 서브리소스가 이 필드를 읽는다), 그 뒤로는 HPA만 이 값을 바꾼다.
+  */}}
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  {{- /*
+  Deployment와 같은 셀렉터 레이블이다. 앱 Service도 같은 레이블로 파드를 고르므로, Deployment에서 Rollout으로 옮기는 동안 두 쪽의 파드가 함께 요청을 받는다.
+  셀렉터가 같아도 서로의 파드를 가져가지 않는다: Deployment와 Rollout은 각자 만든(ownerReferences가 자기인) ReplicaSet만 관리한다.
+  */}}
+  selector:
+    matchLabels:
+      {{- include "shortener.selectorLabels" (dict "ctx" . "component" "app") | nindent 6 }}
+  template:
+    {{- include "shortener.appPodTemplate" . | nindent 4 }}
+  {{- /*
+  진행 기한: 배포가 앞으로 나아가지 못한 채(새 파드가 Ready가 되는 것 같은 진전이 없이) 300초가 지나면 중단한다(progressDeadlineAbort).
+  기본값은 600초가 지나도 Degraded로 표시만 하고 중단하지 않는다. 분석은 1단계부터 돌므로, 시작에 실패해 재시작을 되풀이하는(CrashLoopBackOff) 버전은
+  0단계에서 멈춘 채 분석에 걸리지 않는다. 이 기한이 그런 버전을 중단한다(그동안 stable은 maxUnavailable 0이라 파드를 줄이지 않고 요청을 받는다).
+  300초는 파드 하나가 Ready가 되기까지 걸릴 수 있는 시간보다 넉넉하다: 시작 프로브가 기다려 주는 최대 120초(2초 × 60번)에 새 이미지를 받는 시간과
+  readiness가 처음 성공하기까지의 몇 초를 더해도 남는다. 기한은 마지막으로 나아간 때(파드 하나가 Ready가 된 때 등)부터 다시 세고, pause 단계의 대기는 세지 않는다.
+  */}}
+  progressDeadlineSeconds: 300
+  progressDeadlineAbort: true
+  strategy:
+    canary:
+      {{- /*
+      Deployment의 롤링 업데이트와 같은 값이다(deployment.yaml): Ready 파드가 spec.replicas 아래로 줄지 않고(maxUnavailable 0), 파드는 최대 하나만 더 띄운다(maxSurge 1).
+      기본값(둘 다 25%)도 파드 3개까지는 같은 값이 되지만 4개부터는 maxUnavailable이 1이 된다. 그래서 배포 중 앱 파드는 최대 spec.replicas + 1개이고,
+      PostgreSQL 커넥션과 노드 메모리의 예산(environments/<환경>/values.yaml)이 이것을 전제로 한다.
+      */}}
+      maxSurge: 1
+      maxUnavailable: 0
+      steps:
+        - setWeight: 50
+        - pause:
+            duration: 2m
+      analysis:
+        templates:
+          - templateName: {{ include "shortener.fullname" . }}-error-rate
+        startingStep: 1
+        args:
+          - name: canary-hash
+            valueFrom:
+              podTemplateHashValue: Latest
+{{- end }}

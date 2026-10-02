@@ -45,7 +45,8 @@ platform/dashboards/             대시보드 JSON과 kustomization (ConfigMap�
 argocd/apps/argo-rollouts.yaml      점진 배포 Application (Argo Rollouts: 외부 차트 + 이 저장소의 값, multi-source)
 platform/argo-rollouts/values.yaml  그 값 (컨트롤러·CRD·대시보드. 아래 "Argo Rollouts")
 tests/slo/                       앱 SLO 규칙(차트의 PrometheusRule)의 promtool 단위 테스트. validate가 차트를 렌더링해 꺼낸 규칙으로 돌린다
-.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링, 스키마 검사, SLO 규칙 검사, 플랫폼 차트 렌더링, 대시보드 검사)
+tests/canary/                    카나리 분석 쿼리(차트의 AnalysisTemplate)의 promtool 단위 테스트. validate가 렌더링 결과에서 쿼리를 꺼내 돌린다
+.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링(Rollout·Deployment 두 갈래), 스키마 검사, SLO 규칙·카나리 분석 쿼리 검사, 플랫폼 차트 렌더링, 대시보드 검사)
 .github/dependabot.yml           GitHub Actions 주간 갱신
 ```
 
@@ -54,7 +55,7 @@ tests/slo/                       앱 SLO 규칙(차트의 PrometheusRule)의 pro
 | 네임스페이스 | `shortener-dev` | `shortener-prod` |
 | 주소 | http://dev.dev-ops-study.duckdns.org | http://dev-ops-study.duckdns.org |
 | 이미지 태그를 바꾸는 방법 | 앱 저장소 CI가 자동으로 커밋 | 사람이 PR로 승격 |
-| 파드 | 1개 고정 | HPA가 1~3개로 조절 (아래 메모리 메모) |
+| 파드 | 2개 고정 | HPA가 2~3개로 조절 (아래 메모리 메모) |
 | 앱 메모리 요청 / 한도 | 384Mi / 512Mi | 384Mi / 512Mi |
 | ArgoCD Application | `shortener-dev` | `shortener-prod` |
 
@@ -72,7 +73,7 @@ tests/slo/                       앱 SLO 규칙(차트의 PrometheusRule)의 pro
 ```
 앱 저장소 PR 머지 → CI(test, image) 통과 → deploy-dev 잡이 이 저장소 environments/dev/values.yaml의 image.tag를 새 커밋 SHA로 바꿔 main에 커밋
   → ArgoCD가 폴링으로 그 커밋을 발견(bootstrap/argocd/values.yaml의 timeout.reconciliation: 60s)
-  → shortener-dev Application이 자동 동기화 → Deployment 롤링 업데이트(새 파드가 Ready가 된 뒤에 옛 파드가 내려간다)
+  → shortener-dev Application이 자동 동기화 → Rollout 카나리(새 버전을 파드 절반에 올려 2분 동안 5xx 비율을 본 뒤 전체로. 아래 "카나리 배포 (Argo Rollouts)")
 ```
 
 - ArgoCD를 Ingress로 열지 않아서(EC2에서는 port-forward로만 본다. 아래 "ArgoCD UI") GitHub 웹훅이 닿을 곳이 없다. 그래서 ArgoCD의 **폴링**만 변경을 알아채는 수단이다. 확인 주기는 60초로 줄였지만(기본은 최대 3분), ArgoCD의 repo-server도 같은 값을
@@ -117,6 +118,8 @@ gh pr create --fill
 
 - 되돌린 태그의 이미지가 GHCR에 있어야 한다. 이미지 태그는 커밋 SHA라서 지우지 않는 한 남아 있다.
 - dev는 다음 앱 `main` 푸시에서 CI가 태그를 다시 최신 SHA로 올린다. 문제가 앱 `main`에 있으면 그쪽도 함께 되돌려야 dev가 계속 옛 버전에 머문다.
+- 카나리 분석이 실패한 배포는 Argo Rollouts가 클러스터에서 스스로 옛 버전으로 되돌리지만, Git에는 나쁜 커밋이 그대로 남아 Rollout이 중단된 채로 있다.
+  이 절차로 Git도 되돌린다(아래 "카나리 배포 (Argo Rollouts)").
 - ArgoCD UI의 Rollback은 쓰지 않는다: 자동 동기화가 켜진 Application에는 롤백을 할 수 없다([ArgoCD 문서](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/#automated-sync-semantics)).
   자동 동기화를 끄고 롤백하면 클러스터가 Git과 어긋난 채 남는다. Git이 원본이라는 원칙에 맞는 롤백은 `git revert`다.
 
@@ -429,7 +432,8 @@ kubectl -n argo-rollouts port-forward svc/argo-rollouts-dashboard 3100:3100     
 ## 메모리 메모
 
 노드는 EC2 `m7i-flex.large`(2 vCPU, 메모리 8GiB = 8192Mi) 한 대다. 로컬 Docker VM(2.84GiB)은 dev 롤링 업데이트 중에 메모리가 모자라서 프로젝트를 이 노드로 옮겼다.
-8GiB에서는 앱 메모리를 줄일 이유가 없어 두 환경 모두 차트 기본값(요청 384Mi·한도 512Mi)으로 되돌렸고, prod의 HPA를 다시 켰다(파드 1~3개). dev는 파드 1개 고정이다.
+8GiB에서는 앱 메모리를 줄일 이유가 없어 두 환경 모두 차트 기본값(요청 384Mi·한도 512Mi)으로 되돌렸고, prod의 HPA를 다시 켰다(파드 2~3개). dev는 파드 2개 고정이다
+(5단계에서 카나리 때문에 dev를 1개에서 2개로, prod의 최소를 1개에서 2개로 올렸다. 아래 "카나리 배포").
 JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 `-XX:MaxRAMPercentage=75.0`)라서 한도 512Mi에서는 384Mi다.
 
 | | 요청 합 | 한도 합 |
@@ -439,25 +443,27 @@ JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 `-XX:Max
 | 모니터링: kube-prometheus-stack (파드 6개, 위 "모니터링" 표) | 1056Mi | 2432Mi |
 | 모니터링: Loki·Alloy (파드 2개, 위 "모니터링" 표) | 368Mi | 832Mi |
 | 점진 배포: Argo Rollouts (파드 2개, 위 "Argo Rollouts" 표. 5단계) | 96Mi | 320Mi |
-| dev (앱 384Mi/512Mi + PostgreSQL 128Mi/256Mi + Redis 32Mi/128Mi, 앱 1개) | 544Mi | 896Mi |
+| dev (앱 384Mi/512Mi + PostgreSQL 128Mi/256Mi + Redis 32Mi/128Mi, 앱 2개) | 928Mi | 1408Mi |
 | prod, HPA가 최대 3개까지 늘었을 때 (앱 3개 + PostgreSQL 256Mi/512Mi로 키움 + Redis 32Mi/128Mi) | 1440Mi | 2176Mi |
-| 합계 | 4864Mi | 9248Mi |
-| 롤링 업데이트 중 환경마다 앱 파드 하나 추가 (maxSurge 1) | +384Mi | +512Mi |
-| 합계, 두 환경이 동시에 롤링 중일 때 | 5632Mi | 10272Mi |
+| 합계 | 5248Mi | 9760Mi |
+| 배포(카나리, Argo Rollouts가 없으면 롤링 업데이트) 중 환경마다 앱 파드 하나 추가 (maxSurge 1) | +384Mi | +512Mi |
+| 합계, 두 환경이 동시에 배포 중일 때 | 6016Mi | 10784Mi |
 
-- **요청 합은 최악에도 노드 안에 든다.** 요청은 스케줄러가 자리를 계산하는 값이다. prod가 3개인 채 두 환경이 동시에 롤링해도(차트의 파드 템플릿을 고치면 두 환경이 같은 `main`의 차트를 읽어 동시에 롤링된다)
-  5632Mi로 8192Mi(실제 MemTotal은 약 7.6GiB)보다 작다. 4단계에서 새로 더하는 요청은 약 1.6GiB까지로 잡았고(ArgoCD 컨트롤러 요청을 128Mi에서 384Mi로 올린 256Mi는 위 ArgoCD 행에 따로 들어 있다),
+- **요청 합은 최악에도 노드 안에 든다.** 요청은 스케줄러가 자리를 계산하는 값이다. prod가 3개인 채 두 환경이 동시에 배포해도(차트의 파드 템플릿을 고치면 두 환경이 같은 `main`의 차트를 읽어 동시에 배포된다)
+  6016Mi로 8192Mi(실제 MemTotal은 약 7.6GiB)보다 작다. 카나리는 늘어난 파드 하나를 2분 대기 동안 띄워 두므로(prod가 3개면 카나리 2개·stable 2개) 이 최악이 롤링 업데이트보다 오래간다.
+  4단계에서 새로 더하는 요청은 약 1.6GiB까지로 잡았고(ArgoCD 컨트롤러 요청을 128Mi에서 384Mi로 올린 256Mi는 위 ArgoCD 행에 따로 들어 있다),
   그중 kube-prometheus-stack이 1056Mi, Loki·Alloy가 368Mi를 쓴다(합 1424Mi. Loki·Alloy 몫으로 남겨 둔 약 580Mi 가운데 약 210Mi가 남는다). 5단계의 Argo Rollouts 96Mi는 그 몫과 별개로 위 합계에 더했다.
   같은 계산이 `environments/prod/values.yaml`의 `autoscaling` 위 주석에도 있다(prod의 HPA 최대 3개를 정한 근거).
-- **한도 합은 최악에 노드 메모리를 넘는다(오버커밋).** 3단계까지는 모든 컨테이너가 한도까지 쓰는 최악(5664Mi)도 노드 안에 들게 잡았지만, 모니터링과 ArgoCD 한도를 더하니 넘고, 5단계의 Argo Rollouts 한도 320Mi를 더해 10272Mi가 된다.
+- **한도 합은 최악에 노드 메모리를 넘는다(오버커밋).** 3단계까지는 모든 컨테이너가 한도까지 쓰는 최악(5664Mi)도 노드 안에 들게 잡았지만, 모니터링과 ArgoCD 한도를 더하니 넘고, 5단계에서 Argo Rollouts의 한도 320Mi와 dev 앱 하나를 더해 10784Mi가 된다.
   모든 컨테이너가 한꺼번에 한도까지 쓰는 일은 드물다고 보고 받아들인다. 한도는 컨테이너 하나가 폭주할 때 그 컨테이너만 OOMKilled로 멈추게 하는 상한이다.
   한도보다 노드가 먼저 모자라면 kubelet이 요청을 넘게 쓰는 파드부터 내쫓는다(그래서 요청을 평소 사용량 가까이 잡는다). 띄운 뒤 실제 사용량으로 다시 본다.
 - 위 합계는 추정이다. k3s 행의 약 800Mi는 로컬 k3d의 빈 클러스터에서 잰 약 770MiB를 올려 잡은 값이고 EC2에서는 재지 않았다. 8GiB는 명목 크기라 실제 MemTotal은 조금 작고 호스트 OS도 메모리를 쓰므로 그만큼 위 여유가 줄어든다.
   한도는 상한일 뿐 평소 사용량은 훨씬 작다: 2단계에서 한도 512Mi로 띄웠을 때 유휴 상태의 앱 파드는 약 320Mi, PostgreSQL은 약 55Mi, Redis는 약 15Mi였다(`kubectl top`). 띄운 뒤 실제 값을 확인한다: `kubectl top pods -A --sort-by=memory`, 노드에서 `free -m`.
 - **prod가 최대 3개까지 늘 수 있다고 보고 예산을 잡았다.** 2단계에서는 새 파드가 뜬 직후 HPA가 앱을 1개에서 2개로 늘렸다가 5분쯤 뒤에 줄이는 일이 여러 번 있었다(콜드 JVM의 CPU 급증 때문으로 추정하지만 그 순간의 CPU는 재지 않았다).
   HPA 자체는 2단계에서 이미 연습했다. 차트의 기본값(HPA 1~2개)은 그대로 두었고 prod의 환경 값 파일이 최대를 3개로 덮어쓴다.
-  메모리 말고 DB 커넥션도 파드 수를 받쳐 줘야 한다: 앱 파드가 커넥션을 10개씩 잡아 최대 4개(3개 + 롤링 업데이트 중 1개)면 40개인데 차트 PostgreSQL의 `max_connections`는 30이다.
-  그래서 prod의 PostgreSQL만 `max_connections`를 60으로, 메모리를 요청 256Mi·한도 512Mi로 키웠다(dev는 파드 1개 + 롤링 1개 = 20개라 차트 기본값 그대로다. 계산은 `environments/prod/values.yaml`의 `postgresql` 위 주석).
+  메모리 말고 DB 커넥션도 파드 수를 받쳐 줘야 한다: 앱 파드가 커넥션을 10개씩 잡아 최대 4개(3개 + 배포 중 1개)면 40개인데 차트 PostgreSQL의 `max_connections`는 30이다.
+  그래서 prod의 PostgreSQL은 `max_connections`를 60으로, 메모리를 요청 256Mi·한도 512Mi로 키웠다. dev도 5단계에서 파드 2개 + 배포 중 1개 = 30개가 되어 `max_connections`만 50으로 올렸다
+  (계산은 각 환경 값 파일의 `postgresql` 위 주석).
 - **로컬 k3d(`devops-study`)는 멈춰 두었다**(`k3d cluster stop devops-study`. 데이터는 남는다). 다시 켜면(`k3d cluster start devops-study`) 그 안의 ArgoCD가 `main`의 값(EC2 주소와 크기)으로 맞추려 하므로, 로컬에서 쓰려면 먼저 두 환경 값 파일을 덮어써야 한다:
   `baseUrl`·`ingress.host`는 `*.localhost` 이름(예전 값: `shortener-dev.localhost:8090`, `shortener.localhost:8090`)으로, 앱 메모리·HPA는 2.84GiB VM에 맞춘 예전 크기(앱 요청 256Mi·한도 384Mi, 두 환경 모두 파드 1개 고정)로. 예전 값은 `git log -p -- environments/`에 있다.
 - dev를 잠시 끄고 싶다면 `kubectl scale`이 아니라 Git에서 `environments/dev/values.yaml`의 `replicaCount`를 0으로 바꾼다. dev는 HPA가 없어 selfHeal이 손으로 바꾼 파드 수를 되돌리기 때문이다.
@@ -474,7 +480,7 @@ KUBERNETES_VERSION=$(yq '.jobs.validate.env.KUBERNETES_VERSION' .github/workflow
 KUBECONFORM_IMAGE=$(yq '.jobs.validate.env.KUBECONFORM_IMAGE' .github/workflows/validate.yml)
 K8S_SCHEMA_LOCATION=$(yq '.jobs.validate.env.K8S_SCHEMA_LOCATION' .github/workflows/validate.yml)
 CRD_SCHEMA_LOCATION=$(yq '.jobs.validate.env.CRD_SCHEMA_LOCATION' .github/workflows/validate.yml)
-PROMETHEUS_IMAGE=$(yq '.jobs.validate.steps[] | select(.env.PROMETHEUS_IMAGE) | .env.PROMETHEUS_IMAGE' .github/workflows/validate.yml)
+PROMETHEUS_IMAGE=$(yq '.jobs.validate.env.PROMETHEUS_IMAGE' .github/workflows/validate.yml)
 out=$(mktemp -d)
 
 mkdir -p tests/slo/rendered     # 렌더링해서 꺼낸 SLO 규칙을 둘 곳(.gitignore에 있다)
@@ -622,3 +628,135 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | Grafana의 로그 패널이 비어 있거나 Loki 데이터 소스가 오류 | `kubectl -n monitoring get pods`로 `loki-0`이 Ready인지(뜬 뒤 준비까지 1분 안쪽), `alloy-*` 파드가 Running인지 본다. Alloy UI(위 "로그")에서 컴포넌트가 healthy인지와 읽고 있는 대상을, `kubectl -n monitoring logs ds/alloy -c alloy`에서 `loki.write`의 전송 오류를 본다. 단, Alloy 파드가 새로 뜬 직후 나오는 `final error sending batch, no retries left, dropping data` ... `status=400` ... `entry too far behind`는 문제가 아니다: 각 컨테이너의 로그 파일을 처음부터 다시 보내다가 그 스트림의 가장 새 줄보다 1시간 넘게 오래된 줄(이미 저장된 줄)을 Loki가 거절한 것이고, 같은 묶음의 다른 줄은 저장된다(`platform/alloy/values.yaml`의 mounts 주석) |
 | Alloy 로그에 `forbidden` | Alloy의 ClusterRole(`platform/alloy/values.yaml`의 `rbac`)에 그 컴포넌트가 쓰는 권한이 없다. 컴포넌트를 더했다면 필요한 권한도 더한다(차트 values.yaml의 rbac 주석에 컴포넌트별 권한이 있다) |
 | Discord로 알림이 오지 않는다 | Alertmanager UI(port-forward)에 그 경보가 있는지, 경로(위 "경보가 가는 길")에 맞는지 본다. `kubectl -n monitoring logs alertmanager-kube-prometheus-stack-alertmanager-0 -c alertmanager`에 notify 오류가 있으면 웹훅 주소 Secret을 확인한다(바꾸는 방법은 `infra/aws/README.md`) |
+
+## 카나리 배포 (Argo Rollouts)
+
+앱은 Deployment가 아니라 Argo Rollouts의 **Rollout**으로 배포된다(두 환경 모두 `rollout.enabled: true`. Argo Rollouts 자체의 설치는 위 "Argo Rollouts (컨트롤러·대시보드)").
+파드 템플릿이 바뀌는 변경(이미지 태그, ConfigMap 값의 체크섬, 리소스, `fault.errorRate` 등)은 한 번에 퍼지지 않고 파드의 절반에 먼저 올라간다(카나리).
+그 파드들의 5xx 비율이 5% 이상인 측정이 두 번이면(또는 카나리 파드가 5분 안에 Ready가 되지 못하면) Argo Rollouts가 스스로 배포를 중단하고 옛 버전으로 되돌린다. 사람이 지켜보지 않아도 나쁜 버전이 모든 파드로 퍼지지 않게 하는 장치다.
+서비스 메시나 Ingress의 가중치 기능 없이 파드 수로 비율을 나누는 기본 카나리다: 앱 Service가 두 버전의 파드를 함께 고르고, 요청은 파드 수의 비율로 나뉜다.
+
+```
+파드 템플릿을 바꾸는 커밋(dev 이미지 태그 등) → ArgoCD 동기화 → Rollout의 파드 템플릿이 바뀐다
+  → 0단계 setWeight 50: 새 버전의 ReplicaSet(카나리)을 만들어 파드를 카나리 절반·stable 절반으로 맞춘다. 카나리 파드가 Ready가 되어야 다음 단계로 간다
+       파드 2개(dev, 평소의 prod) → 카나리 1·stable 1 / prod가 HPA로 3개면 → 카나리 2·stable 2(maxSurge 1로 하나를 더 띄운다)
+  → 1단계 pause 2m: 2분 기다린다. 이때부터 분석(AnalysisRun)이 30초마다 카나리 파드의 최근 1분 5xx 비율을 잰다
+  → 전체 승격: 카나리를 전체 파드 수로 늘리고 stable을 내린다. 카나리가 새 stable이 되면 분석도 끝난다
+  분석은 1단계부터 승격이 끝날 때까지 돈다. 그동안 분석이 실패하면(5% 이상인 측정이 2번), 또는 어느 단계에서든 배포가 5분 동안 나아가지 못하면
+  (카나리 파드가 Ready가 되지 못한다. pause의 대기는 세지 않는다) 중단(abort) → stable을 원래 수로 다시 늘리고 카나리 파드를 내린다
+```
+
+- 차트: 단계는 `charts/shortener/templates/rollout.yaml`, 분석의 쿼리와 판정은 `analysistemplate.yaml`, 파드 템플릿은 Deployment와 함께 쓰는 `_helpers.tpl`의 `shortener.appPodTemplate`이다.
+  클러스터가 Rollout·AnalysisTemplate kind를 모르면(Argo Rollouts 설치 전, 로컬 k3d) 차트는 지금까지처럼 Deployment를 만든다.
+- 파드 템플릿 밖의 변경(Service, Ingress 등)은 카나리 없이 동기화되자마자 반영된다. dev의 이미지 태그 커밋은 매번 카나리를 거치므로 dev 반영이 2분 남짓 늦어진다.
+- Rollout을 처음 만들 때(아래 "Deployment에서 옮기기")와 stable과 같은 파드 템플릿으로 되돌릴 때는 단계 없이 바로 그 버전을 전체로 띄운다.
+
+### 분석이 재는 것
+
+쿼리는 카나리 파드가 받은 요청(`/actuator`로 시작하는 요청 제외) 가운데 5xx의 비율이다(창 1분). 카나리 파드는 레이블 `rollouts_pod_template_hash`로 고른다:
+Argo Rollouts가 파드마다 붙이는 `rollouts-pod-template-hash`(파드 템플릿의 해시)를 ServiceMonitor의 `podTargetLabels`가 수집한 계열에 옮겨 붙인 것이고,
+AnalysisRun을 만들 때 Argo Rollouts가 카나리 ReplicaSet의 해시를 쿼리에 채운다. 그래서 stable 파드의 요청은 섞이지 않는다.
+판정은 `successCondition: len(result) == 0 || isNaN(result[0]) || result[0] < 0.05`다.
+
+| 카나리 파드의 상태 | 쿼리 결과 | 판정 |
+|---|---|---|
+| 최근 1분 요청 중 5xx가 5% 미만 | 0 이상 0.05 미만 | 성공 |
+| 최근 1분 요청 중 5xx가 5% 이상 | 0.05 이상 | 실패. 2번째 실패에서 중단(`failureLimit: 1`, 연달아일 필요는 없다) |
+| 요청을 받은 적은 있지만 최근 1분에는 없다 | NaN (0 ÷ 0) | 성공 |
+| 요청을 받은 적이 없다, 또는 처음 수집된 지 30초가 안 됐다 | 빈 결과 | 성공 |
+| Prometheus에 닿지 않는다 | 측정 오류 | 5번 이어지면 중단 |
+
+- **요청이 없으면 통과한다.** 판단할 근거가 없어서다. 조건에 적지 않으면 NaN은 실패로, 빈 결과는 측정 오류로 세어져 요청이 없는 dev의 배포가 중단된다.
+  대가로 카나리 동안 요청이 없으면 나쁜 버전도 통과한다. dev에는 평소 요청이 거의 없으므로 아래 연습에서는 카나리 동안 요청을 흘린다.
+  같은 이유로 카나리 파드의 메트릭이 수집되지 않거나 `rollouts_pod_template_hash`가 붙지 않으면 분석은 늘 통과한다. 처음 띄운 뒤 Prometheus에서
+  `count by (rollouts_pod_template_hash) (up{namespace="shortener-dev", job="shortener-dev"})`가 파드의 해시마다 나오는지 확인한다.
+- 2분 대기 동안 측정은 4~5번이고, 새 카나리 파드는 수집되고 30초쯤 지나야(1분 창에 표본이 2개) 값이 나온다. 분석은 2분 대기 뒤 카나리를 전체로 늘리는 동안에도 이어진다.
+- 이웃한 두 측정의 1분 창은 30초씩 겹친다. 그래서 30초보다 짧은 5xx 몰림 하나도 두 측정에 함께 잡혀 중단될 수 있다(`failureLimit: 1`이 봐주는 것은 측정 한 번의 실패다).
+- 쿼리는 CI의 "카나리 분석 쿼리 검사" 단계가 promtool로 시험한다(`tests/canary/analysis.test.yaml`). 판정 식은 Argo Rollouts의 식(expr)이라 CI에서는 시험하지 않는다
+  (Argo Rollouts v1.10.0과 같은 expr 라이브러리 v1.17.7로 빈 결과·NaN·0.0499·0.05·0.5를 넣어 위 표대로 나오는 것을 확인했다).
+
+### 지켜보기
+
+```bash
+kubectl -n argo-rollouts port-forward svc/argo-rollouts-dashboard 3100:3100   # http://localhost:3100/rollouts → 위쪽에서 네임스페이스 shortener-dev를 고른다
+kubectl -n shortener-dev get rollout,replicaset,analysisrun
+kubectl -n shortener-dev get pods -L rollouts-pod-template-hash,app.kubernetes.io/version
+kubectl -n shortener-dev get analysisrun -o yaml   # status.metricResults[].measurements[]: 측정마다의 값(value)과 판정(phase)
+```
+
+- 대시보드는 Rollout의 단계, 카나리·stable ReplicaSet의 파드, 분석의 측정을 한 화면에 보여 준다. Rollout 쓰기 권한을 뺐으므로 승격·중단 버튼은 forbidden으로 실패한다(위 "Argo Rollouts (컨트롤러·대시보드)").
+- ArgoCD UI에서는 `shortener-<환경>` Application의 트리에서 Rollout 아래에 ReplicaSet과 AnalysisRun이 달린다. 2분 대기 중의 Rollout은 `Suspended`(Argo Rollouts의 `Paused`)로 보이고, 정상이다.
+
+### 중단되면 ArgoCD에서 이렇게 보인다
+
+나쁜 버전은 두 가지 길로 중단되고, 둘 다 Git에서 `git revert`로 되돌린다(아래).
+
+- **5xx를 내는 버전 → 분석이 중단한다.** Rollout의 건강 상태가 `Degraded`이고 메시지는 `RolloutAborted: Rollout aborted update to revision <N>: Background analysis phase error/failed: Metric "error-rate" assessed Failed due to failed (2) > failureLimit (1)`이다.
+  그 아래 AnalysisRun도 `Degraded`(Failed)이고, 측정값은 위 `kubectl get analysisrun -o yaml`에 남는다. Application의 Health도 `Degraded`가 된다.
+- **Ready가 되지 못하는 버전(시작 실패, CrashLoopBackOff) → 진행 기한이 중단한다.** 0단계에서 멈춰 분석이 시작되지 않으므로, Rollout의 `progressDeadlineSeconds: 300`·`progressDeadlineAbort: true`가
+  5분 뒤 중단한다(메시지 `RolloutAborted: Rollout aborted update to revision <N>: ReplicaSet "<이름>" has timed out progressing.`). 그동안 stable은 파드를 줄이지 않아 요청을 그대로 받는다.
+- Sync는 `Synced` 그대로다. 클러스터의 Rollout 스펙은 Git(나쁜 버전)과 같고 중단은 Rollout의 status에만 기록되기 때문이다. 그래서 selfHeal도 아무것도 하지 않는다.
+- 요청은 stable(옛 버전) 파드가 받는다. 다만 중단 직후 stable을 원래 수로 다시 띄우는 동안(JVM이 뜨는 수십 초)은 카나리 파드도 요청을 받아 오류가 조금 더 이어진다(maxUnavailable 0).
+- Rollout은 Git이 바뀔 때까지 중단된 채다. 파드 템플릿을 바꾸는 다음 커밋(dev에 오는 새 이미지 태그 등)이 오면 다시 카나리를 시작하는데, 나쁜 변경이 그대로 남아 있으면 다시 중단된다.
+- **되돌리기는 Git에서 한다.** 나쁜 변경의 커밋을 `git revert`한다(위 "롤백"의 절차). 파드 템플릿이 stable과 같아지면 Argo Rollouts는 단계 없이 stable로 돌아가고
+  (이벤트 `SkipSteps`: `Rollback to stable ReplicaSets`) Rollout과 Application이 `Healthy`가 된다. 고친 버전을 올리면(fix forward) 그 버전이 새 카나리로 올라간다.
+  kubectl 플러그인의 retry는 같은 나쁜 버전을 다시 올릴 뿐이고, ArgoCD의 Rollback은 자동 동기화와 함께 쓸 수 없다(위 "롤백").
+
+### 연습: 나쁜 버전이 저절로 되돌아가는지 본다 (dev)
+
+장애 주입 기능이 들어간 앱 이미지가 dev에 떠 있어야 한다(그 전 이미지는 `SHORTENER_FAULT_ERROR_RATE`를 읽지 않아서 카나리가 그대로 통과한다).
+
+```bash
+git switch main && git pull
+git switch -c drill/bad-canary
+yq -i '.fault.errorRate = "0.5"' environments/dev/values.yaml   # 카나리 파드만 요청의 절반에 500을 돌려준다
+git diff                                                      # 한 줄만 바뀌어야 한다
+git commit -am "drill(dev): 장애 주입 0.5로 나쁜 버전을 흉내 낸다"
+git push -u origin HEAD
+gh pr create --fill                                            # validate가 통과하면 머지한다
+```
+
+1. 머지하면 ArgoCD가 dev를 동기화하고 카나리가 시작된다. 카나리 동안 dev에 요청을 흘린다(앱 저장소 `loadtest/`의 k6, 또는 리다이렉트를 되풀이하는 curl).
+2. 2분 대기 안에 분석이 실패해 Rollout이 중단되고(위), 카나리 파드가 내려가 stable 파드만 남는다. 그동안 카나리가 받은 요청의 절반이 500이다(장애 주입의 500은 `uri="UNKNOWN"`으로 기록된다).
+3. 그 커밋을 `git revert`하는 PR을 머지해 Git을 되돌린다. Rollout이 단계 없이 `Healthy`가 된다.
+
+### Deployment에서 옮기기 (처음 한 번)
+
+Argo Rollouts가 설치된 클러스터에 이 차트가 처음 반영되는 동기화에서 앱의 Deployment가 Rollout으로 바뀐다(Argo Rollouts가 나중에 설치되면 ArgoCD가 다시 렌더링하는 그때 바뀐다).
+
+- ArgoCD는 AnalysisTemplate을 먼저 만들고(sync-wave -1. 이유는 `analysistemplate.yaml` 머리말) 그다음 Rollout·HPA 등을 적용한다. 새 Rollout은 stable이 없어서 단계 없이 첫 버전을 전체로 띄운다
+  (dev는 2개, prod는 1개로 시작해 HPA가 2개로 늘린다).
+- 옛 Deployment는 Git에서 사라졌지만 `PruneLast=true`(`argocd/apps/shortener-<환경>.yaml`) 때문에 Rollout이 `Healthy`가 된 뒤에야 지워진다. 그 사이에는 앱 Service가 셀렉터가 같은
+  두 쪽 파드에 요청을 나눈다. 두 쪽은 서로의 파드를 가져가지 않는다(각자 만든 ReplicaSet만 관리한다).
+- **prod는 요청이 끊기지 않고 옮겨진다. dev는 잠깐 끊긴다.** dev는 같은 동기화에서 PostgreSQL의 인자(`max_connections` 30 → 50)도 바뀌어 StatefulSet이 PostgreSQL 파드를 다시 띄우므로,
+  그동안(수십 초) DB를 쓰는 요청이 실패한다. 길어지면 DB가 든 readiness도 실패해 앱 파드가 엔드포인트에서 빠지고, Rollout의 새 파드도 DB가 돌아와야 Ready가 된다.
+- HPA는 Rollout을 가리키게 바뀌고, 옛 Deployment의 파드 수는 지워질 때까지 그대로다. prod가 부하로 3개까지 늘어난 채 옮기면 잠깐 앱 파드가 6개(커넥션 60개)까지 떠서
+  PostgreSQL 예산(일반 계정 57개)을 넘을 수 있으므로 부하가 없을 때 옮긴다.
+- 이 동기화는 지우기 전에 리소스가 `Healthy`가 되기를 기다리다가 그중 하나가 잠깐 `Degraded`로 보이면 실패로 끝난다. 그래도 Deployment는 지워지지 않은 채 요청을 받고,
+  자동 동기화의 재시도가 이어서 끝낸다(재시도를 다 쓰고도 멈춰 있으면 UI에서 Sync를 한 번 누른다).
+- 옮기는 동안 `kubectl -n shortener-dev get deploy,rollout,pods -L rollouts-pod-template-hash -w`로 Rollout의 파드가 Ready가 된 뒤에 Deployment의 파드가 내려가는지 본다.
+
+### 예산 (파드·커넥션)
+
+| | 평소 앱 파드 | 카나리 중 최대 | 커넥션 최대(파드마다 10개) | PostgreSQL `max_connections` (일반 계정의 몫) |
+|---|---|---|---|---|
+| dev | 2 | 3 | 30 + 겹침 10 | 50 (47) |
+| prod | 2~3 (HPA) | 4 (3개면 카나리 2·stable 2가 2분 대기 동안 이어진다) | 40 + 겹침 10 | 60 (57) |
+
+- 늘어나는 파드는 롤링 업데이트와 같은 하나(maxSurge 1, maxUnavailable 0)다. prod가 3개일 때 그 상태가 2분 대기 동안 이어진다는 것만 달라서 메모리 최악(위 "메모리 메모")은 같은 숫자다.
+- 겹침은 내려가는 파드가 풀을 닫기 전에(preStop 5초 + 종료 최대 20초) 다음 파드가 풀을 여는 몫이다. 계산은 `environments/<환경>/values.yaml`의 `postgresql` 위 주석에 있다.
+
+### 로컬에서 확인하기
+
+CI 단계의 스크립트를 그대로 꺼내 돌린다. 위 "로컬에서 검증하기"에서 읽은 변수를 쓰고, GitHub가 넣어 주는 `RUNNER_TEMP`·`GITHUB_WORKSPACE`는 대신 준다(`yq`와 Docker가 필요하다):
+
+```bash
+export KUBERNETES_VERSION KUBECONFORM_IMAGE K8S_SCHEMA_LOCATION CRD_SCHEMA_LOCATION PROMETHEUS_IMAGE
+export RUNNER_TEMP=$(mktemp -d) GITHUB_WORKSPACE=$PWD
+for step in "렌더링 + 쿠버네티스 스키마 검사 (dev, prod × Rollout, Deployment)" "앱 워크로드 두 갈래 확인 (Rollout, Deployment)" \
+            "카나리 분석 쿼리 검사 (promtool check + test)"; do
+  bash -e -c "$(yq ".jobs.validate.steps[] | select(.name == \"$step\") | .run" .github/workflows/validate.yml)" || break
+done
+```
+
+렌더링 결과는 `$RUNNER_TEMP/<환경>.yaml`(Rollout 갈래)과 `$RUNNER_TEMP/<환경>-deployment.yaml`(Deployment 갈래)에 남는다. 카나리 분석 테스트의 시나리오와 읽는 법은 `tests/canary/analysis.test.yaml`의 머리말에 있다.
