@@ -30,6 +30,7 @@ crdAnnotations:
 controller:
   # 파드 1개. 차트 기본값은 2개(리더 선출로 하나만 일한다)인데, 노드가 하나라 둘째 파드는 노드 장애를 막지 못하고 메모리만 쓴다. 1개이면 차트가 --leader-elect도 켜지 않는다.
   # 컨트롤러가 잠시 없어도 이미 뜬 파드는 그대로 서비스되고, 진행 중인 카나리 단계만 컨트롤러가 돌아올 때까지 멈춘다.
+  # 다만 HPA가 Rollout을 가리키는 환경(prod)에서는 그동안 HPA가 바꾼 파드 수도 파드에 반영되지 않는다(Rollout의 ReplicaSet 수는 이 컨트롤러가 맞춘다).
   replicas: 1
   # Rollout·AnalysisRun·ReplicaSet·Service 등을 클러스터 전체에서 감시해 메모리에 캐시한다. 이 클러스터는 Rollout이 2개(dev·prod)뿐이라 작다.
   # 요청 64Mi는 평소 사용량으로 짐작한 값(추정)이고, 한도 192Mi는 그 세 배다: 시작할 때 감시 대상을 한꺼번에 읽어 캐시를 채우는 때와 Rollout이 늘어난 경우의 여유다.
@@ -46,16 +47,20 @@ controller:
     serviceMonitor:
       # Prometheus가 위 Service를 수집하게 하는 ServiceMonitor(job은 Service 이름인 argo-rollouts-metrics). rollout_info, analysis_run_info 같은 지표가 나온다.
       # kube-prometheus-stack의 Prometheus는 레이블이 없는 ServiceMonitor도 모든 네임스페이스에서 고르므로(platform/kube-prometheus-stack/values.yaml의 *SelectorNilUsesHelmValues: false) 레이블을 더하지 않는다.
-      # ServiceMonitor CRD는 kube-prometheus-stack이 설치한다. 차트는 CRD가 있는지 보지 않고 이 리소스를 만들어서, 새 클러스터에서는 두 Application의 첫 동기화 순서에 걸린다
-      # (argocd/apps/argo-rollouts.yaml의 SkipDryRunOnMissingResource·retry 주석).
+      # ServiceMonitor CRD는 kube-prometheus-stack이 설치한다. 차트는 CRD가 있는지 보지 않고 이 리소스를 만들어서, 새 클러스터에서는 두 Application의 첫 동기화 순서에 걸린다.
+      # 아래 어노테이션은 ArgoCD가 이 리소스 하나만은 CRD가 아직 없어도 동기화 전 검증(dry-run)을 건너뛰게 한다. 그러면 나머지(CRD, 컨트롤러, 대시보드)가 먼저 적용되고
+      # 이것만 CRD가 생길 때까지 다시 시도된다. Application 전체(syncOptions)에 걸지 않은 것은 CRD가 없는 다른 종류까지 검증을 건너뛰지 않게 하려는 것이다(argocd/apps/argo-rollouts.yaml의 retry 주석).
       enabled: true
+      additionalAnnotations:
+        argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 # --- 대시보드 ---
 dashboard:
   # 웹 UI: 롤아웃의 단계와 분석 결과를 그림으로 본다. 맨 위의 네임스페이스 선택에는 Rollout이 있는 네임스페이스가 나온다.
   enabled: true
-  # 대시보드의 ClusterRole에서 쓰기 권한(Rollout·Deployment의 update·patch, AnalysisRun·Experiment의 create)을 뺀다. 대시보드에는 인증이 없고 이 저장소는 NetworkPolicy를 두지 않아서
-  # 클러스터 안의 어느 파드든 그 Service로 요청을 보낼 수 있다. 쓰기 권한이 있으면 그 요청으로 Rollout의 승격·중단·재시도·이미지 교체까지 된다(대시보드 API의 PromoteRollout, AbortRollout, RetryRollout, SetRolloutImage).
-  # 보는 데는 읽기 권한이면 충분하다. 대신 화면의 승격·중단 버튼은 동작하지 않는다(403). 조작이 필요하면 Git으로 바꾸거나 kubectl로 한다(README).
+  # 대시보드의 ClusterRole에서 Rollout·Deployment 쓰기 권한(update·patch)과 AnalysisRun·Experiment 생성 권한(create)을 뺀다. 대시보드에는 인증이 없고 이 저장소는 NetworkPolicy를 두지 않아서
+  # 클러스터 안의 어느 파드든 그 Service로 요청을 보낼 수 있다. 쓰기 권한이 있으면 그 요청으로 Rollout의 승격·중단·재시도·되돌리기·이미지 교체까지 된다
+  # (대시보드 API의 PromoteRollout, AbortRollout, RetryRollout, UndoRollout, SetRolloutImage). 읽기 권한(get·list·watch)은 그대로고 leases의 create·get·update는 차트가 readonly와 상관없이 남긴다.
+  # 그래서 화면의 승격·중단 버튼을 누르면 쿠버네티스 API가 forbidden으로 거부해 오류가 난다. 조작이 필요하면 Git으로 바꾸거나 kubectl로 한다(README).
   readonly: true
   service:
     # ClusterIP(차트 기본값)라 클러스터 안에서만 닿는다. 적어 두는 것은 NodePort·LoadBalancer(k3s에서는 노드의 포트로 열린다)로 바꾸지 않는다는 뜻이다.
@@ -81,3 +86,11 @@ notifications:
     create: false
   secret:
     create: false
+# 트래픽 라우터 권한: 컨트롤러의 ClusterRole에서 Istio·SMI·Ambassador·AWS ALB·App Mesh·Traefik·Apisix·Contour·Gloo·Gateway API용 규칙을 뺀다(렌더링한 ClusterRole이 약 290줄에서 약 165줄로 준다).
+# 이 저장소는 트래픽 라우터 없이 파드 수의 비율로 나누는 기본 카나리만 쓰므로 그 규칙은 쓸 곳이 없다. 트래픽 라우터를 쓰게 되면 다시 켠다.
+# gatewayAPI는 enabled와 따로 기본 규칙의 configmaps에 create·update를 붙인다(Gateway API 플러그인이 ConfigMap을 쓴다). 컨트롤러 본체는 ConfigMap을 읽기만 하고 업스트림의 기본 ClusterRole도 get·list·watch뿐이라 함께 끈다.
+# 남는 권한 중 이 차트의 값으로 줄일 수 없는 것: 모든 네임스페이스의 Secret 읽기(분석 템플릿이 Secret을 참조할 수 있다), Job·Service·Ingress 쓰기(분석 Job, 카나리·안정 Service의 selector, Ingress 어노테이션).
+providerRBAC:
+  enabled: false
+  providers:
+    gatewayAPI: false

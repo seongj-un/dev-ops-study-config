@@ -41,15 +41,16 @@ spec:
       # 클라이언트 쪽 적용이 쓰는 어노테이션의 한도(256KiB)에 아직 닿지 않는다. 업스트림의 CRD(설명 포함)는 rollouts가 JSON으로 약 283KiB로 한도를 넘고,
       # Argo Rollouts의 설치 문서도 CRD를 따로 넣을 때는 kubectl apply --server-side를 쓰라고 한다. 차트가 설명을 되살리거나 CRD가 커져도 막히지 않게 서버 쪽 적용으로 둔다.
       - ServerSideApply=true
-      # 컨트롤러의 ServiceMonitor는 kube-prometheus-stack이 설치하는 CRD(monitoring.coreos.com)가 있어야 적용된다. 차트는 CRD가 있는지 보지 않고 이 리소스를 만든다(앱 차트와 다르다).
-      # 새 클러스터에서 두 Application이 함께 처음 동기화되면 이쪽이 먼저일 수 있다. 그러면 ArgoCD는 동기화 전 검증에서 그 종류를 찾지 못해 동기화를 통째로 거부하고,
-      # 이 Application의 CRD와 컨트롤러도 올라오지 않는다. 이 옵션은 CRD가 없는 종류의 검증만 건너뛴다: 나머지가 먼저 적용되고 ServiceMonitor만 CRD가 생길 때까지 아래 retry로 다시 시도된다.
-      - SkipDryRunOnMissingResource=true
-    # 동기화가 실패하면 다시 시도한다. ArgoCD의 기본값(최대 5번, 대기는 5초에서 시작해 2배씩. 합쳐 약 2분 반)은 kube-prometheus-stack이 CRD를 만들 때까지보다 짧을 수 있다.
-    # 다시 시도를 모두 쓰면 같은 커밋으로는 새 동기화를 시작하지 않아서(argocd/apps/shortener-dev.yaml 참고) 사람이 Sync를 눌러야 한다.
-    # 그래서 10초에서 시작해 2배씩 늘고 3분을 넘지 않게, 10번까지 합쳐 약 20분을 기다린다. 이 값을 적으면 기본값 대신 쓰인다.
+    # 컨트롤러의 ServiceMonitor는 kube-prometheus-stack이 설치하는 CRD(monitoring.coreos.com)가 있어야 적용된다. 차트는 CRD가 있는지 보지 않고 이 리소스를 만든다(앱 차트와 다르다).
+    # 새 클러스터에서 두 Application이 함께 처음 동기화되면 이쪽이 먼저일 수 있다. 그러면 ArgoCD는 동기화 전 검증에서 그 종류를 찾지 못해 동기화를 통째로 거부하고,
+    # 이 Application의 CRD와 컨트롤러도 올라오지 않는다. 그래서 값 파일이 ServiceMonitor에만 SkipDryRunOnMissingResource=true를 붙여(controller.metrics.serviceMonitor.additionalAnnotations)
+    # 그 리소스의 검증만 건너뛴다: 나머지가 먼저 적용되고 ServiceMonitor만 CRD가 생길 때까지 아래 retry로 다시 시도된다. 이 옵션을 syncOptions에 적으면 CRD가 없는 다른 종류까지 검증을 건너뛰게 된다.
+    # ArgoCD의 기본 재시도(최대 5번, 대기는 5초에서 시작해 2배씩. 합쳐 약 2분 반)는 kube-prometheus-stack이 CRD를 만들 때까지보다 짧을 수 있어서 늘린다:
+    # 10초에서 시작해 2배씩 늘고 3분을 넘지 않게, 6번이면 합쳐 약 8분이다(10 + 20 + 40 + 80 + 160 + 180초). 이 값을 적으면 기본값 대신 쓰인다.
+    # 대가: 다시 시도를 기다리는 동안 동기화 작업이 Running으로 남고, 자동 동기화는 그동안 새 커밋으로 새 동기화를 시작하지 않는다(다시 시도도 처음 커밋을 쓴다).
+    # 고친 커밋을 바로 적용하려면 UI에서 그 작업을 Terminate한 뒤 Sync한다(README의 막혔을 때). 다시 시도를 모두 쓰고 나면 같은 커밋으로는 새 동기화를 시작하지 않아서(argocd/apps/shortener-dev.yaml 참고) 사람이 Sync를 눌러야 한다.
     retry:
-      limit: 10
+      limit: 6
       backoff:
         duration: 10s
         factor: 2
