@@ -22,7 +22,9 @@ baseUrl: http://dev-ops-study.duckdns.org
 ingress:
   # DuckDNS에 등록한 이름 그대로다. dev(dev.dev-ops-study.duckdns.org)도 같은 IP로 들어오므로, 이름이 달라야 Traefik이 Host 헤더로 요청을 나눈다.
   host: dev-ops-study.duckdns.org
-# HPA를 켠다(파드 1~3개). autoscaling.enabled가 true이면 차트가 HPA를 만들고 Deployment에는 replicas를 적지 않으므로 파드 수는 HPA가 정한다. 그래서 replicaCount는 이 파일에 적지 않는다(쓰이지 않는다).
+# HPA를 켠다(파드 2~3개). autoscaling.enabled가 true이면 차트가 HPA를 만들고 워크로드(Rollout, Argo Rollouts가 없으면 Deployment)에는 replicas를 적지 않으므로 파드 수는 HPA가 정한다.
+# 그래서 replicaCount는 이 파일에 적지 않는다(쓰이지 않는다). 최소 2개는 파드 하나가 죽어도(5단계 장애 훈련) 다른 파드가 요청을 받고,
+# 카나리(setWeight 50)가 파드를 더 띄워 두지 않고도 카나리 1개·stable 1개로 나뉘게 하려는 것이다.
 # 최대 3개는 이 노드의 메모리 예산으로 정했다. 앱과 Redis는 차트 기본값의 요청·한도로, prod의 PostgreSQL은 아래 postgresql에서 키운 값으로 계산한다(단위 Mi):
 #   - 노드: m7i-flex.large의 8GiB = 8192. 명목 크기라 실제 MemTotal은 조금 작고 호스트 OS도 메모리를 쓴다(띄운 뒤 free -m으로 확인한다).
 #   - k3s와 기본 구성요소(Traefik 등): 약 800. 로컬 k3d의 빈 클러스터에서 잰 약 770을 올려 잡은 값이고 EC2에서는 재지 않았다.
@@ -39,11 +41,11 @@ ingress:
 #   한도보다 노드가 먼저 모자라면 kubelet이 요청을 넘게 쓰는 파드부터 내쫓는다(README의 메모리 메모).
 # 한도는 상한일 뿐 평소 사용량은 훨씬 작다: 2단계에서 한도 512Mi로 띄웠을 때 유휴 상태의 앱 파드는 약 320Mi였다. 실제 값은 띄운 뒤 kubectl top pods -A --sort-by=memory로 잰다.
 # prod가 최대까지 늘 수 있다고 보고 예산을 잡았다: 2단계에서는 새 파드가 뜬 직후 HPA가 앱을 1개에서 2개로 늘렸다가 5분쯤 뒤에 줄이는 일이 여러 번 있었다(콜드 JVM의 CPU 급증 때문으로 추정하지만 그 순간의 CPU는 재지 않았다).
-# 메모리 말고 DB 커넥션도 파드 수를 받쳐 줘야 한다: 앱 파드마다 Hikari 풀이 커넥션을 10개씩 잡아서 최대 4개(3개 + 롤링 업데이트 중 1개)면 40개다.
+# 메모리 말고 DB 커넥션도 파드 수를 받쳐 줘야 한다: 앱 파드마다 Hikari 풀이 커넥션을 10개씩 잡아서 최대 4개(3개 + 배포(카나리) 중 1개)면 40개다.
 # 차트 PostgreSQL의 max_connections(30)로는 모자라서 prod는 아래 postgresql에서 60으로 키웠다(계산은 거기에 있다). 목표 CPU 사용률(70%)은 차트 기본값이다.
 autoscaling:
   enabled: true
-  minReplicas: 1
+  minReplicas: 2
   maxReplicas: 3
 # 앱 컨테이너의 리소스: 요청 cpu 100m·memory 384Mi, 한도 memory 512Mi. 차트 기본값과 같은 값이지만 일부러 적어 둔다:
 # 위 예산 계산이 기대는 값이라 계산과 값을 한 파일에서 읽게 하고, 차트 기본값을 고쳐도 이 크기가 저절로 바뀌지 않게 하려는 것이다(로컬 Docker VM에서는 요청 256Mi·한도 384Mi로 줄여 덮어썼다).
@@ -58,14 +60,15 @@ resources:
 database:
   # DB 비밀번호가 든 Secret의 이름 (키는 password). Secret은 Git에 없다: 클러스터의 shortener-prod 네임스페이스에 손으로 만든다 (README의 부트스트랩).
   existingSecret: shortener-db
-# 클러스터 안의 PostgreSQL을 prod 크기로 키운다. 차트 기본값(max_connections=30)은 앱 파드 최대 2개(커넥션 20개)에 맞춘 값이라서, 최대 3개에 롤링 업데이트 중 1개가 더 뜨는 prod를 받지 못한다.
-# dev는 파드 1개에 롤링 업데이트 중 1개를 더한 2개(커넥션 20개)라 차트 기본값(30)으로 충분해서 덮어쓰지 않는다.
+# 클러스터 안의 PostgreSQL을 prod 크기로 키운다. 차트 기본값(max_connections=30)은 앱 파드 최대 2개(커넥션 20개)에 맞춘 값이라서, 최대 3개에 배포(카나리) 중 1개가 더 뜨는 prod를 받지 못한다.
+# dev도 파드 2개에 배포 중 1개가 더 떠서 차트 기본값으로는 모자라 커넥션 상한만 덮어쓴다(environments/dev/values.yaml의 postgresql, max_connections=50).
 postgresql:
   # postgres -c 이름=값 인자다. Helm은 맵을 키 단위로 합치지만 리스트는 통째로 바꾸므로, 이 목록은 차트 기본값(shared_buffers=32MB, max_connections=30)과 합쳐지지 않고 그것을 대신한다.
   # max_connections=60은 커넥션 예산에서 나왔다:
   #   - 앱 파드마다 Hikari 풀이 커넥션을 10개씩 연다. 앱이 풀 크기를 정하지 않아 최대 10개가 기본값이고, 최소 유휴 수(minimumIdle)의 기본값이 최대와 같아서 풀은 시작하자마자 10개를 모두 열고 줄어들지도 않는다.
-  #   - prod는 HPA로 최대 3개이고 롤링 업데이트 중에는 maxSurge 1로 하나가 더 떠서 최대 4개 × 10 = 40개가 동시에 열린다. 차트 기본값(30)에서는 파드 3개가 30개를 다 잡고 있어서 4번째 파드는 첫 커넥션부터 "sorry, too many clients already"로 거절당한다.
-  #   - 40에 더해 풀 밖의 커넥션이 있다: 사람이 psql로 붙는 세션, pg_isready 프로브가 잠깐씩 여는 커넥션, 롤링 업데이트에서 내려가는 옛 파드가 풀을 닫기 전에 새 파드가 풀을 여는 겹침(옛 파드의 풀 10개까지)이다.
+  #   - prod는 HPA로 최대 3개이고 배포 중에는 maxSurge 1로 하나가 더 떠서 최대 4개 × 10 = 40개가 동시에 열린다. 차트 기본값(30)에서는 파드 3개가 30개를 다 잡고 있어서 4번째 파드는 첫 커넥션부터 "sorry, too many clients already"로 거절당한다.
+  #     카나리(setWeight 50)에서는 롤링 업데이트와 달리 4개가 잠깐이 아니라 2분 대기 동안 이어진다: 파드 3개의 절반을 맞추려고 카나리 2개·stable 2개를 띄운다(차트 templates/rollout.yaml).
+  #   - 40에 더해 풀 밖의 커넥션이 있다: 사람이 psql로 붙는 세션, pg_isready 프로브가 잠깐씩 여는 커넥션, 배포에서 내려가는 파드가 풀을 닫기 전에 새 파드가 풀을 여는 겹침(내려가는 파드의 풀 10개까지)이다.
   #     마이그레이션(Flyway)은 앱과 같은 DataSource를 써서 풀의 10개 안에서 돌므로 따로 더하지 않는다.
   #   - superuser_reserved_connections(기본 3)는 max_connections 중 슈퍼유저 전용으로 남겨 두는 자리라서, 일반 계정은 60 - 3 = 57개까지만 쓴다. 40 + 10(겹침) + psql·프로브 몇 개는 이 57 안에 든다.
   #     지금 앱 계정(shortener)은 슈퍼유저라서 예약 자리까지 쓸 수 있지만(공식 이미지는 POSTGRES_USER로 만든 계정을 슈퍼유저로 만든다) 57을 기준으로 잡았다: 나중에 앱 계정을 일반 계정으로 바꿔도 예산이 그대로 맞는다.
@@ -92,4 +95,10 @@ metrics:
   serviceMonitor:
     enabled: true
 slo:
+  enabled: true
+# 카나리 배포(5단계): 앱을 Argo Rollouts의 Rollout으로 배포한다. 새 버전은 파드의 절반(파드 2개면 1개, 3개면 카나리 2개·stable 2개)에 먼저 올라가고,
+# 2분 동안 그 파드들의 5xx 비율이 5% 아래면 전체로 바뀐다. 5%를 넘으면 Argo Rollouts가 배포를 중단하고 옛 버전으로 되돌린다(README의 카나리 배포).
+# prod의 카나리는 dev에서 확인하고 승격한 버전을 prod의 요청으로 한 번 더 확인하는 관문이다(차트의 파드 템플릿을 고쳐 승격 없이 두 환경에 함께 배포될 때도 같다).
+# 장애 주입(fault.errorRate)은 prod에 적지 않는다(차트 기본값 "0").
+rollout:
   enabled: true
