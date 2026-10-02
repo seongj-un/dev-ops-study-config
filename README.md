@@ -45,7 +45,8 @@ platform/dashboards/             대시보드 JSON과 kustomization (ConfigMap�
 argocd/apps/argo-rollouts.yaml      점진 배포 Application (Argo Rollouts: 외부 차트 + 이 저장소의 값, multi-source)
 platform/argo-rollouts/values.yaml  그 값 (컨트롤러·CRD·대시보드. 아래 "Argo Rollouts")
 tests/slo/                       앱 SLO 규칙(차트의 PrometheusRule)의 promtool 단위 테스트. validate가 차트를 렌더링해 꺼낸 규칙으로 돌린다
-.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링, 스키마 검사, SLO 규칙 검사, 플랫폼 차트 렌더링, 대시보드 검사)
+tests/canary/                    카나리 분석 쿼리(차트의 AnalysisTemplate)의 promtool 단위 테스트. validate가 렌더링 결과에서 쿼리를 꺼내 돌린다
+.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링(Rollout·Deployment 두 갈래), 스키마 검사, SLO 규칙·카나리 분석 쿼리 검사, 플랫폼 차트 렌더링, 대시보드 검사)
 .github/dependabot.yml           GitHub Actions 주간 갱신
 ```
 
@@ -477,7 +478,7 @@ KUBERNETES_VERSION=$(yq '.jobs.validate.env.KUBERNETES_VERSION' .github/workflow
 KUBECONFORM_IMAGE=$(yq '.jobs.validate.env.KUBECONFORM_IMAGE' .github/workflows/validate.yml)
 K8S_SCHEMA_LOCATION=$(yq '.jobs.validate.env.K8S_SCHEMA_LOCATION' .github/workflows/validate.yml)
 CRD_SCHEMA_LOCATION=$(yq '.jobs.validate.env.CRD_SCHEMA_LOCATION' .github/workflows/validate.yml)
-PROMETHEUS_IMAGE=$(yq '.jobs.validate.steps[] | select(.env.PROMETHEUS_IMAGE) | .env.PROMETHEUS_IMAGE' .github/workflows/validate.yml)
+PROMETHEUS_IMAGE=$(yq '.jobs.validate.env.PROMETHEUS_IMAGE' .github/workflows/validate.yml)
 out=$(mktemp -d)
 
 mkdir -p tests/slo/rendered     # 렌더링해서 꺼낸 SLO 규칙을 둘 곳(.gitignore에 있다)
