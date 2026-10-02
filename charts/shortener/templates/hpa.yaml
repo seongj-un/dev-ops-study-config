@@ -1,7 +1,10 @@
 {{- /*
-HorizontalPodAutoscaler: metrics-server가 재는 CPU 사용률에 맞춰 Deployment의 파드 수를 minReplicas~maxReplicas 사이에서 조절한다.
+HorizontalPodAutoscaler: metrics-server가 재는 CPU 사용률에 맞춰 앱 워크로드의 파드 수를 minReplicas~maxReplicas 사이에서 조절한다.
 사용률은 파드의 실제 CPU 사용량을 resources.requests.cpu로 나눈 값의 평균이라서, 요청이 없으면 계산할 수 없다(CPU 한도가 없어도 요청 기준이라 100%를 넘을 수 있다).
-autoscaling.enabled가 true이면 Deployment에는 replicas를 적지 않는다(deployment.yaml 참고).
+autoscaling.enabled가 true이면 워크로드에는 replicas를 적지 않는다(deployment.yaml 참고).
+대상(scaleTargetRef)은 이 차트가 만드는 쪽이다: Rollout이 만들어지면 Rollout, 아니면 Deployment(조건은 _helpers.tpl의 shortener.rolloutEnabled).
+Rollout도 Deployment처럼 scale 서브리소스가 있어서 HPA가 그대로 다룬다. 카나리 중에는 stable·카나리 파드를 모두 세어 평균을 내고(Rollout의 셀렉터가 둘 다 고른다),
+HPA가 파드 수를 바꾸면 Argo Rollouts가 바뀐 수로 카나리와 stable의 몫을 다시 나눈다.
 */ -}}
 {{- if .Values.autoscaling.enabled }}
 apiVersion: autoscaling/v2
@@ -12,8 +15,13 @@ metadata:
     {{- include "shortener.labels" (dict "ctx" . "component" "app" "version" .Values.image.tag) | nindent 4 }}
 spec:
   scaleTargetRef:
+    {{- if include "shortener.rolloutEnabled" . }}
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    {{- else }}
     apiVersion: apps/v1
     kind: Deployment
+    {{- end }}
     name: {{ include "shortener.fullname" . }}
   minReplicas: {{ .Values.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.autoscaling.maxReplicas }}

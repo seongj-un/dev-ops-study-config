@@ -4,7 +4,11 @@
     첫 배포는 이미지 풀과 DB 초기화 때문에 몇 분 걸릴 수 있다. 앱이 DB보다 먼저 뜨면 시작에 실패해서 재시작(CrashLoopBackOff)을 몇 번 거친 뒤 자리를 잡는데, 정상이다.
 
     kubectl -n {{ .Release.Namespace }} get pods
+{{- if include "shortener.rolloutEnabled" . }}
+    kubectl -n {{ .Release.Namespace }} get rollout {{ include "shortener.fullname" . }}     # Argo Rollouts의 Rollout이다. 카나리 단계와 분석은 Argo Rollouts 대시보드에서 본다
+{{- else }}
     kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "shortener.fullname" . }}
+{{- end }}
 
 [2] 접속한다.
 {{- if .Values.ingress.enabled }}
