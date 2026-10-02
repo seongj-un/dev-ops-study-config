@@ -1,0 +1,56 @@
+# 점진 배포 Application: Argo Rollouts(argo/argo-rollouts 차트)를 platform/argo-rollouts/values.yaml 값으로 argo-rollouts 네임스페이스에 배포한다.
+# 루트 Application(argocd/root.yaml)이 이 파일을 읽어 클러스터에 Application을 만든다.
+#
+# 모양은 kube-prometheus-stack Application과 같은 multi-source다(차트 저장소의 차트 + 이 저장소의 값 파일. 설명은 argocd/apps/kube-prometheus-stack.yaml).
+# 차트 버전을 올릴 때는 아래 targetRevision과 값 파일 맨 위의 버전 표기를 함께 바꾸고, 차트의 변경 이력(차트 README가 가리키는 ArtifactHub의 changelog)에서 CRD가 바뀌는 버전인지 먼저 읽는다.
+# CI(validate.yml)가 이 파일에서 차트와 값 파일을 읽어 렌더링하고 스키마로 검사한다.
+# 이 Application은 컨트롤러와 CRD(Rollout, AnalysisTemplate 등), 대시보드를 설치한다. Rollout을 쓰는 쪽(앱 차트)은 이 Application과 따로 배포된다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  # ArgoCD는 이 이름을 Helm 릴리스 이름으로 쓴다. 차트의 리소스 이름은 릴리스 이름에 차트 이름(argo-rollouts)이 들어 있으면 릴리스 이름 그대로가 되어,
+  # 컨트롤러 Deployment가 argo-rollouts, 대시보드 Service가 argo-rollouts-dashboard(port-forward 대상), 지표 Service가 argo-rollouts-metrics가 된다.
+  name: argo-rollouts
+  namespace: argocd
+spec:
+  project: default
+  sources:
+    - repoURL: https://argoproj.github.io/argo-helm
+      chart: argo-rollouts
+      # 정확한 버전으로 고정한다. 이미지 태그도 이 차트 버전이 정한다(값 파일 맨 위 주석).
+      targetRevision: 2.43.2
+      helm:
+        valueFiles:
+          - $values/platform/argo-rollouts/values.yaml
+    - repoURL: https://github.com/seongj-un/dev-ops-study-config.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo-rollouts
+  syncPolicy:
+    # 자동 동기화와 prune·selfHeal은 다른 Application과 같다(argocd/apps/shortener-dev.yaml 참고).
+    # prune은 CRD도 대상이지만 값 파일의 crdAnnotations가 CRD에 Prune=false를 붙여 지우지 못하게 한다(값 파일의 CRD 주석).
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # argo-rollouts 네임스페이스가 없으면 만든다. 이미 있으면 건드리지 않는다.
+      - CreateNamespace=true
+      # 서버 쪽 적용(설명은 argocd/apps/kube-prometheus-stack.yaml). 이 차트의 CRD는 설명 필드를 뺀 것이라 가장 큰 rollouts가 JSON으로 약 67KiB다.
+      # 클라이언트 쪽 적용이 쓰는 어노테이션의 한도(256KiB)에 아직 닿지 않는다. 업스트림의 CRD(설명 포함)는 rollouts가 JSON으로 약 283KiB로 한도를 넘고,
+      # Argo Rollouts의 설치 문서도 CRD를 따로 넣을 때는 kubectl apply --server-side를 쓰라고 한다. 차트가 설명을 되살리거나 CRD가 커져도 막히지 않게 서버 쪽 적용으로 둔다.
+      - ServerSideApply=true
+      # 컨트롤러의 ServiceMonitor는 kube-prometheus-stack이 설치하는 CRD(monitoring.coreos.com)가 있어야 적용된다. 차트는 CRD가 있는지 보지 않고 이 리소스를 만든다(앱 차트와 다르다).
+      # 새 클러스터에서 두 Application이 함께 처음 동기화되면 이쪽이 먼저일 수 있다. 그러면 ArgoCD는 동기화 전 검증에서 그 종류를 찾지 못해 동기화를 통째로 거부하고,
+      # 이 Application의 CRD와 컨트롤러도 올라오지 않는다. 이 옵션은 CRD가 없는 종류의 검증만 건너뛴다: 나머지가 먼저 적용되고 ServiceMonitor만 CRD가 생길 때까지 아래 retry로 다시 시도된다.
+      - SkipDryRunOnMissingResource=true
+    # 동기화가 실패하면 다시 시도한다. ArgoCD의 기본값(최대 5번, 대기는 5초에서 시작해 2배씩. 합쳐 약 2분 반)은 kube-prometheus-stack이 CRD를 만들 때까지보다 짧을 수 있다.
+    # 다시 시도를 모두 쓰면 같은 커밋으로는 새 동기화를 시작하지 않아서(argocd/apps/shortener-dev.yaml 참고) 사람이 Sync를 눌러야 한다.
+    # 그래서 10초에서 시작해 2배씩 늘고 3분을 넘지 않게, 10번까지 합쳐 약 20분을 기다린다. 이 값을 적으면 기본값 대신 쓰인다.
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
