@@ -163,7 +163,8 @@ jobs:
           done
 
       # 위 단계의 두 갈래가 차트의 의도대로 나뉘었는지 yq로 확인한다. kubeconform은 리소스 하나하나의 모양만 보므로 무엇이 렌더링됐는지는 따로 본다.
-      #   - Rollout 갈래: Rollout과 AnalysisTemplate이 하나씩 있고 앱 Deployment는 없다. HPA가 있으면(prod) Rollout을 가리킨다.
+      #   - Rollout 갈래: Rollout과 AnalysisTemplate이 하나씩 있고 앱 Deployment는 없다. HPA가 있으면 Rollout을 가리키고,
+      #     prod에는 HPA가 정확히 하나 있어 argoproj.io/v1alpha1의 Rollout shortener-prod를 가리킨다(HPA가 통째로 빠지는 실수도 잡는다).
       #   - Deployment 갈래: 그 반대다. Rollout·AnalysisTemplate이 없고 앱 Deployment가 하나 있으며, HPA는 Deployment를 가리킨다.
       #   - 두 갈래의 파드 템플릿이 같다. 둘 다 차트의 shortener.appPodTemplate 하나에서 나오므로, 다르면 한쪽에만 따로 손댄 것이다.
       #     위에서 Deployment의 파드 템플릿은 쿠버네티스 내장 스키마로, Rollout의 것은 CRD 스키마로 검사했으니 두 스키마가 모두 받아들이는 템플릿이기도 하다.
@@ -196,6 +197,8 @@ jobs:
               status=1
             fi
           done
+          expect "prod Rollout 갈래의 HPA(apiVersion/kind/name)" argoproj.io/v1alpha1/Rollout/shortener-prod \
+            '[select(.kind == "HorizontalPodAutoscaler") | .spec.scaleTargetRef | .apiVersion + "/" + .kind + "/" + .name] | join(",")' "$RUNNER_TEMP/prod.yaml"
           exit "$status"
 
       # 차트의 SLO 규칙(PrometheusRule)을 Prometheus의 도구 promtool로 검사한다. kubeconform은 리소스의 모양만 보고 그 안의 PromQL은 문자열로만 본다.

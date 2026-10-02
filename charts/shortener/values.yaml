@@ -103,7 +103,7 @@ slo:
     thresholdSeconds: 0.3
 
 # 카나리 배포(Argo Rollouts). 켜면 앱을 Deployment 대신 Argo Rollouts의 Rollout으로 만든다(templates/rollout.yaml): 새 버전을 파드의 절반에 먼저 올리고(카나리)
-# 그 파드들의 5xx 비율을 Prometheus로 재서, 기준(5%)을 넘으면 배포를 중단하고 옛 버전으로 되돌린다(templates/analysistemplate.yaml).
+# 그 파드들의 5xx 비율을 Prometheus로 재서, 5% 이상인 측정이 두 번이면 배포를 중단하고 옛 버전으로 되돌린다(templates/analysistemplate.yaml).
 # Rollout·AnalysisTemplate은 Argo Rollouts가 설치하는 CRD라서, 켜 두어도 클러스터가 두 kind를 모두 알 때만 Rollout을 만들고 그 전에는 Deployment를 만든다
 # (templates/rollout.yaml 머리말의 [조건부 생성]).
 rollout:

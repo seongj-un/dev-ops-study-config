@@ -61,6 +61,8 @@ postgresql:
   #   - 50에서 superuser_reserved_connections(3)를 뺀 47개가 일반 계정의 몫이라 그 안에 든다. 차트 기본값(30)이면 파드 3개의 풀만으로 일반 계정의 몫(27)을 넘는다.
   # 메모리는 차트 기본값(요청 128Mi·한도 256Mi)을 그대로 쓴다. prod 파일의 측정(쿼리를 하나씩 돌리는 연결 40개에서 프로세스 합 약 81MB)에 shared_buffers 32MB가
   # 다 차는 것을 더해도 약 113MB라 한도 안에 든다. 앱이 쿼리를 돌린 연결은 이보다 더 쓰므로 띄운 뒤 kubectl top pods -n shortener-dev로 확인한다.
+  # 이 인자를 바꾸면 StatefulSet의 파드 템플릿이 바뀌어 PostgreSQL 파드가 다시 뜬다. 처음 넣는 동기화는 Deployment에서 Rollout으로 옮기는 동기화와 같아서,
+  # 그동안(수십 초) dev의 DB를 쓰는 요청이 실패한다(README의 카나리 배포 > Deployment에서 옮기기).
   args:
     - -c
     - shared_buffers=32MB
@@ -74,8 +76,9 @@ metrics:
     enabled: true
 slo:
   enabled: true
-# 카나리 배포(5단계): 앱을 Argo Rollouts의 Rollout으로 배포한다. 새 버전은 파드 2개 중 1개(카나리)에 먼저 올라가고, 2분 동안 그 파드의 5xx 비율이 5% 아래면 전체로 바뀐다.
-# 5%를 넘으면 Argo Rollouts가 배포를 중단하고 옛 버전으로 되돌린다. 카나리 분석은 위 ServiceMonitor가 수집한 메트릭을 읽는다(README의 카나리 배포).
+# 카나리 배포(5단계): 앱을 Argo Rollouts의 Rollout으로 배포한다. 새 버전은 파드 2개 중 1개(카나리)에 먼저 올라가고, 2분 대기 뒤 전체로 바뀐다.
+# 그 사이 카나리 파드의 5xx 비율이 5% 이상인 측정이 두 번이면(또는 카나리 파드가 5분 안에 Ready가 되지 못하면) Argo Rollouts가 배포를 중단하고 옛 버전으로 되돌린다.
+# 카나리 분석은 위 ServiceMonitor가 수집한 메트릭을 읽는다(README의 카나리 배포).
 # Rollout도 CRD라서 Argo Rollouts가 아직 없는 새 클러스터에서는 차트가 지금처럼 Deployment를 만들고, CRD가 생긴 뒤 다시 렌더링할 때 Rollout으로 바뀐다.
 rollout:
   enabled: true
