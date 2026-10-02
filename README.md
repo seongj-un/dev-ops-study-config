@@ -42,6 +42,8 @@ argocd/apps/alloy.yaml           로그 수집 Application (외부 차트 + 이 
 platform/alloy/values.yaml       그 값 (DaemonSet, 로그 수집 파이프라인 설정이 이 안에 있다)
 argocd/apps/monitoring-dashboards.yaml      Grafana 대시보드 Application (이 저장소의 kustomize 디렉터리)
 platform/dashboards/             대시보드 JSON과 kustomization (ConfigMap으로 만든다. 아래 "대시보드")
+argocd/apps/argo-rollouts.yaml      점진 배포 Application (Argo Rollouts: 외부 차트 + 이 저장소의 값, multi-source)
+platform/argo-rollouts/values.yaml  그 값 (컨트롤러·CRD·대시보드. 아래 "Argo Rollouts")
 tests/slo/                       앱 SLO 규칙(차트의 PrometheusRule)의 promtool 단위 테스트. validate가 차트를 렌더링해 꺼낸 규칙으로 돌린다
 .github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링, 스키마 검사, SLO 규칙 검사, 플랫폼 차트 렌더링, 대시보드 검사)
 .github/dependabot.yml           GitHub Actions 주간 갱신
@@ -165,10 +167,11 @@ kubectl apply -f argocd/root.yaml
 확인:
 
 ```bash
-kubectl -n argocd get applications          # root, shortener-dev·prod, kube-prometheus-stack, loki, alloy, monitoring-dashboards가 Synced·Healthy가 될 때까지 몇 분 걸린다
+kubectl -n argocd get applications          # root, shortener-dev·prod, kube-prometheus-stack, loki, alloy, monitoring-dashboards, argo-rollouts가 Synced·Healthy가 될 때까지 몇 분 걸린다
 kubectl -n shortener-dev get pods
 kubectl -n shortener-prod get pods
 kubectl -n monitoring get pods              # 아래 "모니터링"의 파드 8개
+kubectl -n argo-rollouts get pods           # 아래 "Argo Rollouts"의 파드 2개
 curl -i -X POST http://dev.dev-ops-study.duckdns.org/api/v1/urls -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
 curl -i -X POST http://dev-ops-study.duckdns.org/api/v1/urls     -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
 ```
@@ -371,6 +374,50 @@ Grafana의 **Shortener** 대시보드(http://localhost:3000/d/shortener)는 `pla
   `NodeNetworkInterfaceFlapping`도 노드를 본다. CPU·메모리·디스크·파일시스템도 그대로다.
 - 자세한 이유는 `platform/kube-prometheus-stack/values.yaml`과 `argocd/apps/kube-prometheus-stack.yaml`의 주석에 있다.
 
+## Argo Rollouts (컨트롤러·대시보드)
+
+Application `argo-rollouts`가 Helm 차트 `argo/argo-rollouts` **2.43.2**(Argo Rollouts v1.10.0)를 `platform/argo-rollouts/values.yaml`의 값으로 `argo-rollouts` 네임스페이스에 배포한다.
+모니터링과 같은 multi-source 모양이라(차트 + `ref: values`로 가리키는 이 저장소) 값을 바꾸는 방법도 같다. 이 Application은 컨트롤러와 CRD 5개(`Rollout`, `AnalysisRun`, `AnalysisTemplate`,
+`ClusterAnalysisTemplate`, `Experiment`), 대시보드만 설치한다. `Rollout`을 쓰는 쪽은 앱 차트(`charts/shortener`)이고 이 Application과 따로 배포된다.
+
+| 파드 | 하는 일 | CPU 요청 | 메모리 요청 / 한도 |
+|---|---|---|---|
+| `argo-rollouts` | 컨트롤러: Rollout을 보고 새 버전의 ReplicaSet을 단계적으로 늘리고, 분석(AnalysisRun)을 돌린다 | 20m | 64Mi / 192Mi |
+| `argo-rollouts-dashboard` | 웹 UI (읽기 전용) | 10m | 32Mi / 128Mi |
+| **합계** | | **30m** | **96Mi / 320Mi** |
+
+값은 클러스터에서 잰 값이 아니라 이 규모(Rollout 2개)를 가정한 추정이라 띄운 뒤 `kubectl top pods -n argo-rollouts`로 확인한다(근거는 값 파일의 resources 주석. 대시보드는 쿠버네티스 API 없이 띄운 로컬 컨테이너에서
+유휴 약 15MiB를 쟀고, 컨트롤러는 API 없이는 뜨지 않아 재지 못했다). 합계는 아래 메모리 메모에 들어 있다.
+
+### 대시보드 열기 (port-forward)
+
+Ingress를 만들지 않는다. 대시보드에는 인증이 없고 80 포트는 인터넷에 열린 평문 HTTP라서(위 "열어 보기"와 같은 이유) 맥에서 port-forward로만 본다.
+
+```bash
+kubectl -n argo-rollouts port-forward svc/argo-rollouts-dashboard 3100:3100     # http://localhost:3100/rollouts
+```
+
+화면 위쪽의 네임스페이스 선택에서 `shortener-dev`·`shortener-prod`를 고른다(Rollout이 있는 네임스페이스가 목록에 나온다). 대시보드는 **읽기 전용**이다(`dashboard.readonly: true`).
+인증이 없는 UI가 쓰기 권한을 가지면 클러스터 안의 어느 파드든 그 Service로 Rollout의 승격·중단·이미지 교체를 시킬 수 있어서(이 저장소는 NetworkPolicy를 두지 않는다) 쓰기 권한을 뺐다.
+그래서 화면의 승격·중단 버튼은 403으로 실패한다. 조작은 Git으로 하거나 kubectl 플러그인(`kubectl argo rollouts promote`, `kubectl argo rollouts abort`)으로 한다.
+
+### 기본값에서 바꾼 것
+
+- **컨트롤러 파드 1개**(차트 기본값은 2개이고 리더 선출로 하나만 일한다). 노드가 하나라 둘째 파드는 노드 장애를 막지 못하고 메모리만 쓴다. 컨트롤러가 잠시 없어도 이미 뜬 앱 파드는 그대로 서비스되고 진행 중인 카나리 단계만 멈춘다.
+- **대시보드를 켰다**(차트 기본값은 꺼짐). ClusterIP이고 Ingress·HTTPRoute는 없으며 읽기 전용이다(위).
+- **지표**: 컨트롤러의 지표 Service(`argo-rollouts-metrics`, 8090)와 ServiceMonitor를 켰다(차트 기본값은 둘 다 꺼짐). Prometheus는 레이블 없이 모든 네임스페이스의 ServiceMonitor를 고르므로 따로 설정할 것이 없다.
+  위 "열어 보기"의 Prometheus port-forward 뒤 `up{job="argo-rollouts-metrics"}`가 1이고 `argo_rollouts_controller_info`가 나오는지 본다. Rollout이 생기면 `rollout_info`도 나온다.
+- **알림은 쓰지 않는다.** 차트에는 알림을 끄는 스위치가 없어서, 설정을 담는 ConfigMap과 토큰을 담는 Secret을 둘 다 만들지 않았다. 컨트롤러는 둘이 없으면 빈 설정으로 읽고 아무것도 보내지 않는다.
+- **CRD는 차트가 설치하고 지우지 못하게 지킨다.** CRD가 지워지면 그 종류의 리소스가 모든 네임스페이스에서 함께 지워지고, Rollout이 지워지면 그 ReplicaSet과 파드도 지워져 앱이 내려간다.
+  ArgoCD는 삭제 finalizer를 붙여 Application을 지워도 CRD를 지우지 않지만(차트 기본값 `keepCRDs`가 붙이는 `helm.sh/resource-policy: keep`도 같은 뜻으로 읽는다), prune은 그 어노테이션을 보지 않는다.
+  그래서 값 파일의 `crdAnnotations`로 모든 CRD에 `argocd.argoproj.io/sync-options: Prune=false`를 붙였다. 차트의 CRD는 설명(description) 필드를 뺀 것이라 `kubectl explain rollout.spec`은 필드 이름만 보여 준다.
+- **ServerSideApply=true**: 이 차트의 CRD는 가장 큰 `rollouts`가 JSON으로 약 67KiB라 클라이언트 쪽 적용의 어노테이션 한도(256KiB)에 아직 닿지 않는다(kube-prometheus-stack의 CRD와 다르다).
+  업스트림의 CRD(설명 포함)는 `rollouts`가 약 283KiB로 한도를 넘고 Argo Rollouts 설치 문서도 CRD를 따로 넣을 때는 서버 쪽 적용을 쓰라고 해서, 차트가 설명을 되살리거나 CRD가 커져도 막히지 않게 켰다.
+- **첫 동기화의 순서**: ServiceMonitor의 CRD는 kube-prometheus-stack이 설치하는데 이 차트는 CRD가 있는지 보지 않고 ServiceMonitor를 만든다. 새 클러스터에서 이 Application이 먼저 동기화되면 ArgoCD는 그 종류를 찾지 못해 동기화를 통째로 거부한다.
+  그래서 CRD가 없는 종류의 검증만 건너뛰는 `SkipDryRunOnMissingResource=true`로 나머지(CRD, 컨트롤러, 대시보드)를 먼저 적용하고, ServiceMonitor는 `retry`(10번, 합쳐 약 20분)로 CRD가 생길 때까지 다시 시도한다. ArgoCD의 기본 재시도는 합쳐 약 2분 반이다.
+- ArgoCD 컨트롤러의 메모리에 주는 영향은 작다. 이 차트가 더하는 매니페스트는 객체 20개, JSON으로 약 0.3MiB(그중 CRD 5개가 약 0.28MiB)로 kube-prometheus-stack(약 3.0MiB)의 10분의 1이다.
+  그래도 새 인스턴스에서 처음 동기화할 때 컨트롤러의 최고 사용량(`memory.peak`)을 다시 본다(근거는 `bootstrap/argocd/values.yaml`의 컨트롤러 주석).
+
 ## 메모리 메모
 
 노드는 EC2 `m7i-flex.large`(2 vCPU, 메모리 8GiB = 8192Mi) 한 대다. 로컬 Docker VM(2.84GiB)은 dev 롤링 업데이트 중에 메모리가 모자라서 프로젝트를 이 노드로 옮겼다.
@@ -383,17 +430,18 @@ JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 `-XX:Max
 | ArgoCD (파드 4개. 4단계에서 repo-server 한도를 512Mi로, 컨트롤러 요청·한도를 384Mi·1024Mi로 올렸다) | 560Mi | 1792Mi |
 | 모니터링: kube-prometheus-stack (파드 6개, 위 "모니터링" 표) | 1056Mi | 2432Mi |
 | 모니터링: Loki·Alloy (파드 2개, 위 "모니터링" 표) | 368Mi | 832Mi |
+| 점진 배포: Argo Rollouts (파드 2개, 위 "Argo Rollouts" 표. 5단계) | 96Mi | 320Mi |
 | dev (앱 384Mi/512Mi + PostgreSQL 128Mi/256Mi + Redis 32Mi/128Mi, 앱 1개) | 544Mi | 896Mi |
 | prod, HPA가 최대 3개까지 늘었을 때 (앱 3개 + PostgreSQL 256Mi/512Mi로 키움 + Redis 32Mi/128Mi) | 1440Mi | 2176Mi |
-| 합계 | 4768Mi | 8928Mi |
+| 합계 | 4864Mi | 9248Mi |
 | 롤링 업데이트 중 환경마다 앱 파드 하나 추가 (maxSurge 1) | +384Mi | +512Mi |
-| 합계, 두 환경이 동시에 롤링 중일 때 | 5536Mi | 9952Mi |
+| 합계, 두 환경이 동시에 롤링 중일 때 | 5632Mi | 10272Mi |
 
 - **요청 합은 최악에도 노드 안에 든다.** 요청은 스케줄러가 자리를 계산하는 값이다. prod가 3개인 채 두 환경이 동시에 롤링해도(차트의 파드 템플릿을 고치면 두 환경이 같은 `main`의 차트를 읽어 동시에 롤링된다)
-  5536Mi로 8192Mi(실제 MemTotal은 약 7.6GiB)보다 작다. 4단계에서 새로 더하는 요청은 약 1.6GiB까지로 잡았고(ArgoCD 컨트롤러 요청을 128Mi에서 384Mi로 올린 256Mi는 위 ArgoCD 행에 따로 들어 있다),
-  그중 kube-prometheus-stack이 1056Mi, Loki·Alloy가 368Mi를 쓴다(합 1424Mi. Loki·Alloy 몫으로 남겨 둔 약 580Mi 가운데 약 210Mi가 남는다).
+  5632Mi로 8192Mi(실제 MemTotal은 약 7.6GiB)보다 작다. 4단계에서 새로 더하는 요청은 약 1.6GiB까지로 잡았고(ArgoCD 컨트롤러 요청을 128Mi에서 384Mi로 올린 256Mi는 위 ArgoCD 행에 따로 들어 있다),
+  그중 kube-prometheus-stack이 1056Mi, Loki·Alloy가 368Mi를 쓴다(합 1424Mi. Loki·Alloy 몫으로 남겨 둔 약 580Mi 가운데 약 210Mi가 남는다). 5단계의 Argo Rollouts 96Mi는 그 몫과 별개로 위 합계에 더했다.
   같은 계산이 `environments/prod/values.yaml`의 `autoscaling` 위 주석에도 있다(prod의 HPA 최대 3개를 정한 근거).
-- **한도 합은 최악에 노드 메모리를 넘는다(오버커밋).** 3단계까지는 모든 컨테이너가 한도까지 쓰는 최악(5664Mi)도 노드 안에 들게 잡았지만, 모니터링과 ArgoCD 한도를 더하니 9952Mi로 넘는다.
+- **한도 합은 최악에 노드 메모리를 넘는다(오버커밋).** 3단계까지는 모든 컨테이너가 한도까지 쓰는 최악(5664Mi)도 노드 안에 들게 잡았지만, 모니터링과 ArgoCD 한도를 더하니 넘고, 5단계의 Argo Rollouts 한도 320Mi를 더해 10272Mi가 된다.
   모든 컨테이너가 한꺼번에 한도까지 쓰는 일은 드물다고 보고 받아들인다. 한도는 컨테이너 하나가 폭주할 때 그 컨테이너만 OOMKilled로 멈추게 하는 상한이다.
   한도보다 노드가 먼저 모자라면 kubelet이 요청을 넘게 쓰는 파드부터 내쫓는다(그래서 요청을 평소 사용량 가까이 잡는다). 띄운 뒤 실제 사용량으로 다시 본다.
 - 위 합계는 추정이다. k3s 행의 약 800Mi는 로컬 k3d의 빈 클러스터에서 잰 약 770MiB를 올려 잡은 값이고 EC2에서는 재지 않았다. 8GiB는 명목 크기라 실제 MemTotal은 조금 작고 호스트 OS도 메모리를 쓰므로 그만큼 위 여유가 줄어든다.
@@ -447,7 +495,7 @@ docker run --rm -v "$PWD":/work:ro -w /work $KUBECONFORM_IMAGE -strict -summary 
 차트가 안내 메시지와 함께 실패한다. `helm lint`에는 `--api-versions` 옵션이 없어서 ServiceMonitor·PrometheusRule은 lint에서 렌더링되지 않는다(내용은 렌더링·kubeconform·promtool이 검사한다).
 SLO 규칙 테스트의 시나리오와 읽는 법은 `tests/slo/shortener-slo.test.yaml`의 머리말에 있다. 워크플로 파일은 `docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.12`로 검사한다.
 
-플랫폼 차트(argocd/apps에서 `chart:` 소스를 쓰는 Application. 지금은 kube-prometheus-stack, loki, alloy)는 CI 단계의 스크립트를 그대로 꺼내 돌린다.
+플랫폼 차트(argocd/apps에서 `chart:` 소스를 쓰는 Application. 지금은 kube-prometheus-stack, loki, alloy, argo-rollouts)는 CI 단계의 스크립트를 그대로 꺼내 돌린다.
 GitHub가 넣어 주는 변수 셋(`GITHUB_SERVER_URL`, `GITHUB_REPOSITORY`, `RUNNER_TEMP`)은 대신 준다. 위에서 읽은 변수를 그대로 쓴다:
 
 ```bash
@@ -522,6 +570,7 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | kube-prometheus-stack 차트 | 91.8.2 (Prometheus Operator v0.94.1. 이미지 태그도 이 차트 버전이 정한다) | `argocd/apps/kube-prometheus-stack.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
 | Loki 차트 | `grafana/loki` 7.3.0 (Loki 3.6.11. 이 차트는 이제 GEL용이고 OSS용은 grafana-community로 옮겨 갔다: 값 파일 맨 위 주석) | `argocd/apps/loki.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
 | Alloy 차트 | `grafana/alloy` 1.13.0 (Alloy v1.20.0, config-reloader v0.94.0) | `argocd/apps/alloy.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
+| Argo Rollouts 차트 | `argo/argo-rollouts` 2.43.2 (Argo Rollouts v1.10.0. 이미지 태그도 이 차트 버전이 정한다) | `argocd/apps/argo-rollouts.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
 | kustomize (CI) | v5.8.1 (릴리스 파일을 받아 SHA-256으로 확인한다. ArgoCD v3.5.3에 들어 있는 kustomize와 같다) | `validate.yml` 대시보드 단계의 `KUSTOMIZE_VERSION`·`KUSTOMIZE_SHA256` |
 | CustomResourceDefinition 객체의 스키마 | yannh/kubernetes-json-schema 커밋 `8df8a88`의 `-local` 디렉터리 (`-standalone`에는 없다) | `validate.yml` 플랫폼 차트 단계의 `K8S_LOCAL_SCHEMA_LOCATION` |
 
@@ -537,9 +586,11 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 - `validate` 잡은 룰셋 "PR 필수"의 필수 상태 검사다(저장소 설정). 룰셋이 잡 이름으로 검사를 찾으므로 이름을 바꾸지 않는다. deploy key는 그 룰셋을 우회하므로 CI의 dev 태그 직접 커밋은
   이 검사를 기다리지 않고, 푸시된 뒤에 `push` 이벤트로 검사가 돈다(결과를 알려 줄 뿐 막지는 못한다. ArgoCD는 GitHub의 검사 결과를 보지 않는다).
 - Application을 지우면(루트의 prune 포함) 그것이 배포한 리소스는 클러스터에 남는다(삭제 finalizer를 붙이지 않았다). 네임스페이스와 PostgreSQL의 PVC도 남는다.
-- 외부 차트를 쓰는 Application(지금은 `kube-prometheus-stack`, `loki`, `alloy`)은 값을 `platform/<Application 이름>/values.yaml`에 두고 `$values/`로 가리킨다. 이 값 파일도 환경 값 파일처럼
+- 외부 차트를 쓰는 Application(지금은 `kube-prometheus-stack`, `loki`, `alloy`, `argo-rollouts`)은 값을 `platform/<Application 이름>/values.yaml`에 두고 `$values/`로 가리킨다. 이 값 파일도 환경 값 파일처럼
   빈 줄 없는 yq 모양을 지킨다(`validate`의 플랫폼 차트 단계가 검사한다). 인라인 값(`helm.values`·`valuesObject`·`parameters`)은 그 단계가 렌더링에 넣지 못해 거부한다.
 - kube-prometheus-stack의 `crds.enabled`는 끄지 않는다. 렌더링에서 CRD가 빠지면 prune이 CRD를 지우고, CRD가 지워지면 그 종류의 리소스(앱 차트의 ServiceMonitor·SLO 규칙 포함)가 모든 네임스페이스에서 함께 지워진다.
+- Argo Rollouts의 `installCRDs`도 끄지 않는다. 값 파일의 `crdAnnotations`(`Prune=false`)가 prune에서는 CRD를 지켜 주지만, CRD가 지워지면 Rollout이 모든 네임스페이스에서 지워지고 그 ReplicaSet과 파드까지 따라 지워져 앱이 내려간다.
+  Argo Rollouts를 정말 없앨 때는 먼저 모든 Rollout을 Deployment로 되돌린 뒤 `kubectl delete crd`로 손으로 지운다.
 - Alloy 설정(`platform/alloy/values.yaml`의 `alloy.configMap.content`)은 차트가 Helm의 tpl로 한 번 더 렌더링한다. 여는 중괄호 두 개를 연달아 쓰면 Helm 템플릿으로 읽히므로 쓰지 않는다.
   파이프라인을 고친 뒤에는 위 "로컬에서 검증하기"의 `alloy validate`로 확인한다.
 - Loki 레이블은 다섯 개(`namespace`, `pod`, `container`, `app`, `level`)로 둔다. 값이 많은 필드(요청 ID, URL 등)는 레이블로 올리지 않고 쿼리에서 `| json`으로 꺼낸다.
@@ -558,6 +609,7 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | Grafana 파드가 `CreateContainerConfigError` | `monitoring`에 `grafana-admin` Secret이 없다. 부트스트랩 3-1대로 만든다 |
 | Alertmanager 파드가 `ContainerCreating`에 머문다 | `monitoring`에 `alertmanager-discord` Secret이 없어 볼륨을 붙이지 못한다(`kubectl -n monitoring describe pod`의 이벤트에 `FailedMount`). 부트스트랩 3-1대로 만든다 |
 | kube-prometheus-stack 동기화가 `metadata.annotations: Too long`으로 실패한다 | Application의 `syncOptions`에서 `ServerSideApply=true`가 빠졌다(위 "모니터링") |
+| argo-rollouts 동기화가 `Failed`로 보이고 메시지에 `ServiceMonitor`가 나온다 | 새 클러스터에서 kube-prometheus-stack보다 먼저 동기화돼, 그 차트가 설치하는 ServiceMonitor CRD(`kubectl get crd servicemonitors.monitoring.coreos.com`)가 아직 없다. CRD·컨트롤러·대시보드는 이미 적용돼 있고 ServiceMonitor만 다시 시도 중이라(10번, 약 20분) kube-prometheus-stack이 그 CRD를 만들고 나면 저절로 풀린다. 다시 시도를 모두 쓰고도 `Failed`로 멈춰 있으면 UI에서 직접 Sync한다(위 "Argo Rollouts") |
 | Grafana의 로그 패널이 비어 있거나 Loki 데이터 소스가 오류 | `kubectl -n monitoring get pods`로 `loki-0`이 Ready인지(뜬 뒤 준비까지 1분 안쪽), `alloy-*` 파드가 Running인지 본다. Alloy UI(위 "로그")에서 컴포넌트가 healthy인지와 읽고 있는 대상을, `kubectl -n monitoring logs ds/alloy -c alloy`에서 `loki.write`의 전송 오류를 본다. 단, Alloy 파드가 새로 뜬 직후 나오는 `final error sending batch, no retries left, dropping data` ... `status=400` ... `entry too far behind`는 문제가 아니다: 각 컨테이너의 로그 파일을 처음부터 다시 보내다가 그 스트림의 가장 새 줄보다 1시간 넘게 오래된 줄(이미 저장된 줄)을 Loki가 거절한 것이고, 같은 묶음의 다른 줄은 저장된다(`platform/alloy/values.yaml`의 mounts 주석) |
 | Alloy 로그에 `forbidden` | Alloy의 ClusterRole(`platform/alloy/values.yaml`의 `rbac`)에 그 컴포넌트가 쓰는 권한이 없다. 컴포넌트를 더했다면 필요한 권한도 더한다(차트 values.yaml의 rbac 주석에 컴포넌트별 권한이 있다) |
 | Discord로 알림이 오지 않는다 | Alertmanager UI(port-forward)에 그 경보가 있는지, 경로(위 "경보가 가는 길")에 맞는지 본다. `kubectl -n monitoring logs alertmanager-kube-prometheus-stack-alertmanager-0 -c alertmanager`에 notify 오류가 있으면 웹훅 주소 Secret을 확인한다(바꾸는 방법은 `infra/aws/README.md`) |
