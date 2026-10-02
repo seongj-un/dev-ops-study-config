@@ -54,7 +54,7 @@ tests/slo/                       앱 SLO 규칙(차트의 PrometheusRule)의 pro
 | 네임스페이스 | `shortener-dev` | `shortener-prod` |
 | 주소 | http://dev.dev-ops-study.duckdns.org | http://dev-ops-study.duckdns.org |
 | 이미지 태그를 바꾸는 방법 | 앱 저장소 CI가 자동으로 커밋 | 사람이 PR로 승격 |
-| 파드 | 1개 고정 | HPA가 1~3개로 조절 (아래 메모리 메모) |
+| 파드 | 2개 고정 | HPA가 2~3개로 조절 (아래 메모리 메모) |
 | 앱 메모리 요청 / 한도 | 384Mi / 512Mi | 384Mi / 512Mi |
 | ArgoCD Application | `shortener-dev` | `shortener-prod` |
 
@@ -429,7 +429,8 @@ kubectl -n argo-rollouts port-forward svc/argo-rollouts-dashboard 3100:3100     
 ## 메모리 메모
 
 노드는 EC2 `m7i-flex.large`(2 vCPU, 메모리 8GiB = 8192Mi) 한 대다. 로컬 Docker VM(2.84GiB)은 dev 롤링 업데이트 중에 메모리가 모자라서 프로젝트를 이 노드로 옮겼다.
-8GiB에서는 앱 메모리를 줄일 이유가 없어 두 환경 모두 차트 기본값(요청 384Mi·한도 512Mi)으로 되돌렸고, prod의 HPA를 다시 켰다(파드 1~3개). dev는 파드 1개 고정이다.
+8GiB에서는 앱 메모리를 줄일 이유가 없어 두 환경 모두 차트 기본값(요청 384Mi·한도 512Mi)으로 되돌렸고, prod의 HPA를 다시 켰다(파드 2~3개). dev는 파드 2개 고정이다
+(5단계에서 카나리 때문에 dev를 1개에서 2개로, prod의 최소를 1개에서 2개로 올렸다. 아래 "카나리 배포").
 JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 `-XX:MaxRAMPercentage=75.0`)라서 한도 512Mi에서는 384Mi다.
 
 | | 요청 합 | 한도 합 |
@@ -439,25 +440,27 @@ JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 `-XX:Max
 | 모니터링: kube-prometheus-stack (파드 6개, 위 "모니터링" 표) | 1056Mi | 2432Mi |
 | 모니터링: Loki·Alloy (파드 2개, 위 "모니터링" 표) | 368Mi | 832Mi |
 | 점진 배포: Argo Rollouts (파드 2개, 위 "Argo Rollouts" 표. 5단계) | 96Mi | 320Mi |
-| dev (앱 384Mi/512Mi + PostgreSQL 128Mi/256Mi + Redis 32Mi/128Mi, 앱 1개) | 544Mi | 896Mi |
+| dev (앱 384Mi/512Mi + PostgreSQL 128Mi/256Mi + Redis 32Mi/128Mi, 앱 2개) | 928Mi | 1408Mi |
 | prod, HPA가 최대 3개까지 늘었을 때 (앱 3개 + PostgreSQL 256Mi/512Mi로 키움 + Redis 32Mi/128Mi) | 1440Mi | 2176Mi |
-| 합계 | 4864Mi | 9248Mi |
-| 롤링 업데이트 중 환경마다 앱 파드 하나 추가 (maxSurge 1) | +384Mi | +512Mi |
-| 합계, 두 환경이 동시에 롤링 중일 때 | 5632Mi | 10272Mi |
+| 합계 | 5248Mi | 9760Mi |
+| 배포(카나리, Argo Rollouts가 없으면 롤링 업데이트) 중 환경마다 앱 파드 하나 추가 (maxSurge 1) | +384Mi | +512Mi |
+| 합계, 두 환경이 동시에 배포 중일 때 | 6016Mi | 10784Mi |
 
-- **요청 합은 최악에도 노드 안에 든다.** 요청은 스케줄러가 자리를 계산하는 값이다. prod가 3개인 채 두 환경이 동시에 롤링해도(차트의 파드 템플릿을 고치면 두 환경이 같은 `main`의 차트를 읽어 동시에 롤링된다)
-  5632Mi로 8192Mi(실제 MemTotal은 약 7.6GiB)보다 작다. 4단계에서 새로 더하는 요청은 약 1.6GiB까지로 잡았고(ArgoCD 컨트롤러 요청을 128Mi에서 384Mi로 올린 256Mi는 위 ArgoCD 행에 따로 들어 있다),
+- **요청 합은 최악에도 노드 안에 든다.** 요청은 스케줄러가 자리를 계산하는 값이다. prod가 3개인 채 두 환경이 동시에 배포해도(차트의 파드 템플릿을 고치면 두 환경이 같은 `main`의 차트를 읽어 동시에 배포된다)
+  6016Mi로 8192Mi(실제 MemTotal은 약 7.6GiB)보다 작다. 카나리는 늘어난 파드 하나를 2분 대기 동안 띄워 두므로(prod가 3개면 카나리 2개·stable 2개) 이 최악이 롤링 업데이트보다 오래간다.
+  4단계에서 새로 더하는 요청은 약 1.6GiB까지로 잡았고(ArgoCD 컨트롤러 요청을 128Mi에서 384Mi로 올린 256Mi는 위 ArgoCD 행에 따로 들어 있다),
   그중 kube-prometheus-stack이 1056Mi, Loki·Alloy가 368Mi를 쓴다(합 1424Mi. Loki·Alloy 몫으로 남겨 둔 약 580Mi 가운데 약 210Mi가 남는다). 5단계의 Argo Rollouts 96Mi는 그 몫과 별개로 위 합계에 더했다.
   같은 계산이 `environments/prod/values.yaml`의 `autoscaling` 위 주석에도 있다(prod의 HPA 최대 3개를 정한 근거).
-- **한도 합은 최악에 노드 메모리를 넘는다(오버커밋).** 3단계까지는 모든 컨테이너가 한도까지 쓰는 최악(5664Mi)도 노드 안에 들게 잡았지만, 모니터링과 ArgoCD 한도를 더하니 넘고, 5단계의 Argo Rollouts 한도 320Mi를 더해 10272Mi가 된다.
+- **한도 합은 최악에 노드 메모리를 넘는다(오버커밋).** 3단계까지는 모든 컨테이너가 한도까지 쓰는 최악(5664Mi)도 노드 안에 들게 잡았지만, 모니터링과 ArgoCD 한도를 더하니 넘고, 5단계에서 Argo Rollouts의 한도 320Mi와 dev 앱 하나를 더해 10784Mi가 된다.
   모든 컨테이너가 한꺼번에 한도까지 쓰는 일은 드물다고 보고 받아들인다. 한도는 컨테이너 하나가 폭주할 때 그 컨테이너만 OOMKilled로 멈추게 하는 상한이다.
   한도보다 노드가 먼저 모자라면 kubelet이 요청을 넘게 쓰는 파드부터 내쫓는다(그래서 요청을 평소 사용량 가까이 잡는다). 띄운 뒤 실제 사용량으로 다시 본다.
 - 위 합계는 추정이다. k3s 행의 약 800Mi는 로컬 k3d의 빈 클러스터에서 잰 약 770MiB를 올려 잡은 값이고 EC2에서는 재지 않았다. 8GiB는 명목 크기라 실제 MemTotal은 조금 작고 호스트 OS도 메모리를 쓰므로 그만큼 위 여유가 줄어든다.
   한도는 상한일 뿐 평소 사용량은 훨씬 작다: 2단계에서 한도 512Mi로 띄웠을 때 유휴 상태의 앱 파드는 약 320Mi, PostgreSQL은 약 55Mi, Redis는 약 15Mi였다(`kubectl top`). 띄운 뒤 실제 값을 확인한다: `kubectl top pods -A --sort-by=memory`, 노드에서 `free -m`.
 - **prod가 최대 3개까지 늘 수 있다고 보고 예산을 잡았다.** 2단계에서는 새 파드가 뜬 직후 HPA가 앱을 1개에서 2개로 늘렸다가 5분쯤 뒤에 줄이는 일이 여러 번 있었다(콜드 JVM의 CPU 급증 때문으로 추정하지만 그 순간의 CPU는 재지 않았다).
   HPA 자체는 2단계에서 이미 연습했다. 차트의 기본값(HPA 1~2개)은 그대로 두었고 prod의 환경 값 파일이 최대를 3개로 덮어쓴다.
-  메모리 말고 DB 커넥션도 파드 수를 받쳐 줘야 한다: 앱 파드가 커넥션을 10개씩 잡아 최대 4개(3개 + 롤링 업데이트 중 1개)면 40개인데 차트 PostgreSQL의 `max_connections`는 30이다.
-  그래서 prod의 PostgreSQL만 `max_connections`를 60으로, 메모리를 요청 256Mi·한도 512Mi로 키웠다(dev는 파드 1개 + 롤링 1개 = 20개라 차트 기본값 그대로다. 계산은 `environments/prod/values.yaml`의 `postgresql` 위 주석).
+  메모리 말고 DB 커넥션도 파드 수를 받쳐 줘야 한다: 앱 파드가 커넥션을 10개씩 잡아 최대 4개(3개 + 배포 중 1개)면 40개인데 차트 PostgreSQL의 `max_connections`는 30이다.
+  그래서 prod의 PostgreSQL은 `max_connections`를 60으로, 메모리를 요청 256Mi·한도 512Mi로 키웠다. dev도 5단계에서 파드 2개 + 배포 중 1개 = 30개가 되어 `max_connections`만 50으로 올렸다
+  (계산은 각 환경 값 파일의 `postgresql` 위 주석).
 - **로컬 k3d(`devops-study`)는 멈춰 두었다**(`k3d cluster stop devops-study`. 데이터는 남는다). 다시 켜면(`k3d cluster start devops-study`) 그 안의 ArgoCD가 `main`의 값(EC2 주소와 크기)으로 맞추려 하므로, 로컬에서 쓰려면 먼저 두 환경 값 파일을 덮어써야 한다:
   `baseUrl`·`ingress.host`는 `*.localhost` 이름(예전 값: `shortener-dev.localhost:8090`, `shortener.localhost:8090`)으로, 앱 메모리·HPA는 2.84GiB VM에 맞춘 예전 크기(앱 요청 256Mi·한도 384Mi, 두 환경 모두 파드 1개 고정)로. 예전 값은 `git log -p -- environments/`에 있다.
 - dev를 잠시 끄고 싶다면 `kubectl scale`이 아니라 Git에서 `environments/dev/values.yaml`의 `replicaCount`를 0으로 바꾼다. dev는 HPA가 없어 selfHeal이 손으로 바꾼 파드 수를 되돌리기 때문이다.
