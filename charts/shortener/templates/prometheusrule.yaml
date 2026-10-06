@@ -52,7 +52,7 @@ SLO 정의 (숫자는 values.yaml의 slo):
 [앱 파드 경보] ShortenerNoAvailablePods: 요청을 받을 수 있는(Ready인) 앱 파드가 1분 넘게 0개면 울린다. 노드가 부팅되고 5분 동안은 울리지 않는다(아래 부팅 가드).
   SLO 경보가 보지 못하는 장애를 맡는다. SLI는 앱 안에서 잰다. 앱 파드가 모두 NotReady가 되면 앱 Service의 엔드포인트가 비고, Traefik이 요청을 앱에 보내지 못해
   503을 스스로 돌려준다. 그 요청은 앱의 지표에 남지 않아서 5xx 비율의 분모가 0이 되고(0 ÷ 0 = NaN) SLO 경보는 장애가 얼마나 이어지든 울리지 않는다.
-  v4 연습(prod, DB 차단 약 5분)이 그랬다: 앱 readiness에 DB가 들어 있어서 파드가 모두 NotReady가 되었고, 사용자는 503만 받았는데 경보도 Discord 알림도 없었다.
+  v4 연습(prod, DB 차단 약 5분)이 그랬다(당시 앱 readiness에 DB가 들어 있어서. 지금은 readinessState만 봐서 DB 장애에도 파드는 Ready로 남는다): 파드가 모두 NotReady가 되었고, 사용자는 503만 받았는데 경보도 Discord 알림도 없었다.
   - 지표: 클러스터가 Rollout을 알면(_helpers.tpl의 shortener.rolloutEnabled. 이 차트가 Deployment 대신 Rollout을 만드는 조건과 같다) Argo Rollouts 컨트롤러의
     rollout_info_replicas_available(Rollout의 status.availableReplicas = 그 Rollout의 모든 ReplicaSet의 available 파드 합. 레이블 namespace·name)을 읽는다.
     Deployment를 만들 때는 kube-state-metrics의 kube_deployment_status_replicas_available(레이블 namespace·deployment)을 읽는다.
@@ -70,7 +70,7 @@ SLO 정의 (숫자는 values.yaml의 slo):
     Helm이 네임스페이스를 적어 넣는다($labels는 식의 결과에 있는 레이블만 보이고 labels에 적은 것은 보이지 않는다).
   - for: 1m: 1분 동안 계속 0이어야 울린다. 배포 중에는 0이 되지 않는다: 카나리와 롤링 업데이트 모두 maxUnavailable 0이라 새 파드가 Ready가 되어야 옛 파드를 내린다.
     파드 하나가 죽어도(v4의 파드 삭제 연습) 다른 파드가 남아 있어 울리지 않는다. 1분은 노드의 순간 장애로 잠깐 0이 된 것을 거르면서, SLO 경보(100% 장애여도 약 6.3분)보다
-    훨씬 빨리 알리는 값이다. DB가 죽으면 readiness 실패(5초 × 3번) + 수집(최대 30초) + 평가(최대 30초) + for 1분 + Alertmanager의 group_wait 30초로 약 2~3분 안에 Discord에 닿는다.
+    훨씬 빨리 알리는 값이다. 파드가 NotReady가 되면(readiness 실패 5초 × 3번) + 수집(최대 30초) + 평가(최대 30초) + for 1분 + Alertmanager의 group_wait 30초로 약 2~3분 안에 Discord에 닿는다.
   - 지표가 없으면 울리지 않는다(absent를 쓰지 않는다). 계열이 없다는 것은 파드가 없다는 뜻이 아니라 잴 수 없다는 뜻이라서다: 컨트롤러나 kube-state-metrics가
     내려갔거나 아직 수집되지 않았다(워크로드가 있으면 파드가 0개여도 계열은 0으로 있다). 그때 "파드가 없다"고 Discord를 울리면 틀린 경보다. 대가로 앱 장애와 컨트롤러 장애가
     겹치면 이 경보도 조용하다(수집 대상이 내려간 것은 차트의 기본 규칙 TargetDown이 알리지만 warning이라 Discord로 가지 않는다).
@@ -208,7 +208,7 @@ spec:
             description: >-
               Ready인 앱 파드가 0개라 앱 Service의 엔드포인트가 비었다. Traefik이 이 환경의 모든 요청에 503을 직접 돌려주고,
               요청이 앱까지 가지 않아서 앱의 지표로 계산하는 SLO 경보는 이 장애를 보지 못한다.
-              흔한 원인은 DB 장애(앱의 readiness에 DB가 들어 있다)와 모든 파드의 시작 실패다. kubectl -n {{ $namespace }} get pods로 파드의 상태와 이벤트를 본다.
+              흔한 원인은 모든 파드의 시작 실패와 노드 장애다(DB 장애는 readiness에 들어 있지 않아 파드를 NotReady로 만들지 않는다). kubectl -n {{ $namespace }} get pods로 파드의 상태와 이벤트를 본다.
               {{- if $rollout }}
               근거 지표는 Argo Rollouts 컨트롤러의 rollout_info_replicas_available(Rollout {{ $job }})이다.
               {{- else }}

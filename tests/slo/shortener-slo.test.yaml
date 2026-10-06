@@ -326,7 +326,7 @@ tests:
   - name: (h) dev의 앱 파드가 모두 Ready가 아니게 되면 1분 뒤에 앱 파드 경보가 울리고 돌아오면 풀린다. SLO 경보는 내내 조용하다 (prod는 파드 하나만 빠져 조용하다)
     interval: 1m
     input_series:
-      # v4 연습(DB 차단)의 모양이다. dev: 5분까지 파드 2개가 Ready, 6~11분에 0개(readiness에 든 DB가 죽었다), 12분부터 다시 2개.
+      # v4 연습(DB 차단)의 모양이다. dev: 5분까지 파드 2개가 Ready, 6~11분에 0개(당시에는 readiness에 든 DB가 죽어서였다. 지금은 모든 파드의 시작 실패 등), 12분부터 다시 2개.
       - series: 'rollout_info_replicas_available{exported_namespace="shortener-dev", name="shortener-dev", namespace="argo-rollouts", job="argo-rollouts-metrics", pod="argo-rollouts-5d7c9b8f6-abcde"}'
         values: '2x5 0x5 2x4'
       # prod: 같은 동안 파드 하나만 빠진다(v4의 파드 삭제 연습). 남은 파드가 요청을 받으므로 울리지 않는다.
@@ -381,7 +381,7 @@ tests:
               description: >-
                 Ready인 앱 파드가 0개라 앱 Service의 엔드포인트가 비었다. Traefik이 이 환경의 모든 요청에 503을 직접 돌려주고,
                 요청이 앱까지 가지 않아서 앱의 지표로 계산하는 SLO 경보는 이 장애를 보지 못한다.
-                흔한 원인은 DB 장애(앱의 readiness에 DB가 들어 있다)와 모든 파드의 시작 실패다. kubectl -n shortener-dev get pods로 파드의 상태와 이벤트를 본다.
+                흔한 원인은 모든 파드의 시작 실패와 노드 장애다(DB 장애는 readiness에 들어 있지 않아 파드를 NotReady로 만들지 않는다). kubectl -n shortener-dev get pods로 파드의 상태와 이벤트를 본다.
                 근거 지표는 Argo Rollouts 컨트롤러의 rollout_info_replicas_available(Rollout shortener-dev)이다.
       # 12분: 파드가 다시 Ready라 풀렸다(Alertmanager가 RESOLVED를 보낸다).
       - eval_time: 12m
@@ -452,7 +452,7 @@ tests:
               description: >-
                 Ready인 앱 파드가 0개라 앱 Service의 엔드포인트가 비었다. Traefik이 이 환경의 모든 요청에 503을 직접 돌려주고,
                 요청이 앱까지 가지 않아서 앱의 지표로 계산하는 SLO 경보는 이 장애를 보지 못한다.
-                흔한 원인은 DB 장애(앱의 readiness에 DB가 들어 있다)와 모든 파드의 시작 실패다. kubectl -n shortener-dev get pods로 파드의 상태와 이벤트를 본다.
+                흔한 원인은 모든 파드의 시작 실패와 노드 장애다(DB 장애는 readiness에 들어 있지 않아 파드를 NotReady로 만들지 않는다). kubectl -n shortener-dev get pods로 파드의 상태와 이벤트를 본다.
                 근거 지표는 Argo Rollouts 컨트롤러의 rollout_info_replicas_available(Rollout shortener-dev)이다.
       # 12분: 계열이 없으면 "파드가 없다"가 아니라 "잴 수 없다"라서 울리지 않는다(absent를 쓰지 않았다). 앱이 아직 내려가 있어도 경보는 풀린다.
       - eval_time: 12m
@@ -501,5 +501,5 @@ tests:
               description: >-
                 Ready인 앱 파드가 0개라 앱 Service의 엔드포인트가 비었다. Traefik이 이 환경의 모든 요청에 503을 직접 돌려주고,
                 요청이 앱까지 가지 않아서 앱의 지표로 계산하는 SLO 경보는 이 장애를 보지 못한다.
-                흔한 원인은 DB 장애(앱의 readiness에 DB가 들어 있다)와 모든 파드의 시작 실패다. kubectl -n shortener-dev get pods로 파드의 상태와 이벤트를 본다.
+                흔한 원인은 모든 파드의 시작 실패와 노드 장애다(DB 장애는 readiness에 들어 있지 않아 파드를 NotReady로 만들지 않는다). kubectl -n shortener-dev get pods로 파드의 상태와 이벤트를 본다.
                 근거 지표는 Argo Rollouts 컨트롤러의 rollout_info_replicas_available(Rollout shortener-dev)이다.

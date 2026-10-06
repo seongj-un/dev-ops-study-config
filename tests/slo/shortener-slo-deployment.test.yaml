@@ -41,7 +41,7 @@ tests:
               description: >-
                 Ready인 앱 파드가 0개라 앱 Service의 엔드포인트가 비었다. Traefik이 이 환경의 모든 요청에 503을 직접 돌려주고,
                 요청이 앱까지 가지 않아서 앱의 지표로 계산하는 SLO 경보는 이 장애를 보지 못한다.
-                흔한 원인은 DB 장애(앱의 readiness에 DB가 들어 있다)와 모든 파드의 시작 실패다. kubectl -n shortener-dev get pods로 파드의 상태와 이벤트를 본다.
+                흔한 원인은 모든 파드의 시작 실패와 노드 장애다(DB 장애는 readiness에 들어 있지 않아 파드를 NotReady로 만들지 않는다). kubectl -n shortener-dev get pods로 파드의 상태와 이벤트를 본다.
                 근거 지표는 kube-state-metrics의 kube_deployment_status_replicas_available(Deployment shortener-dev)이다.
       - eval_time: 7m
         alertname: ShortenerNoAvailablePods
@@ -94,5 +94,5 @@ tests:
               description: >-
                 Ready인 앱 파드가 0개라 앱 Service의 엔드포인트가 비었다. Traefik이 이 환경의 모든 요청에 503을 직접 돌려주고,
                 요청이 앱까지 가지 않아서 앱의 지표로 계산하는 SLO 경보는 이 장애를 보지 못한다.
-                흔한 원인은 DB 장애(앱의 readiness에 DB가 들어 있다)와 모든 파드의 시작 실패다. kubectl -n shortener-dev get pods로 파드의 상태와 이벤트를 본다.
+                흔한 원인은 모든 파드의 시작 실패와 노드 장애다(DB 장애는 readiness에 들어 있지 않아 파드를 NotReady로 만들지 않는다). kubectl -n shortener-dev get pods로 파드의 상태와 이벤트를 본다.
                 근거 지표는 kube-state-metrics의 kube_deployment_status_replicas_available(Deployment shortener-dev)이다.
