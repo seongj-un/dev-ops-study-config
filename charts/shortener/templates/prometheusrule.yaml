@@ -1,5 +1,6 @@
 {{- /*
-SLO 규칙(PrometheusRule). Prometheus Operator가 이 리소스를 Prometheus의 규칙 파일로 넣고, Prometheus가 평가 주기(30초)마다 규칙을 계산한다.
+SLO 규칙과 앱 파드 경보(PrometheusRule). Prometheus Operator가 이 리소스를 Prometheus의 규칙 파일로 넣고, Prometheus가 평가 주기(30초)마다 규칙을 계산한다.
+그룹이 둘이다: SLO의 기록 규칙·번 레이트 경보(<릴리스>-slo, 아래 [기록 규칙]~[레이블])와 앱 파드가 하나도 없을 때의 경보(<릴리스>-pods, 맨 아래 [앱 파드 경보]).
 SLO 정의 (숫자는 values.yaml의 slo):
   - SLI: 앱의 http_server_requests_seconds 히스토그램 중 이 릴리스의 것(namespace, job = 앱 Service 이름)에서 /actuator로 시작하는 요청을 뺀 것.
     actuator 요청은 사용자 요청이 아니다. 지금은 따로 둔 management 포트(8081)에서 처리되어 이 지표에 잡히지 않지만, 같은 포트로 합치면
@@ -46,6 +47,33 @@ SLO 정의 (숫자는 values.yaml의 slo):
   .Capabilities.APIVersions.Has는 그 목록과 문자열을 글자 그대로 비교한다. CRD가 설치되면 목록이 바뀌는데, ArgoCD의 렌더링 캐시 키에 이 목록이 들어 있어서
   다음 주기적 새로고침(기본 2분 + 최대 1분 지터) 때 다시 렌더링되고 이 리소스가 새로 나타난다(OutOfSync). 커밋은 그대로라 같은 커밋으로는 자동 동기화가
   다시 돌지 않지만, selfHeal(argocd/apps/shortener-<환경>.yaml)이 켜져 있어서 OutOfSync가 된 리소스를 동기화해 클러스터에 만든다.
+
+[앱 파드 경보] ShortenerNoAvailablePods: 요청을 받을 수 있는(Ready인) 앱 파드가 1분 넘게 0개면 울린다.
+  SLO 경보가 보지 못하는 장애를 맡는다. SLI는 앱 안에서 잰다. 앱 파드가 모두 NotReady가 되면 앱 Service의 엔드포인트가 비고, Traefik이 요청을 앱에 보내지 못해
+  503을 스스로 돌려준다. 그 요청은 앱의 지표에 남지 않아서 5xx 비율의 분모가 0이 되고(0 ÷ 0 = NaN) SLO 경보는 장애가 얼마나 이어지든 울리지 않는다.
+  v4 연습(prod, DB 차단 약 5분)이 그랬다: 앱 readiness에 DB가 들어 있어서 파드가 모두 NotReady가 되었고, 사용자는 503만 받았는데 경보도 Discord 알림도 없었다.
+  - 지표: 클러스터가 Rollout을 알면(_helpers.tpl의 shortener.rolloutEnabled. 이 차트가 Deployment 대신 Rollout을 만드는 조건과 같다) Argo Rollouts 컨트롤러의
+    rollout_info_replicas_available(Rollout의 status.availableReplicas = 그 Rollout의 모든 ReplicaSet의 available 파드 합. 레이블 namespace·name)을 읽는다.
+    Deployment를 만들 때는 kube-state-metrics의 kube_deployment_status_replicas_available(레이블 namespace·deployment)을 읽는다.
+    렌더링할 때 하나를 고르므로 규칙은 늘 실제로 있는 워크로드의 지표를 본다. Argo Rollouts 컨트롤러는 ReplicaSet의 상태가 바뀔 때마다(파드가 Ready가 되거나 빠질 때)
+    Rollout의 status를 다시 계산하고, 수집될 때 그 값을 내놓는다. 파드 하나가 Ready가 아닌 것과 달리, available 0은 그 환경에 요청을 받을 파드가 없다는 뜻이다.
+  - 레이블: Argo Rollouts 차트의 ServiceMonitor에는 honorLabels가 없어서(Prometheus Operator의 기본값 false. platform/argo-rollouts/values.yaml) 레이블 이름이 겹치면
+    Prometheus가 수집할 때 붙이는 대상 레이블이 이긴다.
+    지표의 namespace(Rollout의 네임스페이스)는 exported_namespace로 이름이 바뀌어 저장되고, namespace에는 컨트롤러의 네임스페이스 argo-rollouts가 붙는다.
+    그래서 Rollout은 exported_namespace·name으로 고른다(kube-state-metrics의 ServiceMonitor는 honorLabels: true라 지표의 namespace가 그대로 남는다).
+  - max로 묶는다: 결과에서 수집 대상의 레이블(컨트롤러 파드의 pod·instance, namespace="argo-rollouts" 등)을 지운다. 그대로 두면 컨트롤러 파드가 다시 뜰 때마다
+    pod 레이블이 바뀌어 경보가 풀렸다가 처음부터(pending) 다시 울리고, namespace도 앱의 네임스페이스가 아니게 된다. 대신 namespace·job을 경보의 labels에
+    렌더링할 때 적어 넣어 SLO 경보와 같은 모양(Alertmanager가 alertname·namespace로 묶는다)이 되게 한다. 같은 이유로 요약도 Prometheus 템플릿($labels) 대신
+    Helm이 네임스페이스를 적어 넣는다($labels는 식의 결과에 있는 레이블만 보이고 labels에 적은 것은 보이지 않는다).
+  - for: 1m: 1분 동안 계속 0이어야 울린다. 배포 중에는 0이 되지 않는다: 카나리와 롤링 업데이트 모두 maxUnavailable 0이라 새 파드가 Ready가 되어야 옛 파드를 내린다.
+    파드 하나가 죽어도(v4의 파드 삭제 연습) 다른 파드가 남아 있어 울리지 않는다. 1분은 노드의 순간 장애로 잠깐 0이 된 것을 거르면서, SLO 경보(가장 빨라도 약 7분)보다
+    훨씬 빨리 알리는 값이다. DB가 죽으면 readiness 실패(5초 × 3번) + 수집(최대 30초) + 평가(최대 30초) + for 1분 + Alertmanager의 group_wait 30초로 약 2~3분 안에 Discord에 닿는다.
+  - 지표가 없으면 울리지 않는다(absent를 쓰지 않는다). 계열이 없다는 것은 파드가 없다는 뜻이 아니라 잴 수 없다는 뜻이라서다: 컨트롤러나 kube-state-metrics가
+    내려갔거나 아직 수집되지 않았다(워크로드가 있으면 파드가 0개여도 계열은 0으로 있다). 그때 "파드가 없다"고 Discord를 울리면 틀린 경보다. 대가로 앱 장애와 컨트롤러 장애가
+    겹치면 이 경보도 조용하다(수집 대상이 내려간 것은 차트의 기본 규칙 TargetDown이 알리지만 warning이라 Discord로 가지 않는다).
+  - 새 클러스터를 처음 띄울 때 앱 파드가 1분 넘게 Ready가 되지 못하면(DB가 아직 뜨는 중 등) 한 번 울릴 수 있다. 그때는 실제로 요청을 받을 파드가 없다.
+    Deployment에서 Rollout으로 옮기는 동기화(README의 카나리 배포)에서는 규칙이 Rollout과 함께 Rollout의 지표로 바뀌므로, Rollout의 첫 파드가 1분 넘게 Ready가
+    되지 못하면 옛 Deployment의 파드가 아직 요청을 받고 있어도 울린다(틀린 경보). dev·prod는 이미 옮겼으니 새 클러스터에서만 생길 수 있다.
 */ -}}
 {{- if and .Values.slo.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PrometheusRule") }}
 {{- $namespace := .Release.Namespace }}
@@ -137,4 +165,36 @@ spec:
               오류 예산은 요청의 {{ $latencyBudget }}%다.
               1시간·5분 비율이 모두 예산의 14.4배({{ round (mulf 14.4 $latencyBudget) 6 }}%)를 넘었거나 6시간·30분 비율이 모두 6배({{ round (mulf 6 $latencyBudget) 6 }}%)를 넘었다.
               이 속도가 이어지면 30일치 예산이 14.4배에서는 약 2일, 6배에서는 5일 만에 바닥난다.
+    {{- /*
+    앱 파드 경보(머리말의 [앱 파드 경보]). 기록 규칙을 읽지 않으므로 SLO 그룹과 따로 둔다(그룹은 서로 따로 평가된다).
+    식의 지표는 렌더링할 때 고른다: Rollout을 만들면 Argo Rollouts 컨트롤러의 지표, Deployment를 만들면 kube-state-metrics의 지표다.
+    labels의 namespace·job은 식이 max로 지운 레이블을 이 릴리스의 값으로 다시 붙이는 것이다(SLO 경보의 namespace·job과 같은 값).
+    */}}
+    {{- $rollout := include "shortener.rolloutEnabled" . }}
+    - name: {{ $job }}-pods
+      rules:
+        - alert: ShortenerNoAvailablePods
+          expr: |-
+            {{- if $rollout }}
+            max(rollout_info_replicas_available{exported_namespace="{{ $namespace }}", name="{{ $job }}"}) == 0
+            {{- else }}
+            max(kube_deployment_status_replicas_available{namespace="{{ $namespace }}", deployment="{{ $job }}"}) == 0
+            {{- end }}
+          for: 1m
+          labels:
+            severity: critical
+            service: shortener
+            namespace: {{ $namespace }}
+            job: {{ $job }}
+          annotations:
+            summary: '{{ $namespace }}: 요청을 받을 수 있는 앱 파드가 1분 넘게 하나도 없다'
+            description: >-
+              Ready인 앱 파드가 0개라 앱 Service의 엔드포인트가 비었다. Traefik이 이 환경의 모든 요청에 503을 직접 돌려주고,
+              요청이 앱까지 가지 않아서 앱의 지표로 계산하는 SLO 경보는 이 장애를 보지 못한다.
+              흔한 원인은 DB 장애(앱의 readiness에 DB가 들어 있다)와 모든 파드의 시작 실패다. kubectl -n {{ $namespace }} get pods로 파드의 상태와 이벤트를 본다.
+              {{- if $rollout }}
+              근거 지표는 Argo Rollouts 컨트롤러의 rollout_info_replicas_available(Rollout {{ $job }})이다.
+              {{- else }}
+              근거 지표는 kube-state-metrics의 kube_deployment_status_replicas_available(Deployment {{ $job }})이다.
+              {{- end }}
 {{- end }}

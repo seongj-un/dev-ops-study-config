@@ -301,7 +301,7 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 | 경보 | 가는 곳 |
 |---|---|
 | `Watchdog`(경보 파이프라인이 살아 있음을 보이려고 늘 울리는 경보), `InfoInhibitor`(info 경보를 누르는 데만 쓰는 경보. 같은 네임스페이스에 info 경보가 있고 warning·critical 경보는 울리지 않을 때만 울린다) | 보내지 않는다(`null`) |
-| `service="shortener"` (앱의 SLO 경보) | Discord |
+| `service="shortener"` (앱의 SLO 경보와 앱 파드 경보) | Discord |
 | `severity="critical"` (그 밖의 critical 경보) | Discord |
 | 나머지(warning·info) | 보내지 않는다. Alertmanager UI에서 본다 |
 
@@ -309,6 +309,45 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 - Discord 웹훅 주소는 Git에 없다. 부트스트랩이 SSM 파라미터 `/dev-ops-study/discord-webhook-url`의 값으로 Secret `alertmanager-discord`(키 `webhook-url`)를 만들고,
   Alertmanager가 그 파일(`/etc/alertmanager/secrets/alertmanager-discord/webhook-url`)을 알림을 보낼 때마다 읽는다. 주소를 바꾸는 방법은 `infra/aws/README.md`.
 - 클러스터 없이 라우팅을 확인하는 방법은 아래 "로컬에서 검증하기"에 있다.
+
+### SLO 경보가 울리지 않는 장애
+
+앱의 SLO 경보(가용성·지연 번 레이트, `charts/shortener/templates/prometheusrule.yaml`)는 짧거나 일부만 실패하는 장애에는 일부러 울리지 않는다.
+그리고 요청이 앱까지 오지 않는 장애는 길어도 보지 못한다. 두 번째 빈자리는 앱 파드 경보가 맡는다.
+
+**짧은 장애·부분 장애는 페이지하지 않는다(예산 계산).** 가용성의 30일 오류 예산은 요청의 0.5%다. 요청이 고르게 온다면 "모든 요청이 실패하는 시간"으로
+30일 × 24시간 × 60분 × 0.5% = 216분이다. 빠른 소진 경보는 1시간 비율과 5분 비율이 모두 7.2%(예산의 14.4배)를 넘고 그것이 2분 이어져야 울린다.
+1시간 비율은 실패 비율 × 지속 시간 ÷ 60분이므로, 장애가 페이지가 되려면 **실패 비율 × 지속 시간이 4.32분을 넘어야** 한다(14.4배로 1시간 = 30일 예산의 2%).
+
+| 앱이 본 장애 | 1시간 비율의 최고 | 쓴 예산(216분 중) | 페이지 |
+|---|---|---|---|
+| 100%가 3분 | 5% | 3분(1.4%) | 없다 |
+| 100%가 5분 | 8.3% | 5분(2.3%) | 시작 약 6~7분 뒤(4.3분에 기준을 넘고 for 2분) |
+| 50%가 5분 | 4.2% | 2.5분(1.2%) | 없다 |
+| 20%가 계속 | 20% | 시간에 비례 | 시작 약 24분 뒤(21.6분에 기준을 넘고 for 2분) |
+| 4%(예산의 8배)가 계속 | 4% | 시간에 비례 | 1시간·5분 짝은 울리지 않는다. 6시간·30분 짝이 약 4.5시간 뒤(`tests/slo`의 (e)) |
+
+몇 분짜리 장애는 30일 예산의 1~2%를 쓴다. 이 설계는 그 정도로는 사람을 부르지 않고, "이 속도가 이어지면 며칠 안에 예산이 바닥난다"일 때만 부른다.
+짧은 장애의 흔적은 대시보드의 비율 그래프와 Loki의 로그에 남는다. 지연도 같다: v4 연습의 Redis 차단(약 4분 동안 GET마다 약 1초)에서 5분 창의 느린 요청 비율은
+18.5%로 기준 14.4%(지연 예산 1%의 14.4배)를 넘었지만 1시간 비율이 1.0%라 울리지 않았다.
+
+**요청이 앱까지 오지 않으면 SLO에 보이지 않는다.** SLI는 앱 안에서 재는 `http_server_requests` 지표다. 앱 파드가 모두 NotReady가 되면(앱의 readiness에 DB가 들어 있어
+DB 장애가 곧 이것이다) 앱 Service의 엔드포인트가 비고 Traefik이 503을 스스로 돌려준다. 그 요청은 앱의 지표에 남지 않아서 비율의 분모가 0(NaN)이 되고,
+장애가 얼마나 길든 SLO 경보는 울리지 않는다. v4 연습(prod, DB 차단)에서 약 5분 동안 요청의 거의 전부가 503이었는데 경보도 Discord 알림도 없었다
+(기본 규칙 `KubePodNotReady`가 pending이었을 뿐이다. 그 경보는 warning이고 15분을 기다린다).
+
+**전체 장애는 앱 파드 경보가 맡는다.** `ShortenerNoAvailablePods`(같은 PrometheusRule의 `<릴리스>-pods` 그룹)는 Ready인 앱 파드가 1분 넘게 0개면 울리고,
+`service="shortener"`·`severity="critical"`이라 Discord로 간다. 장애가 시작되고 약 2~3분이면 닿는다. 지표는 Argo Rollouts 컨트롤러의 `rollout_info_replicas_available`이고
+(앱이 Deployment로 배포된 클러스터에서는 kube-state-metrics의 `kube_deployment_status_replicas_available`), 고른 이유와 한계는 그 파일 머리말의 [앱 파드 경보]에 있다.
+처음 배포한 뒤 Prometheus에서 `count by (exported_namespace, name) (rollout_info_replicas_available)`가 `shortener-dev`·`shortener-prod`를 하나씩 내는지 본다.
+경보는 이 레이블 이름(`exported_namespace`, `name`)으로 Rollout을 고르므로, 이름이 다르면 아무 경고 없이 영영 울리지 않는다.
+
+**아직 덮지 못하는 것.**
+- 앱 파드는 Ready인데 그 앞(Traefik, Ingress 설정, 노드의 네트워크)에서 실패하는 요청: 앱 지표에도 파드 수에도 보이지 않는다. 클러스터 밖에서 요청을 보내 보는 검사나
+  Traefik의 지표로 재는 SLI가 있어야 잡힌다.
+- 노드가 통째로 멈추는 장애: Prometheus와 Alertmanager도 그 노드에 있어서 아무 경보도 나가지 않는다. Watchdog을 보내지 않으므로(위 표) "경보가 끊겼다"를 알려 줄 쪽도 없다.
+- 앱 파드 경보는 지표가 없으면 울리지 않는다. Argo Rollouts 컨트롤러가 내려가 있는 동안 앱도 내려가면 조용하다(수집 대상이 내려간 것은 기본 규칙 `TargetDown`이 알리지만 warning이다).
+- 위 표의 기준 아래인 부분 장애: 일부러 페이지하지 않는다.
 
 ### 로그 (Loki, Alloy)
 
@@ -412,6 +451,9 @@ kubectl -n argo-rollouts port-forward svc/argo-rollouts-dashboard 3100:3100     
 - **대시보드를 켰다**(차트 기본값은 꺼짐). ClusterIP이고 Ingress·HTTPRoute는 없으며 Rollout·Deployment 쓰기 권한이 없다(위).
 - **지표**: 컨트롤러의 지표 Service(`argo-rollouts-metrics`, 8090)와 ServiceMonitor를 켰다(차트 기본값은 둘 다 꺼짐). Prometheus는 레이블 없이 모든 네임스페이스의 ServiceMonitor를 고르므로 따로 설정할 것이 없다.
   위 "열어 보기"의 Prometheus port-forward 뒤 `up{job="argo-rollouts-metrics"}`가 1이고 `argo_rollouts_controller_info`가 나오는지 본다. Rollout이 생기면 `rollout_info`도 나온다.
+  앱 차트의 앱 파드 경보가 이 지표(`rollout_info_replicas_available`)를 읽는다(위 "SLO 경보가 울리지 않는 장애"). 이 차트의 ServiceMonitor에는 `honorLabels`가 없어서
+  (Prometheus Operator의 기본값 false) 지표의 `namespace`(Rollout의 네임스페이스)는 `exported_namespace`로 바뀌어 저장되고 `namespace`에는 `argo-rollouts`가 붙는다.
+  경보가 그 이름으로 Rollout을 고르므로, 값 파일의 `relabelings`·`metricRelabelings`로 레이블을 바꾸면 `charts/shortener/templates/prometheusrule.yaml`의 식도 함께 바꾼다.
 - **알림은 쓰지 않는다.** 차트에는 알림을 끄는 스위치가 없어서, 설정을 담는 ConfigMap과 토큰을 담는 Secret을 둘 다 만들지 않았다. 컨트롤러는 둘이 없으면 빈 설정으로 읽고 아무것도 보내지 않는다.
 - **트래픽 라우터 권한을 뺐다**(`providerRBAC.enabled: false`와 `providers.gatewayAPI: false`). 컨트롤러의 ClusterRole에서 Istio·SMI·Ambassador·AWS ALB·App Mesh·Traefik·Apisix·Contour·Gloo·Gateway API용 규칙이 빠져
   렌더링한 ClusterRole이 약 290줄에서 약 165줄로 준다. 이 저장소는 트래픽 라우터 없이 파드 수의 비율로 나누는 기본 카나리만 쓰므로 쓸 곳이 없는 규칙이다(트래픽 라우터를 쓰게 되면 다시 켠다).
@@ -487,19 +529,27 @@ mkdir -p tests/slo/rendered     # 렌더링해서 꺼낸 SLO 규칙을 둘 곳(.
 for env in dev prod; do
   diff <(yq '.' environments/$env/values.yaml) environments/$env/values.yaml     # 값 파일이 yq가 쓰는 모양인가 (출력이 없어야 한다)
   helm lint charts/shortener --strict --kube-version $KUBERNETES_VERSION -f environments/$env/values.yaml
-  # --api-versions: 모니터링 CRD가 있는 클러스터처럼 렌더링해서 ServiceMonitor·PrometheusRule도 나오게 한다(ArgoCD는 클러스터의 API 목록을 넘긴다)
+  # --api-versions: 모니터링 CRD와 Argo Rollouts가 있는 클러스터(지금의 EC2)처럼 렌더링해서 ServiceMonitor·PrometheusRule·Rollout·AnalysisTemplate도 나오게 한다
+  # (ArgoCD는 클러스터의 API 목록을 넘긴다)
   helm template shortener-$env charts/shortener --namespace shortener-$env --kube-version $KUBERNETES_VERSION \
     --api-versions monitoring.coreos.com/v1 --api-versions monitoring.coreos.com/v1/ServiceMonitor --api-versions monitoring.coreos.com/v1/PrometheusRule \
+    --api-versions argoproj.io/v1alpha1 --api-versions argoproj.io/v1alpha1/Rollout --api-versions argoproj.io/v1alpha1/AnalysisTemplate \
     -f environments/$env/values.yaml > $out/shortener-$env.yaml
   docker run -i --rm $KUBECONFORM_IMAGE -strict -summary -schema-location "$K8S_SCHEMA_LOCATION" -schema-location "$CRD_SCHEMA_LOCATION" \
     -kubernetes-version $KUBERNETES_VERSION - < $out/shortener-$env.yaml
   yq 'select(.kind == "PrometheusRule") | .spec' $out/shortener-$env.yaml > tests/slo/rendered/shortener-$env.yaml
+  # 앱 파드 경보는 Argo Rollouts가 없는 클러스터(앱이 Deployment)에서 다른 지표를 읽으므로 그 갈래의 규칙도 꺼낸다
+  helm template shortener-$env charts/shortener --namespace shortener-$env --kube-version $KUBERNETES_VERSION \
+    --api-versions monitoring.coreos.com/v1/PrometheusRule -f environments/$env/values.yaml \
+    | yq 'select(.kind == "PrometheusRule") | .spec' > tests/slo/rendered/shortener-$env-deployment.yaml
 done
 
-# SLO 규칙: promtool로 문법을 검사하고 단위 테스트(tests/slo/shortener-slo.test.yaml)를 돌린다
+# SLO 규칙과 앱 파드 경보: promtool로 문법을 검사하고 단위 테스트(tests/slo/의 두 테스트 파일)를 돌린다
 docker run --rm -v "$PWD/tests/slo:/slo:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
-  check rules --lint-fatal /slo/rendered/shortener-dev.yaml /slo/rendered/shortener-prod.yaml
-docker run --rm -v "$PWD/tests/slo:/slo:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" test rules /slo/shortener-slo.test.yaml
+  check rules --lint-fatal /slo/rendered/shortener-dev.yaml /slo/rendered/shortener-prod.yaml \
+  /slo/rendered/shortener-dev-deployment.yaml /slo/rendered/shortener-prod-deployment.yaml
+docker run --rm -v "$PWD/tests/slo:/slo:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
+  test rules /slo/shortener-slo.test.yaml /slo/shortener-slo-deployment.test.yaml
 
 docker run --rm -v "$PWD":/work:ro -w /work $KUBECONFORM_IMAGE -strict -summary \
   -schema-location "$K8S_SCHEMA_LOCATION" -schema-location "$CRD_SCHEMA_LOCATION" -kubernetes-version $KUBERNETES_VERSION argocd/
@@ -676,7 +726,7 @@ AnalysisRun을 만들 때 Argo Rollouts가 카나리 ReplicaSet의 해시를 쿼
   그래서 1단계에서 1분을 기다린 뒤 2단계에서 30초 간격으로 4번(`count: 4`) 잰다. 4번째 측정이 끝나면(약 1분 30초) 분석이 끝나고, 실패가 한 번 이하면 승격한다.
   예전 설정(2분 대기와 나란히 도는 백그라운드 분석)에서는 대기가 시작되자마자 쟀기 때문에 처음 두 측정이 빈 결과였고(v2 연습의 정상 카나리에서도 `[]`, `[]`, 그다음부터 `[0]`), 나쁜 버전도 3·4번째 측정에서야 잡혔다.
   게다가 백그라운드 분석은 승격을 기다리게 하지 않아서, 대기가 끝나면 분석이 아직 판정하지 못했어도 승격했다. 자세한 이유는 `rollout.yaml` 머리말의 [분석]에 있다.
-- 분석은 승격 앞에서 끝난다. 카나리를 전체로 늘리는 몇십 초와 그 뒤는 SLO 경보(위 "경보가 가는 길")가 본다.
+- 분석은 승격 앞에서 끝난다. 카나리를 전체로 늘리는 몇십 초와 그 뒤는 SLO 경보와 앱 파드 경보(위 "SLO 경보가 울리지 않는 장애")가 본다.
 - 이웃한 두 측정의 1분 창은 30초씩 겹친다. 그래서 30초보다 짧은 5xx 몰림 하나도 두 측정에 함께 잡혀 중단될 수 있다(`failureLimit: 1`이 봐주는 것은 측정 한 번의 실패다).
 - 쿼리는 CI의 "카나리 분석 쿼리 검사" 단계가 promtool로 시험한다(`tests/canary/analysis.test.yaml`). 판정 식은 Argo Rollouts의 식(expr)이라 CI에서는 시험하지 않는다
   (Argo Rollouts v1.10.0과 같은 expr 라이브러리 v1.17.7로 빈 결과·NaN·0.0499·0.05·0.5를 넣어 위 표대로 나오는 것을 확인했다).
@@ -762,7 +812,7 @@ CI 단계의 스크립트를 그대로 꺼내 돌린다. 위 "로컬에서 검�
 export KUBERNETES_VERSION KUBECONFORM_IMAGE K8S_SCHEMA_LOCATION CRD_SCHEMA_LOCATION PROMETHEUS_IMAGE
 export RUNNER_TEMP=$(mktemp -d) GITHUB_WORKSPACE=$PWD
 for step in "렌더링 + 쿠버네티스 스키마 검사 (dev, prod × Rollout, Deployment)" "앱 워크로드 두 갈래 확인 (Rollout, Deployment)" \
-            "카나리 분석 쿼리 검사 (promtool check + test)"; do
+            "SLO 규칙 검사 (promtool check + test)" "카나리 분석 쿼리 검사 (promtool check + test)"; do
   bash -e -c "$(yq ".jobs.validate.steps[] | select(.name == \"$step\") | .run" .github/workflows/validate.yml)" || break
 done
 ```
