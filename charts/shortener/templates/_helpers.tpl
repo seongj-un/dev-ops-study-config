@@ -286,7 +286,7 @@ spec:
       {{- /*
       livenessProbe: 프로세스가 응답 불능(교착, 무한 루프 등)에 빠졌는지만 본다. 3번 연속 실패하면 kubelet이 컨테이너를 재시작한다.
       앱의 liveness 그룹에는 DB·Redis 같은 외부 의존성이 들어 있지 않다. 외부 장애 때 liveness까지 실패하면 멀쩡한 앱 파드 전부가 재시작을 되풀이해서
-      DB가 돌아와도 복구가 더 늦어진다. 외부 의존성은 아래 readiness가 맡는다.
+      DB가 돌아와도 복구가 더 늦어진다.
       */}}
       livenessProbe:
         httpGet:
@@ -297,7 +297,9 @@ spec:
         failureThreshold: 3
       {{- /*
       readinessProbe: 트래픽을 받을 준비가 됐는지 본다. 실패하면 재시작하지 않고, 이 파드를 Service의 엔드포인트에서 뺀다(성공하면 다시 넣는다).
-      앱의 readiness 그룹에는 DB가 들어 있어서, DB가 죽은 동안에는 요청을 받지 않는다. Redis는 죽어도 DB로 버틸 수 있어서 넣지 않았다.
+      앱의 readiness는 readinessState(앱이 시작을 마쳤고 종료 중이 아님)만 본다. DB·Redis 같은 외부 의존성은 넣지 않았다.
+      DB가 죽어도 파드가 Ready로 남아야 Redis 캐시에 있는 리다이렉트는 계속 응답하고, DB가 필요한 요청의 실패는 앱이 기록하는 5xx로 SLO 경보에 보인다.
+      DB 때문에 파드를 엔드포인트에서 빼면 캐시로 응답할 수 있는 요청까지 Traefik의 503이 되고, 앱의 지표에는 남지 않는다.
       롤링 업데이트(Rollout의 카나리도 같다)에서는 새 파드가 이 프로브를 통과해야 옛 파드가 내려간다.
       */}}
       readinessProbe:

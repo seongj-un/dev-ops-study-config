@@ -2,10 +2,11 @@
 helm test가 실행하는 검사 파드: 이 릴리스의 앱 Service를 management 포트(8081)로 불러서 readiness 엔드포인트가 성공(HTTP 2xx)하는지 본다.
   helm test <릴리스> -n <네임스페이스>
 클러스터 안에서 Service의 DNS 이름으로 접속하므로 Service → 파드 경로(셀렉터, 포트 이름, management 포트)까지 함께 확인된다.
-앱의 readiness 그룹에는 DB 연결이 들어 있어서, 통과하면 앱에서 PostgreSQL까지 이어져 있다는 뜻이다.
+앱의 readiness는 readinessState만 본다(DB·Redis는 보지 않는다). 통과하면 앱이 시작을 마쳤고 Service → 파드 경로가 이어져 있다는 뜻이고, DB 연결은 이 검사로 알 수 없다.
+DB가 죽어도 파드가 Ready로 남아야 캐시된 리다이렉트가 계속 응답하고, 실패는 앱이 기록하는 5xx로 SLO에 보이기 때문이다.
 busybox의 wget은 HTTP 4xx·5xx 응답과 연결 실패에 0이 아닌 종료 코드를 돌려준다(그때 파드가 Failed가 되어 테스트가 실패한다).
 성공하면 응답 본문이 로그에 남지만, 실패했을 때는 "server returned error: HTTP/1.1 503" 한 줄만 남고 본문은 찍지 않는다.
-어느 구성요소가 DOWN인지 보려면 kubectl -n <네임스페이스> port-forward svc/<릴리스> 8081:8081로 연 뒤 curl localhost:8081/actuator/health/readiness로 본문을 확인한다.
+본문(UP 또는 OUT_OF_SERVICE)을 보려면 kubectl -n <네임스페이스> port-forward svc/<릴리스> 8081:8081로 연 뒤 curl localhost:8081/actuator/health/readiness를 실행한다.
 이 파드는 ArgoCD가 배포한 릴리스에서는 쓸 수 없다. ArgoCD는 helm template으로 렌더링만 하고 Helm 릴리스를 만들지 않아서 helm test가 찾을 릴리스가 없고,
 helm.sh/hook: test는 ArgoCD가 실행하는 훅 종류(PreSync·Sync·PostSync·SyncFail)에 대응하지 않아서 ArgoCD는 이 파드를 클러스터에 만들지 않고 건너뛴다.
 helm install로 직접 설치한 클러스터에서만 helm test로 쓴다. helm template의 출력에는 이 파드도 들어가므로 저장소의 검증(kubeconform 스키마 검사)은 받는다.

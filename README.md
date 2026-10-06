@@ -238,7 +238,7 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 
 ### `helm.sh/hook: test` 파드는 어떻게 되나
 
-차트의 `templates/tests/test-readiness.yaml`은 `helm.sh/hook: test` 파드다(`helm test`가 readiness 엔드포인트를 확인한다). **ArgoCD는 이 파드를 만들지도 실행하지도 않고 건너뛴다.**
+차트의 `templates/tests/test-readiness.yaml`은 `helm.sh/hook: test` 파드다(`helm test`가 readiness 엔드포인트를 확인한다. 앱의 readiness는 readinessState만 본다: DB가 죽어도 파드가 Ready로 남아 캐시된 리다이렉트가 계속 응답하고, 실패는 앱이 기록하는 5xx로 보인다). **ArgoCD는 이 파드를 만들지도 실행하지도 않고 건너뛴다.**
 
 - 근거(문서): ArgoCD 사용자 가이드 Helm 절 — "Argo CD currently skips manifests that include hooks not supported by Argo CD, including Helm test hooks."
 - 근거(소스, ArgoCD v3.5.3의 `gitops-engine/pkg/sync`): `helm.sh/hook` 어노테이션이 있으면(`crd-install` 제외) 훅으로 분류되어 일반 리소스 목록에서 빠진다(`hook.IsHook`, `reconcile.go`).
@@ -331,8 +331,8 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 짧은 장애의 흔적은 대시보드의 비율 그래프와 Loki의 로그에 남는다. 지연도 같다: v4 연습의 Redis 차단(약 4분 동안 GET마다 약 1초)에서 5분 창의 느린 요청 비율은
 18.5%로 기준 14.4%(지연 예산 1%의 14.4배)를 넘었지만 1시간 비율이 1.0%라 울리지 않았다.
 
-**요청이 앱까지 오지 않으면 SLO에 보이지 않는다.** SLI는 앱 안에서 재는 `http_server_requests` 지표다. 앱 파드가 모두 NotReady가 되면(앱의 readiness에 DB가 들어 있어
-DB 장애가 곧 이것이다) 앱 Service의 엔드포인트가 비고 Traefik이 503을 스스로 돌려준다. 그 요청은 앱의 지표에 남지 않아서 비율의 분모가 0(NaN)이 되고,
+**요청이 앱까지 오지 않으면 SLO에 보이지 않는다.** SLI는 앱 안에서 재는 `http_server_requests` 지표다. 앱 파드가 모두 NotReady가 되면(예전에는 앱의 readiness에 DB가 들어 있어 DB 장애가 곧 이것이었다.
+지금은 readinessState만 봐서 DB 장애는 앱이 기록하는 5xx로 SLO에 보이고, 모든 파드의 시작 실패 같은 경우가 남는다) 앱 Service의 엔드포인트가 비고 Traefik이 503을 스스로 돌려준다. 그 요청은 앱의 지표에 남지 않아서 비율의 분모가 0(NaN)이 되고,
 장애가 얼마나 길든 SLO 경보는 울리지 않는다. v4 연습(prod, DB 차단)에서 약 5분 동안 요청의 거의 전부가 503이었는데 경보도 Discord 알림도 없었다
 (기본 규칙 `KubePodNotReady`가 pending이었을 뿐이다. 그 경보는 warning이고 15분을 기다린다).
 
@@ -790,7 +790,7 @@ Argo Rollouts가 설치된 클러스터에 이 차트가 처음 반영되는 동
 - 옛 Deployment는 Git에서 사라졌지만 `PruneLast=true`(`argocd/apps/shortener-<환경>.yaml`) 때문에 Rollout이 `Healthy`가 된 뒤에야 지워진다. 그 사이에는 앱 Service가 셀렉터가 같은
   두 쪽 파드에 요청을 나눈다. 두 쪽은 서로의 파드를 가져가지 않는다(각자 만든 ReplicaSet만 관리한다).
 - **prod는 요청이 끊기지 않고 옮겨진다. dev는 잠깐 끊긴다.** dev는 같은 동기화에서 PostgreSQL의 인자(`max_connections` 30 → 50)도 바뀌어 StatefulSet이 PostgreSQL 파드를 다시 띄우므로,
-  그동안(수십 초) DB를 쓰는 요청이 실패한다. 길어지면 DB가 든 readiness도 실패해 앱 파드가 엔드포인트에서 빠지고, Rollout의 새 파드도 DB가 돌아와야 Ready가 된다.
+  그동안(수십 초) DB를 쓰는 요청이 실패한다. readiness는 DB를 보지 않아서 파드는 Ready로 남고(캐시된 리다이렉트는 응답한다), DB가 필요한 요청만 5xx가 된다.
 - HPA는 Rollout을 가리키게 바뀌고, 옛 Deployment의 파드 수는 지워질 때까지 그대로다. prod가 부하로 3개까지 늘어난 채 옮기면 잠깐 앱 파드가 6개(커넥션 60개)까지 떠서
   PostgreSQL 예산(일반 계정 57개)을 넘을 수 있으므로 부하가 없을 때 옮긴다.
 - 이 동기화는 지우기 전에 리소스가 `Healthy`가 되기를 기다리다가 그중 하나가 잠깐 `Degraded`로 보이면 실패로 끝난다. 그래도 Deployment는 지워지지 않은 채 요청을 받고,
