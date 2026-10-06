@@ -322,9 +322,9 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 | 앱이 본 장애 | 1시간 비율의 최고 | 쓴 예산(216분 중) | 페이지 |
 |---|---|---|---|
 | 100%가 3분 | 5% | 3분(1.4%) | 없다 |
-| 100%가 5분 | 8.3% | 5분(2.3%) | 시작 약 6~7분 뒤(4.3분에 기준을 넘고 for 2분) |
+| 100%가 5분 | 8.3% | 5분(2.3%) | 시작 약 6.3분 뒤(4.3분에 기준을 넘고 for 2분) |
 | 50%가 5분 | 4.2% | 2.5분(1.2%) | 없다 |
-| 20%가 계속 | 20% | 시간에 비례 | 시작 약 24분 뒤(21.6분에 기준을 넘고 for 2분) |
+| 20%가 계속 | 20% | 시간에 비례 | 시작 약 23.6분 뒤(21.6분에 기준을 넘고 for 2분) |
 | 4%(예산의 8배)가 계속 | 4% | 시간에 비례 | 1시간·5분 짝은 울리지 않는다. 6시간·30분 짝이 약 4.5시간 뒤(`tests/slo`의 (e)) |
 
 몇 분짜리 장애는 30일 예산의 1~2%를 쓴다. 이 설계는 그 정도로는 사람을 부르지 않고, "이 속도가 이어지면 며칠 안에 예산이 바닥난다"일 때만 부른다.
@@ -339,6 +339,8 @@ DB 장애가 곧 이것이다) 앱 Service의 엔드포인트가 비고 Traefik�
 **전체 장애는 앱 파드 경보가 맡는다.** `ShortenerNoAvailablePods`(같은 PrometheusRule의 `<릴리스>-pods` 그룹)는 Ready인 앱 파드가 1분 넘게 0개면 울리고,
 `service="shortener"`·`severity="critical"`이라 Discord로 간다. 장애가 시작되고 약 2~3분이면 닿는다. 지표는 Argo Rollouts 컨트롤러의 `rollout_info_replicas_available`이고
 (앱이 Deployment로 배포된 클러스터에서는 kube-state-metrics의 `kube_deployment_status_replicas_available`), 고른 이유와 한계는 그 파일 머리말의 [앱 파드 경보]에 있다.
+노드가 부팅되고 5분 동안은 울리지 않는다(`and on() (time() - max(node_boot_time_seconds) > 300)`). EC2를 켤 때마다 모든 앱 파드가 한꺼번에 다시 떠서
+available 0이 1분을 넘기 쉬운데, 그때마다 critical이 Discord로 가면 평소의 시작이 장애처럼 보이기 때문이다.
 처음 배포한 뒤 Prometheus에서 `count by (exported_namespace, name) (rollout_info_replicas_available)`가 `shortener-dev`·`shortener-prod`를 하나씩 내는지 본다.
 경보는 이 레이블 이름(`exported_namespace`, `name`)으로 Rollout을 고르므로, 이름이 다르면 아무 경고 없이 영영 울리지 않는다.
 
@@ -348,6 +350,7 @@ DB 장애가 곧 이것이다) 앱 Service의 엔드포인트가 비고 Traefik�
 - 노드가 통째로 멈추는 장애: Prometheus와 Alertmanager도 그 노드에 있어서 아무 경보도 나가지 않는다. Watchdog을 보내지 않으므로(위 표) "경보가 끊겼다"를 알려 줄 쪽도 없다.
 - 앱 파드 경보는 지표가 없으면 울리지 않는다. Argo Rollouts 컨트롤러가 내려가 있는 동안 앱도 내려가면 조용하다(수집 대상이 내려간 것은 기본 규칙 `TargetDown`이 알리지만 warning이다).
 - 위 표의 기준 아래인 부분 장애: 일부러 페이지하지 않는다.
+- 노드가 부팅되고 5분 안의 전체 장애: 앱 파드 경보의 부팅 가드가 누른다. 5분이 지나도 앱 파드가 0개면 그때부터 1분 뒤에 울린다.
 
 ### 로그 (Loki, Alloy)
 

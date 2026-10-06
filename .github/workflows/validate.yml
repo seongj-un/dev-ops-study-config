@@ -212,8 +212,8 @@ jobs:
       #   2) promtool check rules: YAML 구조, PromQL 문법, 어노테이션의 템플릿 문법, 같은 규칙의 중복을 검사한다(--lint-fatal: 중복 경고도 실패로 본다).
       #   3) promtool test rules: 테스트 파일이 가짜 시계열을 넣고, 정한 시각에 울려야 할 알림과 울리지 않아야 할 알림을 확인한다.
       #      tests/slo/shortener-slo.test.yaml은 Rollout 갈래의 두 환경 규칙을 함께 읽는다(5xx 100%, 5xx 0.1%, 20%가 느린 요청, 요청 없음, 5xx 4%의 느린 소진,
-      #      le 버킷이 없는 옛 파드와 있는 새 파드가 섞인 롤아웃, le 버킷이 없는 앱, 앱 파드 0개·순간 0개·컨트롤러 교체와 지표 없음).
-      #      tests/slo/shortener-slo-deployment.test.yaml은 Deployment 갈래의 앱 파드 경보만 본다(앱 Deployment 0개, 다른 Deployment 0개, 지표 없음).
+      #      le 버킷이 없는 옛 파드와 있는 새 파드가 섞인 롤아웃, le 버킷이 없는 앱, 앱 파드 0개·순간 0개·컨트롤러 교체와 지표 없음·노드 부팅 직후).
+      #      tests/slo/shortener-slo-deployment.test.yaml은 Deployment 갈래의 앱 파드 경보만 본다(앱 Deployment 0개, 다른 Deployment 0개, 지표 없음, 노드 부팅 직후).
       # promtool의 버전과 이미지는 잡의 PROMETHEUS_IMAGE(위 env)다. promtool은 파일을 읽기만 하므로 tests/slo를 읽기 전용으로 마운트한다.
       - name: SLO 규칙 검사 (promtool check + test)
         run: |

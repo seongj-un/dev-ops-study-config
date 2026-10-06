@@ -4,7 +4,7 @@
 # shortener-slo.test.yaml(Rollout 갈래)이 시험하고, 여기서는 갈래마다 다른 이 경보만 본다.
 # 규칙 파일은 Argo Rollouts의 API 없이 렌더링한 결과다(만드는 명령은 shortener-slo.test.yaml 머리말, CI에서는 validate 워크플로의 "SLO 규칙 검사" 단계).
 # kube-state-metrics의 ServiceMonitor는 honorLabels: true라서 지표의 namespace가 그대로 저장된다. 계열의 job·instance는 kube-state-metrics 파드의 것이다.
-# 값 표기와 평가 주기(1분)는 shortener-slo.test.yaml과 같다.
+# 값 표기와 평가 주기(1분), 부팅 가드를 위한 node_boot_time_seconds(-86400은 시험 시작 하루 전, 0은 시험 시작과 함께 부팅)는 shortener-slo.test.yaml과 같다.
 rule_files:
   - rendered/shortener-dev-deployment.yaml
   - rendered/shortener-prod-deployment.yaml
@@ -13,6 +13,9 @@ tests:
   - name: (a) dev의 앱 Deployment에 available 파드가 1분 넘게 0개면 울리고 돌아오면 풀린다 (prod는 파드 하나만 빠져 조용하다)
     interval: 1m
     input_series:
+      # 노드는 하루 전에 부팅했다(시험 시각 0보다 86400초 앞). 앱 파드 경보의 부팅 가드(부팅 뒤 5분)는 이미 지났다.
+      - series: 'node_boot_time_seconds{job="node-exporter", namespace="monitoring", instance="10.42.0.5:9100"}'
+        values: '-86400x9'
       # dev: 2분까지 2개, 3~6분에 0개, 7분부터 다시 2개.
       - series: 'kube_deployment_status_replicas_available{namespace="shortener-dev", deployment="shortener-dev", job="kube-state-metrics", instance="10.42.0.20:8080"}'
         values: '2x2 0x3 2x2'
@@ -47,6 +50,9 @@ tests:
   - name: (b) 같은 네임스페이스의 다른 Deployment(Redis)가 0개여도, 앱 Deployment의 계열이 없어도 울리지 않는다
     interval: 1m
     input_series:
+      # 노드는 하루 전에 부팅했다(시험 시각 0보다 86400초 앞). 앱 파드 경보의 부팅 가드(부팅 뒤 5분)는 이미 지났다.
+      - series: 'node_boot_time_seconds{job="node-exporter", namespace="monitoring", instance="10.42.0.5:9100"}'
+        values: '-86400x5'
       # 차트는 Redis도 Deployment(<릴리스>-redis)로 만든다. 경보는 이름이 앱과 같은 Deployment만 고른다.
       - series: 'kube_deployment_status_replicas_available{namespace="shortener-dev", deployment="shortener-dev-redis", job="kube-state-metrics", instance="10.42.0.20:8080"}'
         values: '0x5'
@@ -59,3 +65,34 @@ tests:
       - eval_time: 5m
         alertname: ShortenerNoAvailablePods
         exp_alerts: []
+
+  - name: (c) 노드가 부팅되고 5분 동안은 앱 Deployment가 0개여도 울리지 않고, 5분이 지나도 0이면 그때부터 1분 뒤에 울린다
+    interval: 1m
+    input_series:
+      - series: 'node_boot_time_seconds{job="node-exporter", namespace="monitoring", instance="10.42.0.5:9100"}'
+        values: '0x8'
+      - series: 'kube_deployment_status_replicas_available{namespace="shortener-dev", deployment="shortener-dev", job="kube-state-metrics", instance="10.42.0.20:8080"}'
+        values: '0x8'
+    promql_expr_test:
+      - expr: count_over_time(ALERTS{alertname="ShortenerNoAvailablePods"}[5m])
+        eval_time: 5m
+        exp_samples: []
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ShortenerNoAvailablePods
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: ShortenerNoAvailablePods
+        exp_alerts:
+          - exp_labels:
+              namespace: shortener-dev
+              job: shortener-dev
+              severity: critical
+              service: shortener
+            exp_annotations:
+              summary: 'shortener-dev: 요청을 받을 수 있는 앱 파드가 1분 넘게 하나도 없다'
+              description: >-
+                Ready인 앱 파드가 0개라 앱 Service의 엔드포인트가 비었다. Traefik이 이 환경의 모든 요청에 503을 직접 돌려주고,
+                요청이 앱까지 가지 않아서 앱의 지표로 계산하는 SLO 경보는 이 장애를 보지 못한다.
+                흔한 원인은 DB 장애(앱의 readiness에 DB가 들어 있다)와 모든 파드의 시작 실패다. kubectl -n shortener-dev get pods로 파드의 상태와 이벤트를 본다.
+                근거 지표는 kube-state-metrics의 kube_deployment_status_replicas_available(Deployment shortener-dev)이다.

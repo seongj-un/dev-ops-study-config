@@ -34,7 +34,8 @@ SLO 정의 (숫자는 values.yaml의 slo):
 [for: 2m] 조건이 처음 참이 되면 알림은 pending이 되고, 2분 동안 매 평가(30초 간격)에서 계속 참이어야 firing이 되어 Alertmanager로 간다.
   중간에 한 번이라도 거짓이면 pending이 풀리고 처음부터 다시 센다. 5분 창에는 표본이 10개뿐이라 파드 재시작 직후나 요청 몇 건의 순간 오류에도
   크게 흔들리는데, 평가 한두 번에만 튀는 값으로 Discord가 울리지 않게 거른다. 대가로 알림이 2분 늦다. 100% 장애라면 1시간 비율이
-  7.2%를 넘는 데만 약 4.3분(0.072 × 60분)이 걸리므로, 장애가 시작되고 알림이 Alertmanager로 가기까지 약 7분이다.
+  7.2%를 넘는 데만 약 4.3분(0.072 × 60분)이 걸리므로, 장애가 시작되고 알림이 Alertmanager로 가기까지 약 6.3분(4.3분 + for 2분)이다.
+  수집·평가 간격(30초)만큼 조금 더 늦을 수 있다(tests/slo의 (a)는 평가 간격이 1분이라 7분째에 firing이 된다).
 
 [레이블] severity·service·slo는 Alertmanager의 라우팅(service="shortener"·severity="critical" → Discord)과 Discord 메시지에 쓰인다.
   namespace·job은 기록 규칙의 결과에서 이어받는다. Prometheus 하나가 dev와 prod를 함께 보므로 알림의 namespace로 환경을 구분한다
@@ -48,7 +49,7 @@ SLO 정의 (숫자는 values.yaml의 slo):
   다음 주기적 새로고침(기본 2분 + 최대 1분 지터) 때 다시 렌더링되고 이 리소스가 새로 나타난다(OutOfSync). 커밋은 그대로라 같은 커밋으로는 자동 동기화가
   다시 돌지 않지만, selfHeal(argocd/apps/shortener-<환경>.yaml)이 켜져 있어서 OutOfSync가 된 리소스를 동기화해 클러스터에 만든다.
 
-[앱 파드 경보] ShortenerNoAvailablePods: 요청을 받을 수 있는(Ready인) 앱 파드가 1분 넘게 0개면 울린다.
+[앱 파드 경보] ShortenerNoAvailablePods: 요청을 받을 수 있는(Ready인) 앱 파드가 1분 넘게 0개면 울린다. 노드가 부팅되고 5분 동안은 울리지 않는다(아래 부팅 가드).
   SLO 경보가 보지 못하는 장애를 맡는다. SLI는 앱 안에서 잰다. 앱 파드가 모두 NotReady가 되면 앱 Service의 엔드포인트가 비고, Traefik이 요청을 앱에 보내지 못해
   503을 스스로 돌려준다. 그 요청은 앱의 지표에 남지 않아서 5xx 비율의 분모가 0이 되고(0 ÷ 0 = NaN) SLO 경보는 장애가 얼마나 이어지든 울리지 않는다.
   v4 연습(prod, DB 차단 약 5분)이 그랬다: 앱 readiness에 DB가 들어 있어서 파드가 모두 NotReady가 되었고, 사용자는 503만 받았는데 경보도 Discord 알림도 없었다.
@@ -61,19 +62,33 @@ SLO 정의 (숫자는 values.yaml의 slo):
     Prometheus가 수집할 때 붙이는 대상 레이블이 이긴다.
     지표의 namespace(Rollout의 네임스페이스)는 exported_namespace로 이름이 바뀌어 저장되고, namespace에는 컨트롤러의 네임스페이스 argo-rollouts가 붙는다.
     그래서 Rollout은 exported_namespace·name으로 고른다(kube-state-metrics의 ServiceMonitor는 honorLabels: true라 지표의 namespace가 그대로 남는다).
-  - max로 묶는다: 결과에서 수집 대상의 레이블(컨트롤러 파드의 pod·instance, namespace="argo-rollouts" 등)을 지운다. 그대로 두면 컨트롤러 파드가 다시 뜰 때마다
-    pod 레이블이 바뀌어 경보가 풀렸다가 처음부터(pending) 다시 울리고, namespace도 앱의 네임스페이스가 아니게 된다. 대신 namespace·job을 경보의 labels에
+  - max로 묶는다: 결과에서 수집 대상의 레이블(컨트롤러 파드의 pod·instance, namespace="argo-rollouts" 등)을 지운다. 그대로 두면 namespace가 앱의 네임스페이스가 아니고,
+    컨트롤러 파드가 바뀔 때마다 pod 레이블이 바뀌어 늘 다른 경보가 된다. 묶어 두면 컨트롤러 파드가 바뀌어도 교체가 평가 한 번 안에 끝나면(옛 파드의 계열이 사라진
+    평가에 새 파드의 계열이 이미 있으면) 같은 경보로 이어진다. 새 계열이 그보다 늦게 나타나면 그 사이의 평가에서 결과가 비어 경보가 풀리고(Discord에 RESOLVED가 간다),
+    새 계열이 나타나면 pending부터 다시 세어 1분 뒤에 다시 울린다. 대신 namespace·job을 경보의 labels에
     렌더링할 때 적어 넣어 SLO 경보와 같은 모양(Alertmanager가 alertname·namespace로 묶는다)이 되게 한다. 같은 이유로 요약도 Prometheus 템플릿($labels) 대신
     Helm이 네임스페이스를 적어 넣는다($labels는 식의 결과에 있는 레이블만 보이고 labels에 적은 것은 보이지 않는다).
   - for: 1m: 1분 동안 계속 0이어야 울린다. 배포 중에는 0이 되지 않는다: 카나리와 롤링 업데이트 모두 maxUnavailable 0이라 새 파드가 Ready가 되어야 옛 파드를 내린다.
-    파드 하나가 죽어도(v4의 파드 삭제 연습) 다른 파드가 남아 있어 울리지 않는다. 1분은 노드의 순간 장애로 잠깐 0이 된 것을 거르면서, SLO 경보(가장 빨라도 약 7분)보다
+    파드 하나가 죽어도(v4의 파드 삭제 연습) 다른 파드가 남아 있어 울리지 않는다. 1분은 노드의 순간 장애로 잠깐 0이 된 것을 거르면서, SLO 경보(100% 장애여도 약 6.3분)보다
     훨씬 빨리 알리는 값이다. DB가 죽으면 readiness 실패(5초 × 3번) + 수집(최대 30초) + 평가(최대 30초) + for 1분 + Alertmanager의 group_wait 30초로 약 2~3분 안에 Discord에 닿는다.
   - 지표가 없으면 울리지 않는다(absent를 쓰지 않는다). 계열이 없다는 것은 파드가 없다는 뜻이 아니라 잴 수 없다는 뜻이라서다: 컨트롤러나 kube-state-metrics가
     내려갔거나 아직 수집되지 않았다(워크로드가 있으면 파드가 0개여도 계열은 0으로 있다). 그때 "파드가 없다"고 Discord를 울리면 틀린 경보다. 대가로 앱 장애와 컨트롤러 장애가
     겹치면 이 경보도 조용하다(수집 대상이 내려간 것은 차트의 기본 규칙 TargetDown이 알리지만 warning이라 Discord로 가지 않는다).
-  - 새 클러스터를 처음 띄울 때 앱 파드가 1분 넘게 Ready가 되지 못하면(DB가 아직 뜨는 중 등) 한 번 울릴 수 있다. 그때는 실제로 요청을 받을 파드가 없다.
-    Deployment에서 Rollout으로 옮기는 동기화(README의 카나리 배포)에서는 규칙이 Rollout과 함께 Rollout의 지표로 바뀌므로, Rollout의 첫 파드가 1분 넘게 Ready가
-    되지 못하면 옛 Deployment의 파드가 아직 요청을 받고 있어도 울린다(틀린 경보). dev·prod는 이미 옮겼으니 새 클러스터에서만 생길 수 있다.
+  - 부팅 가드(식 끝의 and on() (time() - max(node_boot_time_seconds) > 300)): 노드가 부팅되고 5분 동안은 울리지 않는다.
+    이 클러스터는 쓰지 않을 때 EC2를 멈추고 자주 다시 켠다. 켤 때마다 모든 앱 파드가 vCPU 2개에서 DB·모니터링과 함께 한꺼번에 다시 뜨고(시작 프로브는 최대 120초를
+    기다려 준다), Prometheus와 Argo Rollouts 컨트롤러가 먼저 떠서 평가를 시작하면 available 0이 1분을 넘기 쉽다. 그때마다 critical이 Discord로 가면 평소의 시작이
+    장애 알림처럼 보이고, Discord를 무시하는 습관이 든다.
+    node_boot_time_seconds는 node-exporter의 stat 수집기(기본으로 켜짐)가 /proc/stat의 btime(부팅 시각, 유닉스 초)을 읽어 내놓는 값이다. 이 클러스터의 node-exporter는
+    노드의 /proc을 붙여(--path.procfs=/host/proc) 읽으므로 컨테이너가 아니라 노드의 부팅 시각이고, EC2를 멈췄다 켜면 새 값이 된다.
+    max는 노드마다 하나인 계열에서 레이블을 지워 하나로 만든다(on()으로 레이블 없이 짝짓기 위해). 지금은 노드가 하나라 max든 min이든 같다. 노드가 여럿이면 max는
+    가장 최근에 부팅한 노드라서 어느 노드든 5분 안에 부팅했으면 이 경보를 누르고, min이었다면 모든 노드가 5분 안에 부팅한 때(클러스터 전체의 콜드 스타트)만 누른다.
+    틀린 경보를 덜 내는 쪽을 골랐다.
+    대가: 부팅 뒤 5분 안의 진짜 전체 장애는 이 규칙이 알리지 않는다. 5분이 지나도 0이면 그때부터 1분 뒤(부팅 뒤 약 6분)에 울린다. 그래서 콜드 스타트에서 앱 파드가
+    부팅 뒤 5분이 넘도록 Ready가 되지 못하면(DB가 늦게 떠서 앱이 재시작을 되풀이하는 등) 이 경보는 여전히 울리고, 그때는 실제로 요청을 받을 파드가 없다.
+    node-exporter가 수집되지 않으면 오른쪽이 비어서 이 경보도 울리지 않는다(아래 "지표가 없으면"과 같다).
+  - Deployment에서 Rollout으로 옮기는 동기화(README의 카나리 배포)에서는 규칙이 Rollout과 함께 Rollout의 지표로 바뀌므로, Rollout의 첫 파드가 1분 넘게 Ready가
+    되지 못하면 옛 Deployment의 파드가 아직 요청을 받고 있어도 울린다(틀린 경보). 부팅 가드는 이것을 막지 못한다: 옮기기는 부팅과 상관없이 Argo Rollouts를 설치한 뒤
+    다시 렌더링할 때 일어나서, 그때가 부팅 뒤 5분 안일 때만 눌린다. dev·prod는 이미 옮겼으니 새 클러스터에서만 생길 수 있다.
 */ -}}
 {{- if and .Values.slo.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PrometheusRule") }}
 {{- $namespace := .Release.Namespace }}
@@ -169,6 +184,7 @@ spec:
     앱 파드 경보(머리말의 [앱 파드 경보]). 기록 규칙을 읽지 않으므로 SLO 그룹과 따로 둔다(그룹은 서로 따로 평가된다).
     식의 지표는 렌더링할 때 고른다: Rollout을 만들면 Argo Rollouts 컨트롤러의 지표, Deployment를 만들면 kube-state-metrics의 지표다.
     labels의 namespace·job은 식이 max로 지운 레이블을 이 릴리스의 값으로 다시 붙이는 것이다(SLO 경보의 namespace·job과 같은 값).
+    식 끝의 and on() (...)는 부팅 가드다(머리말 [앱 파드 경보]의 부팅 가드): 노드가 부팅되고 300초(5분)가 지나야 왼쪽의 결과를 남긴다.
     */}}
     {{- $rollout := include "shortener.rolloutEnabled" . }}
     - name: {{ $job }}-pods
@@ -180,6 +196,7 @@ spec:
             {{- else }}
             max(kube_deployment_status_replicas_available{namespace="{{ $namespace }}", deployment="{{ $job }}"}) == 0
             {{- end }}
+            and on() (time() - max(node_boot_time_seconds) > 300)
           for: 1m
           labels:
             severity: critical
