@@ -168,6 +168,8 @@ jobs:
       #   - Deployment 갈래: 그 반대다. Rollout·AnalysisTemplate이 없고 앱 Deployment가 하나 있으며, HPA는 Deployment를 가리킨다.
       #   - 두 갈래의 파드 템플릿이 같다. 둘 다 차트의 shortener.appPodTemplate 하나에서 나오므로, 다르면 한쪽에만 따로 손댄 것이다.
       #     위에서 Deployment의 파드 템플릿은 쿠버네티스 내장 스키마로, Rollout의 것은 CRD 스키마로 검사했으니 두 스키마가 모두 받아들이는 템플릿이기도 하다.
+      #   - AnalysisTemplate의 모든 지표에 측정 횟수(count)가 있다. Rollout은 이 템플릿을 카나리의 단계 안(analysis 단계)에서 쓰는데, 그 분석은 끝나야 다음 단계로 간다.
+      #     횟수가 없는 지표는 끝나지 않으므로 Argo Rollouts가 Rollout을 InvalidSpec으로 거부한다. 스키마로는 잡히지 않고 클러스터에서야 드러나서 여기서 본다.
       # 기대와 다른 것이 있어도 바로 멈추지 않고 모두 오류로 남긴 뒤 실패한다.
       - name: 앱 워크로드 두 갈래 확인 (Rollout, Deployment)
         run: |
@@ -188,6 +190,7 @@ jobs:
             expect "$environment Rollout 갈래의 AnalysisTemplate 수" 1 '[select(.kind == "AnalysisTemplate")] | length' "$rollout"
             expect "$environment Rollout 갈래의 앱 Deployment 수" 0 "[select(.kind == \"Deployment\" and $app)] | length" "$rollout"
             expect "$environment Rollout 갈래에서 Rollout이 아닌 것을 가리키는 HPA 수" 0 '[select(.kind == "HorizontalPodAutoscaler" and .spec.scaleTargetRef.kind != "Rollout")] | length' "$rollout"
+            expect "$environment Rollout 갈래의 AnalysisTemplate에서 측정 횟수(count)가 없는 지표 수" 0 '[select(.kind == "AnalysisTemplate") | .spec.metrics[] | select(.count == null)] | length' "$rollout"
             expect "$environment Deployment 갈래의 Rollout·AnalysisTemplate 수" 0 '[select(.kind == "Rollout" or .kind == "AnalysisTemplate")] | length' "$deployment"
             expect "$environment Deployment 갈래의 앱 Deployment 수" 1 "[select(.kind == \"Deployment\" and $app)] | length" "$deployment"
             expect "$environment Deployment 갈래에서 Deployment가 아닌 것을 가리키는 HPA 수" 0 '[select(.kind == "HorizontalPodAutoscaler" and .spec.scaleTargetRef.kind != "Deployment")] | length' "$deployment"

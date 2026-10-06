@@ -82,6 +82,7 @@ tests:
 
   - name: (d) 새 카나리 파드는 첫 요청 계열이 생기고 표본이 2개가 되기 전까지 결과가 비고(성공), 그다음 측정부터 비율이 나온다
     interval: 30s
+    # 이 빈 구간에 잰 측정은 무엇이 오든 성공이라 아무것도 재지 못한다. Rollout이 분석(2단계) 앞에 1분 대기(1단계)를 두는 이유다(rollout.yaml의 [분석]).
     input_series:
       # dev stable 파드: 내내 정상 요청을 받는다.
       - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", rollouts_pod_template_hash="stable", pod="shortener-dev-stable-1", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'

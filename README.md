@@ -73,7 +73,7 @@ tests/canary/                    카나리 분석 쿼리(차트의 AnalysisTempl
 ```
 앱 저장소 PR 머지 → CI(test, image) 통과 → deploy-dev 잡이 이 저장소 environments/dev/values.yaml의 image.tag를 새 커밋 SHA로 바꿔 main에 커밋
   → ArgoCD가 폴링으로 그 커밋을 발견(bootstrap/argocd/values.yaml의 timeout.reconciliation: 60s)
-  → shortener-dev Application이 자동 동기화 → Rollout 카나리(새 버전을 파드 절반에 올려 2분 동안 5xx 비율을 본 뒤 전체로. 아래 "카나리 배포 (Argo Rollouts)")
+  → shortener-dev Application이 자동 동기화 → Rollout 카나리(새 버전을 파드 절반에 올려 1분 기다린 뒤 약 1분 30초 동안 5xx 비율을 재고, 통과하면 전체로. 아래 "카나리 배포 (Argo Rollouts)")
 ```
 
 - ArgoCD를 Ingress로 열지 않아서(EC2에서는 port-forward로만 본다. 아래 "ArgoCD UI") GitHub 웹훅이 닿을 곳이 없다. 그래서 ArgoCD의 **폴링**만 변경을 알아채는 수단이다. 확인 주기는 60초로 줄였지만(기본은 최대 3분), ArgoCD의 repo-server도 같은 값을
@@ -450,7 +450,7 @@ JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 `-XX:Max
 | 합계, 두 환경이 동시에 배포 중일 때 | 6016Mi | 10784Mi |
 
 - **요청 합은 최악에도 노드 안에 든다.** 요청은 스케줄러가 자리를 계산하는 값이다. prod가 3개인 채 두 환경이 동시에 배포해도(차트의 파드 템플릿을 고치면 두 환경이 같은 `main`의 차트를 읽어 동시에 배포된다)
-  6016Mi로 8192Mi(실제 MemTotal은 약 7.6GiB)보다 작다. 카나리는 늘어난 파드 하나를 2분 대기 동안 띄워 두므로(prod가 3개면 카나리 2개·stable 2개) 이 최악이 롤링 업데이트보다 오래간다.
+  6016Mi로 8192Mi(실제 MemTotal은 약 7.6GiB)보다 작다. 카나리는 늘어난 파드 하나를 대기와 분석(약 2분 30초) 동안 띄워 두므로(prod가 3개면 카나리 2개·stable 2개) 이 최악이 롤링 업데이트보다 오래간다.
   4단계에서 새로 더하는 요청은 약 1.6GiB까지로 잡았고(ArgoCD 컨트롤러 요청을 128Mi에서 384Mi로 올린 256Mi는 위 ArgoCD 행에 따로 들어 있다),
   그중 kube-prometheus-stack이 1056Mi, Loki·Alloy가 368Mi를 쓴다(합 1424Mi. Loki·Alloy 몫으로 남겨 둔 약 580Mi 가운데 약 210Mi가 남는다). 5단계의 Argo Rollouts 96Mi는 그 몫과 별개로 위 합계에 더했다.
   같은 계산이 `environments/prod/values.yaml`의 `autoscaling` 위 주석에도 있다(prod의 HPA 최대 3개를 정한 근거).
@@ -633,22 +633,24 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 
 앱은 Deployment가 아니라 Argo Rollouts의 **Rollout**으로 배포된다(두 환경 모두 `rollout.enabled: true`. Argo Rollouts 자체의 설치는 위 "Argo Rollouts (컨트롤러·대시보드)").
 파드 템플릿이 바뀌는 변경(이미지 태그, ConfigMap 값의 체크섬, 리소스, `fault.errorRate` 등)은 한 번에 퍼지지 않고 파드의 절반에 먼저 올라간다(카나리).
-그 파드들의 5xx 비율이 5% 이상인 측정이 두 번이면(또는 카나리 파드가 5분 안에 Ready가 되지 못하면) Argo Rollouts가 스스로 배포를 중단하고 옛 버전으로 되돌린다. 사람이 지켜보지 않아도 나쁜 버전이 모든 파드로 퍼지지 않게 하는 장치다.
+1분 기다린 뒤 그 파드들의 5xx 비율을 30초 간격으로 4번 재고, 통과해야 모든 파드로 넓힌다. 5% 이상인 측정이 두 번이면(또는 카나리 파드가 5분 안에 Ready가 되지 못하면)
+Argo Rollouts가 스스로 배포를 중단하고 옛 버전으로 되돌린다. 사람이 지켜보지 않아도 나쁜 버전이 모든 파드로 퍼지지 않게 하는 장치다.
 서비스 메시나 Ingress의 가중치 기능 없이 파드 수로 비율을 나누는 기본 카나리다: 앱 Service가 두 버전의 파드를 함께 고르고, 요청은 파드 수의 비율로 나뉜다.
 
 ```
 파드 템플릿을 바꾸는 커밋(dev 이미지 태그 등) → ArgoCD 동기화 → Rollout의 파드 템플릿이 바뀐다
   → 0단계 setWeight 50: 새 버전의 ReplicaSet(카나리)을 만들어 파드를 카나리 절반·stable 절반으로 맞춘다. 카나리 파드가 Ready가 되어야 다음 단계로 간다
        파드 2개(dev, 평소의 prod) → 카나리 1·stable 1 / prod가 HPA로 3개면 → 카나리 2·stable 2(maxSurge 1로 하나를 더 띄운다)
-  → 1단계 pause 2m: 2분 기다린다. 이때부터 분석(AnalysisRun)이 30초마다 카나리 파드의 최근 1분 5xx 비율을 잰다
-  → 전체 승격: 카나리를 전체 파드 수로 늘리고 stable을 내린다. 카나리가 새 stable이 되면 분석도 끝난다
-  분석은 1단계부터 승격이 끝날 때까지 돈다. 그동안 분석이 실패하면(5% 이상인 측정이 2번), 또는 어느 단계에서든 배포가 5분 동안 나아가지 못하면
-  (카나리 파드가 Ready가 되지 못한다. pause의 대기는 세지 않는다) 중단(abort) → stable을 원래 수로 다시 늘리고 카나리 파드를 내린다
+  → 1단계 pause 1m: 재지 않고 1분 기다린다. 카나리 파드가 받은 요청이 분석 쿼리의 1분 창을 채우는 시간이다
+  → 2단계 analysis: 분석(AnalysisRun)이 30초 간격으로 4번(약 1분 30초) 카나리 파드의 최근 1분 5xx 비율을 잰다. 분석이 성공으로 끝나야 다음으로 간다
+  → 전체 승격: 카나리를 전체 파드 수로 늘리고 stable을 내린다 (정상 버전은 카나리 파드가 Ready가 되고 약 2분 30초 뒤)
+  분석이 실패하면(5% 이상인 측정이 2번. 처음 두 측정이 실패하면 2단계가 시작되고 약 30초 뒤), 또는 어느 단계에서든 배포가 5분 동안 나아가지 못하면
+  (카나리 파드가 Ready가 되지 못한다. pause·analysis 단계에 머무는 시간은 세지 않는다) 중단(abort) → stable을 원래 수로 다시 늘리고 카나리 파드를 내린다
 ```
 
 - 차트: 단계는 `charts/shortener/templates/rollout.yaml`, 분석의 쿼리와 판정은 `analysistemplate.yaml`, 파드 템플릿은 Deployment와 함께 쓰는 `_helpers.tpl`의 `shortener.appPodTemplate`이다.
   클러스터가 Rollout·AnalysisTemplate kind를 모르면(Argo Rollouts 설치 전, 로컬 k3d) 차트는 지금까지처럼 Deployment를 만든다.
-- 파드 템플릿 밖의 변경(Service, Ingress 등)은 카나리 없이 동기화되자마자 반영된다. dev의 이미지 태그 커밋은 매번 카나리를 거치므로 dev 반영이 2분 남짓 늦어진다.
+- 파드 템플릿 밖의 변경(Service, Ingress 등)은 카나리 없이 동기화되자마자 반영된다. dev의 이미지 태그 커밋은 매번 카나리를 거치므로 dev 반영이 2분 30초 남짓 늦어진다.
 - Rollout을 처음 만들 때(아래 "Deployment에서 옮기기")와 stable과 같은 파드 템플릿으로 되돌릴 때는 단계 없이 바로 그 버전을 전체로 띄운다.
 
 ### 분석이 재는 것
@@ -670,7 +672,11 @@ AnalysisRun을 만들 때 Argo Rollouts가 카나리 ReplicaSet의 해시를 쿼
   대가로 카나리 동안 요청이 없으면 나쁜 버전도 통과한다. dev에는 평소 요청이 거의 없으므로 아래 연습에서는 카나리 동안 요청을 흘린다.
   같은 이유로 카나리 파드의 메트릭이 수집되지 않거나 `rollouts_pod_template_hash`가 붙지 않으면 분석은 늘 통과한다. 처음 띄운 뒤 Prometheus에서
   `count by (rollouts_pod_template_hash) (up{namespace="shortener-dev", job="shortener-dev"})`가 파드의 해시마다 나오는지 확인한다.
-- 2분 대기 동안 측정은 4~5번이고, 새 카나리 파드는 수집되고 30초쯤 지나야(1분 창에 표본이 2개) 값이 나온다. 분석은 2분 대기 뒤 카나리를 전체로 늘리는 동안에도 이어진다.
+- **측정은 1분 대기 뒤에 시작한다.** 새 카나리 파드는 수집되고 30초쯤 지나야(1분 창에 표본이 2개) 값이 나오고, 그 전에 잰 측정은 빈 결과라 무엇이 오든 성공이다.
+  그래서 1단계에서 1분을 기다린 뒤 2단계에서 30초 간격으로 4번(`count: 4`) 잰다. 4번째 측정이 끝나면(약 1분 30초) 분석이 끝나고, 실패가 한 번 이하면 승격한다.
+  예전 설정(2분 대기와 나란히 도는 백그라운드 분석)에서는 대기가 시작되자마자 쟀기 때문에 처음 두 측정이 빈 결과였고(v2 연습의 정상 카나리에서도 `[]`, `[]`, 그다음부터 `[0]`), 나쁜 버전도 3·4번째 측정에서야 잡혔다.
+  게다가 백그라운드 분석은 승격을 기다리게 하지 않아서, 대기가 끝나면 분석이 아직 판정하지 못했어도 승격했다. 자세한 이유는 `rollout.yaml` 머리말의 [분석]에 있다.
+- 분석은 승격 앞에서 끝난다. 카나리를 전체로 늘리는 몇십 초와 그 뒤는 SLO 경보(위 "경보가 가는 길")가 본다.
 - 이웃한 두 측정의 1분 창은 30초씩 겹친다. 그래서 30초보다 짧은 5xx 몰림 하나도 두 측정에 함께 잡혀 중단될 수 있다(`failureLimit: 1`이 봐주는 것은 측정 한 번의 실패다).
 - 쿼리는 CI의 "카나리 분석 쿼리 검사" 단계가 promtool로 시험한다(`tests/canary/analysis.test.yaml`). 판정 식은 Argo Rollouts의 식(expr)이라 CI에서는 시험하지 않는다
   (Argo Rollouts v1.10.0과 같은 expr 라이브러리 v1.17.7로 빈 결과·NaN·0.0499·0.05·0.5를 넣어 위 표대로 나오는 것을 확인했다).
@@ -685,13 +691,15 @@ kubectl -n shortener-dev get analysisrun -o yaml   # status.metricResults[].meas
 ```
 
 - 대시보드는 Rollout의 단계, 카나리·stable ReplicaSet의 파드, 분석의 측정을 한 화면에 보여 준다. Rollout 쓰기 권한을 뺐으므로 승격·중단 버튼은 forbidden으로 실패한다(위 "Argo Rollouts (컨트롤러·대시보드)").
-- ArgoCD UI에서는 `shortener-<환경>` Application의 트리에서 Rollout 아래에 ReplicaSet과 AnalysisRun이 달린다. 2분 대기 중의 Rollout은 `Suspended`(Argo Rollouts의 `Paused`)로 보이고, 정상이다.
+- ArgoCD UI에서는 `shortener-<환경>` Application의 트리에서 Rollout 아래에 ReplicaSet과 AnalysisRun이 달린다. 1분 대기 중의 Rollout은 `Suspended`(Argo Rollouts의 `Paused`)로, 분석 단계 동안은 `Progressing`(메시지 `more replicas need to be updated`)으로 보이고, 둘 다 정상이다.
+  분석 단계의 AnalysisRun 이름은 `<Rollout>-<카나리 해시>-<리비전>-2`(끝이 단계 번호)이고, Rollout의 `status.canary.currentStepAnalysisRunStatus`에 그 이름과 상태가 있다.
 
 ### 중단되면 ArgoCD에서 이렇게 보인다
 
 나쁜 버전은 두 가지 길로 중단되고, 둘 다 Git에서 `git revert`로 되돌린다(아래).
 
-- **5xx를 내는 버전 → 분석이 중단한다.** Rollout의 건강 상태가 `Degraded`이고 메시지는 `RolloutAborted: Rollout aborted update to revision <N>: Background analysis phase error/failed: Metric "error-rate" assessed Failed due to failed (2) > failureLimit (1)`이다.
+- **5xx를 내는 버전 → 분석이 중단한다.** Rollout의 건강 상태가 `Degraded`이고 메시지는 `RolloutAborted: Rollout aborted update to revision <N>: Step-based analysis phase error/failed: Metric "error-rate" assessed Failed due to failed (2) > failureLimit (1)`이다
+  (백그라운드 분석을 쓰던 때는 `Background analysis phase ...`였다).
   그 아래 AnalysisRun도 `Degraded`(Failed)이고, 측정값은 위 `kubectl get analysisrun -o yaml`에 남는다. Application의 Health도 `Degraded`가 된다.
 - **Ready가 되지 못하는 버전(시작 실패, CrashLoopBackOff) → 진행 기한이 중단한다.** 0단계에서 멈춰 분석이 시작되지 않으므로, Rollout의 `progressDeadlineSeconds: 300`·`progressDeadlineAbort: true`가
   5분 뒤 중단한다(메시지 `RolloutAborted: Rollout aborted update to revision <N>: ReplicaSet "<이름>" has timed out progressing.`). 그동안 stable은 파드를 줄이지 않아 요청을 그대로 받는다.
@@ -717,7 +725,7 @@ gh pr create --fill                                            # validate가 통
 ```
 
 1. 머지하면 ArgoCD가 dev를 동기화하고 카나리가 시작된다. 카나리 동안 dev에 요청을 흘린다(앱 저장소 `loadtest/`의 k6, 또는 리다이렉트를 되풀이하는 curl).
-2. 2분 대기 안에 분석이 실패해 Rollout이 중단되고(위), 카나리 파드가 내려가 stable 파드만 남는다. 그동안 카나리가 받은 요청의 절반이 500이다(장애 주입의 500은 `uri="UNKNOWN"`으로 기록된다).
+2. 1분 대기 뒤 분석 단계의 처음 두 측정이 실패해(카나리 파드가 Ready가 되고 약 1분 30초 뒤) Rollout이 중단되고(위), 카나리 파드가 내려가 stable 파드만 남는다. 그동안 카나리가 받은 요청의 절반이 500이다(장애 주입의 500은 `uri="UNKNOWN"`으로 기록된다).
 3. 그 커밋을 `git revert`하는 PR을 머지해 Git을 되돌린다. Rollout이 단계 없이 `Healthy`가 된다.
 
 ### Deployment에서 옮기기 (처음 한 번)
@@ -741,9 +749,9 @@ Argo Rollouts가 설치된 클러스터에 이 차트가 처음 반영되는 동
 | | 평소 앱 파드 | 카나리 중 최대 | 커넥션 최대(파드마다 10개) | PostgreSQL `max_connections` (일반 계정의 몫) |
 |---|---|---|---|---|
 | dev | 2 | 3 | 30 + 겹침 10 | 50 (47) |
-| prod | 2~3 (HPA) | 4 (3개면 카나리 2·stable 2가 2분 대기 동안 이어진다) | 40 + 겹침 10 | 60 (57) |
+| prod | 2~3 (HPA) | 4 (3개면 카나리 2·stable 2가 대기와 분석 약 2분 30초 동안 이어진다) | 40 + 겹침 10 | 60 (57) |
 
-- 늘어나는 파드는 롤링 업데이트와 같은 하나(maxSurge 1, maxUnavailable 0)다. prod가 3개일 때 그 상태가 2분 대기 동안 이어진다는 것만 달라서 메모리 최악(위 "메모리 메모")은 같은 숫자다.
+- 늘어나는 파드는 롤링 업데이트와 같은 하나(maxSurge 1, maxUnavailable 0)다. prod가 3개일 때 그 상태가 대기와 분석(약 2분 30초) 동안 이어진다는 것만 달라서 메모리 최악(위 "메모리 메모")은 같은 숫자다.
 - 겹침은 내려가는 파드가 풀을 닫기 전에(preStop 5초 + 종료 최대 20초) 다음 파드가 풀을 여는 몫이다. 계산은 `environments/<환경>/values.yaml`의 `postgresql` 위 주석에 있다.
 
 ### 로컬에서 확인하기
