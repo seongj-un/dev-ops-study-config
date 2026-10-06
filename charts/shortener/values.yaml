@@ -84,6 +84,7 @@ metrics:
 
 # 서비스 수준 목표(SLO)와 그 알림. 켜면 templates/prometheusrule.yaml이 PrometheusRule(Prometheus Operator의 CRD)을 만든다:
 # 나쁜 요청의 비율을 5분·30분·1시간·6시간 창으로 미리 계산해 두는 기록 규칙과, 오류 예산이 빠르게 타면 울리는 알림 두 개(가용성·지연)다.
+# 같은 PrometheusRule에 요청을 받을 앱 파드가 하나도 없을 때 울리는 알림(ShortenerNoAvailablePods)도 들어 있다. SLO 알림이 보지 못하는 전체 장애를 맡는다(그 파일 머리말의 [앱 파드 경보]).
 # SLI(측정 지표)는 앱의 http_server_requests_seconds 히스토그램이다. 이 릴리스의 namespace와 job(= 앱 Service 이름)으로 고르고, /actuator로 시작하는 요청은 뺀다.
 # 목표는 30일 기준이다. 다만 Prometheus의 보존 기간이 3일이라 30일 동안 남은 예산은 계산하지 않고, 예산이 타는 속도(번 레이트)로 알린다.
 slo:

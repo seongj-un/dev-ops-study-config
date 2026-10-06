@@ -8,14 +8,26 @@ Rollout은 Deployment처럼 ReplicaSet으로 파드를 띄우지만, 파드 템�
   요청은 파드 수의 비율로 나뉜다. 그래서 가중치(setWeight)는 파드 수로 맞춘다.
   - 0단계 setWeight 50: 새 버전의 ReplicaSet(카나리)을 만들고 카나리를 전체 파드의 절반으로 맞춘다. 파드 2개면 카나리 1·stable 1, 3개면 카나리 2·stable 2다
     (3개는 절반으로 나뉘지 않아서 maxSurge 1로 한 개를 더 띄워 2·2를 만든다). 카나리 파드가 Ready가 되어야 다음 단계로 간다(못 되면 아래 진행 기한에 걸려 중단된다).
-  - 1단계 pause 2m: 2분 기다린다. 아래 분석이 이 단계부터 카나리 파드의 5xx 비율을 잰다.
-  - 단계가 끝나면 전체 승격: 카나리를 전체 파드 수로 늘리고 옛 stable 파드를 내린다. 카나리가 새 stable이 되면 분석도 끝난다.
+  - 1단계 pause 1m: 재지 않고 1분 기다리기만 하는 준비 시간이다. 카나리 파드가 요청을 받기 시작한 뒤, 분석 쿼리의 1분 창이 카나리 파드의 표본으로 찰 때까지 기다린다
+    (수집 주기가 30초라 계열마다 표본이 2개는 있어야 rate가 값을 낸다. analysistemplate.yaml의 [쿼리]).
+  - 2단계 analysis: 아래 [분석]이 30초 간격으로 4번 잰다(약 1분 30초). 분석이 성공으로 끝나야 다음으로 가고, 실패하면 그 자리에서 중단(abort)된다.
+  - 단계가 끝나면 전체 승격: 카나리를 전체 파드 수로 늘리고 옛 stable 파드를 내린다.
+  정상 버전은 카나리 파드가 Ready가 되고 약 2분 30초 뒤에 전체로 바뀐다. 5xx를 내는 버전은 처음 두 측정에서 실패하면 약 1분 30초 뒤에 중단된다.
   Rollout을 처음 만들 때(stable이 아직 없을 때)와 stable과 같은 파드 템플릿으로 되돌릴 때는 단계 없이 바로 그 버전을 전체로 띄운다.
   파드 템플릿 밖의 변경(Service, Ingress 등)은 카나리 없이 동기화하자마자 반영된다. ConfigMap의 값은 파드 템플릿의 체크섬 어노테이션을 바꾸므로 카나리를 거친다.
 
-[분석] 0단계가 끝나면(startingStep 1) Argo Rollouts가 AnalysisTemplate <릴리스>-error-rate(analysistemplate.yaml)로 백그라운드 AnalysisRun을 만든다.
+[분석] 2단계에서 Argo Rollouts가 AnalysisTemplate <릴리스>-error-rate(analysistemplate.yaml)로 AnalysisRun을 만든다. 단계 안에 둔 분석(inline analysis)은
+  승격 앞의 관문이다: AnalysisRun이 Successful로 끝나야 그 단계가 끝나고, Failed·Error로 끝나면 Rollout이 중단된다. 그래서 끝이 있어야 한다:
+  템플릿의 측정 횟수(count 4)가 끝을 정한다(횟수가 없는 지표를 단계에 쓰면 Argo Rollouts가 Rollout을 InvalidSpec으로 거부한다).
   인자 canary-hash에는 카나리 ReplicaSet의 rollouts-pod-template-hash(podTemplateHashValue: Latest)가 들어가서, 분석이 카나리 파드의 요청만 고른다.
-  0단계부터 재지 않는 것은 카나리 파드가 뜨는 동안에는 잴 요청이 없기 때문이다. 분석은 1단계부터 승격이 끝날 때까지 돌고, 실패하면 Rollout은 그 자리에서 중단(abort)된다.
+  예전에는 같은 템플릿을 백그라운드 분석(strategy.canary.analysis, startingStep 1)으로 2분 대기와 나란히 돌렸고, 두 가지가 약했다.
+    - 백그라운드 분석은 승격을 기다리게 하지 않는다. 실패하는 순간에 중단시킬 뿐이라, 대기가 끝나면 분석이 아직 판정하지 못했어도 전체로 승격했다.
+      v2 연습(장애 주입 0.5)에서 분석은 2분 대기가 끝나기 얼마 전에야 실패했다. 조금 늦었다면 나쁜 버전이 모든 파드로 퍼진 뒤에 중단됐을 것이다.
+    - 대기가 시작되자마자 쟀기 때문에 처음 두 측정은 카나리 파드의 1분 창이 아직 비어 있었다(빈 결과 = 성공). v2의 정상 카나리에서도 처음 두 측정은 빈 결과였고
+      값은 대기 60초 뒤의 3번째 측정부터 나왔다. 그래서 나쁜 버전도 3·4번째 측정에서야 잡혔다.
+  지금은 1단계가 창을 채우고 2단계의 측정 4번이 모두 카나리 파드의 요청을 잰다. 대가로 정상 버전의 카나리가 30초 길어졌다(2분 대기 → 1분 대기 + 측정 약 1분 30초).
+  백그라운드 분석은 함께 두지 않는다. 2단계 뒤에 남는 것은 카나리를 전체로 늘리는 몇십 초뿐이고, 그 뒤의 오류는 SLO 경보(prometheusrule.yaml)가 본다.
+  두 분석을 같이 두면 2단계 동안 같은 쿼리를 두 번씩 묻고, 어느 쪽이 중단시켰는지도 메시지로 갈라 읽어야 한다.
 
 [중단] 트래픽 라우터가 없는 기본 카나리에서 중단은 "stable로 되돌아가는 롤링 업데이트"다: 카나리의 가중치를 0으로 보고, Ready 파드가 spec.replicas 아래로
   줄지 않게(maxUnavailable 0) stable을 원래 파드 수로 다시 늘리면서 카나리 파드를 내린다. 그래서 다시 띄운 stable 파드가 Ready가 될 때까지 카나리 파드도 요청을 받는다.
@@ -55,10 +67,11 @@ spec:
     {{- include "shortener.appPodTemplate" . | nindent 4 }}
   {{- /*
   진행 기한: 배포가 앞으로 나아가지 못한 채(새 파드가 Ready가 되는 것 같은 진전이 없이) 300초가 지나면 중단한다(progressDeadlineAbort).
-  기본값은 600초가 지나도 Degraded로 표시만 하고 중단하지 않는다. 분석은 1단계부터 돌므로, 시작에 실패해 재시작을 되풀이하는(CrashLoopBackOff) 버전은
+  기본값은 600초가 지나도 Degraded로 표시만 하고 중단하지 않는다. 분석은 2단계에서 돌므로, 시작에 실패해 재시작을 되풀이하는(CrashLoopBackOff) 버전은
   0단계에서 멈춘 채 분석에 걸리지 않는다. 이 기한이 그런 버전을 중단한다(그동안 stable은 maxUnavailable 0이라 파드를 줄이지 않고 요청을 받는다).
   300초는 파드 하나가 Ready가 되기까지 걸릴 수 있는 시간보다 넉넉하다: 시작 프로브가 기다려 주는 최대 120초(2초 × 60번)에 새 이미지를 받는 시간과
-  readiness가 처음 성공하기까지의 몇 초를 더해도 남는다. 기한은 마지막으로 나아간 때(파드 하나가 Ready가 된 때 등)부터 다시 세고, pause 단계의 대기는 세지 않는다.
+  readiness가 처음 성공하기까지의 몇 초를 더해도 남는다. 기한은 마지막으로 나아간 때(파드 하나가 Ready가 된 때 등)부터 다시 세고,
+  pause 단계와 analysis 단계에 머무는 시간은 세지 않는다(Argo Rollouts가 두 단계를 끝을 모르는 단계로 보고 기한을 검사하지 않는다).
   */}}
   progressDeadlineSeconds: 300
   progressDeadlineAbort: true
@@ -74,13 +87,12 @@ spec:
       steps:
         - setWeight: 50
         - pause:
-            duration: 2m
-      analysis:
-        templates:
-          - templateName: {{ include "shortener.fullname" . }}-error-rate
-        startingStep: 1
-        args:
-          - name: canary-hash
-            valueFrom:
-              podTemplateHashValue: Latest
+            duration: 1m
+        - analysis:
+            templates:
+              - templateName: {{ include "shortener.fullname" . }}-error-rate
+            args:
+              - name: canary-hash
+                valueFrom:
+                  podTemplateHashValue: Latest
 {{- end }}

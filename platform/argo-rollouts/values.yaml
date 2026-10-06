@@ -47,6 +47,9 @@ controller:
     serviceMonitor:
       # Prometheus가 위 Service를 수집하게 하는 ServiceMonitor(job은 Service 이름인 argo-rollouts-metrics). rollout_info, analysis_run_info 같은 지표가 나온다.
       # kube-prometheus-stack의 Prometheus는 레이블이 없는 ServiceMonitor도 모든 네임스페이스에서 고르므로(platform/kube-prometheus-stack/values.yaml의 *SelectorNilUsesHelmValues: false) 레이블을 더하지 않는다.
+      # 이 차트의 ServiceMonitor에는 honorLabels가 없다(Prometheus Operator의 기본값 false). 그래서 지표의 namespace 레이블(Rollout의 네임스페이스)은 수집할 때 exported_namespace로 바뀌고
+      # namespace에는 이 네임스페이스(argo-rollouts)가 붙는다. 앱 차트의 앱 파드 경보(charts/shortener/templates/prometheusrule.yaml)가 exported_namespace·name으로 Rollout을 고르므로,
+      # relabelings·metricRelabelings로 이 레이블을 바꾸면 그 식도 함께 바꾼다.
       # ServiceMonitor CRD는 kube-prometheus-stack이 설치한다. 차트는 CRD가 있는지 보지 않고 이 리소스를 만들어서, 새 클러스터에서는 두 Application의 첫 동기화 순서에 걸린다.
       # 아래 어노테이션은 ArgoCD가 이 리소스 하나만은 CRD가 아직 없어도 동기화 전 검증(dry-run)을 건너뛰게 한다. 그러면 나머지(CRD, 컨트롤러, 대시보드)가 먼저 적용되고
       # 이것만 CRD가 생길 때까지 다시 시도된다. Application 전체(syncOptions)에 걸지 않은 것은 CRD가 없는 다른 종류까지 검증을 건너뛰지 않게 하려는 것이다(argocd/apps/argo-rollouts.yaml의 retry 주석).
