@@ -44,9 +44,13 @@ argocd/apps/monitoring-dashboards.yaml      Grafana 대시보드 Application (�
 platform/dashboards/             대시보드 JSON과 kustomization (ConfigMap으로 만든다. 아래 "대시보드")
 argocd/apps/argo-rollouts.yaml      점진 배포 Application (Argo Rollouts: 외부 차트 + 이 저장소의 값, multi-source)
 platform/argo-rollouts/values.yaml  그 값 (컨트롤러·CRD·대시보드. 아래 "Argo Rollouts")
+argocd/apps/cert-manager.yaml       인증서 Application (cert-manager: 외부 차트 + 이 저장소의 값, multi-source)
+platform/cert-manager/values.yaml   그 값 (컨트롤러·웹훅·cainjector·CRD. 아래 "HTTPS")
+argocd/apps/cert-issuers.yaml       인증서 발급자 Application (이 저장소의 디렉터리를 그대로 적용)
+platform/cert-issuers/              Let's Encrypt ClusterIssuer 두 개(letsencrypt-staging, letsencrypt-prod)
 tests/slo/                       앱 SLO 규칙(차트의 PrometheusRule)의 promtool 단위 테스트. validate가 차트를 렌더링해 꺼낸 규칙으로 돌린다
 tests/canary/                    카나리 분석 쿼리(차트의 AnalysisTemplate)의 promtool 단위 테스트. validate가 렌더링 결과에서 쿼리를 꺼내 돌린다
-.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링(Rollout·Deployment 두 갈래), 스키마 검사, SLO 규칙·카나리 분석 쿼리 검사, 플랫폼 차트 렌더링, 대시보드 검사)
+.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링(Rollout·Deployment 두 갈래), 스키마 검사, Ingress HTTPS 확인, SLO 규칙·카나리 분석 쿼리 검사, 플랫폼 차트 렌더링, 인증서 발급자·대시보드 검사)
 .github/workflows/terraform-plan.yml  infra/aws를 바꾸는 PR의 terraform plan 요약 (GitHub OIDC로 읽기 전용 역할을 맡는다. 필수 검사 아님. infra/aws/README.md)
 .github/dependabot.yml           GitHub Actions 주간 갱신
 ```
@@ -54,7 +58,8 @@ tests/canary/                    카나리 분석 쿼리(차트의 AnalysisTempl
 | | dev | prod |
 |---|---|---|
 | 네임스페이스 | `shortener-dev` | `shortener-prod` |
-| 주소 | http://dev.dev-ops-study.duckdns.org | http://dev-ops-study.duckdns.org |
+| 주소 | https://dev.dev-ops-study.duckdns.org | https://dev-ops-study.duckdns.org |
+| 인증서 발급자 (`ingress.tls.clusterIssuer`) | `letsencrypt-staging` | `letsencrypt-staging` (확인한 뒤 둘 다 `letsencrypt-prod`로. 아래 "HTTPS") |
 | 이미지 태그를 바꾸는 방법 | 앱 저장소 CI가 자동으로 커밋 | 사람이 PR로 승격 |
 | 파드 | 2개 고정 | HPA가 2~3개로 조절 (아래 메모리 메모) |
 | 앱 메모리 요청 / 한도 | 384Mi / 512Mi | 384Mi / 512Mi |
@@ -63,7 +68,8 @@ tests/canary/                    카나리 분석 쿼리(차트의 AnalysisTempl
 - 클러스터는 EC2 `m7i-flex.large`(2 vCPU, 메모리 8GiB, ap-northeast-2) 한 대의 k3s다. dev·prod 두 환경과 ArgoCD가 이 노드 하나를 나눠 쓴다.
   로컬 k3d 클러스터는 Docker VM(2.84GiB)의 메모리가 dev 롤링 업데이트 중에 모자라서 프로젝트를 옮기고 멈춰 두었다(아래 메모리 메모).
 - 주소는 DuckDNS 이름 `dev-ops-study`다. DuckDNS가 그 아래의 하위 이름도 같은 IP로 해석하므로 dev 주소(`dev.dev-ops-study.duckdns.org`)는 따로 등록하지 않는다.
-  두 주소가 같은 노드의 80 포트로 들어오고, Traefik이 Host 헤더로 dev와 prod를 나눈다. 지금은 평문 HTTP(80)뿐이다(HTTPS는 나중에 cert-manager로 붙인다).
+  두 주소가 같은 노드의 443 포트로 들어오고, Traefik이 Host 헤더(TLS의 SNI)로 dev와 prod를 나눈다. 인증서는 cert-manager가 Let's Encrypt에서 받고,
+  80 포트(평문 HTTP)로 온 요청은 Traefik이 https로 돌려보낸다(아래 "HTTPS").
 - DB 비밀번호 Secret `shortener-db`(키 `password`)는 **Git에 없다.** 각 네임스페이스에 손으로 만든다(아래 부트스트랩).
 - 리소스 이름은 ArgoCD가 Application 이름을 Helm 릴리스 이름으로 쓰기 때문에 `shortener-dev`, `shortener-dev-postgresql`, `shortener-dev-redis`처럼 환경 이름으로 시작한다(prod도 같다).
 - ArgoCD는 Helm을 `helm template`으로 렌더링하는 도구로만 쓴다. Helm 릴리스를 만들지 않으므로 `helm ls`에 보이지 않고 `helm rollback`·`helm test`는 쓸 수 없다
@@ -171,18 +177,22 @@ kubectl apply -f argocd/root.yaml
 확인:
 
 ```bash
-kubectl -n argocd get applications          # root, shortener-dev·prod, kube-prometheus-stack, loki, alloy, monitoring-dashboards, argo-rollouts가 Synced·Healthy가 될 때까지 몇 분 걸린다
+kubectl -n argocd get applications          # root, shortener-dev·prod, kube-prometheus-stack, loki, alloy, monitoring-dashboards, argo-rollouts, cert-manager, cert-issuers가 Synced·Healthy가 될 때까지 몇 분 걸린다
 kubectl -n shortener-dev get pods
 kubectl -n shortener-prod get pods
 kubectl -n monitoring get pods              # 아래 "모니터링"의 파드 8개
 kubectl -n argo-rollouts get pods           # 아래 "Argo Rollouts"의 파드 2개
-curl -i -X POST http://dev.dev-ops-study.duckdns.org/api/v1/urls -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
-curl -i -X POST http://dev-ops-study.duckdns.org/api/v1/urls     -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
+kubectl -n cert-manager get pods            # 아래 "HTTPS"의 파드 3개
+kubectl get clusterissuer                   # letsencrypt-staging·prod의 READY가 True(ACME 계정 등록)
+kubectl get certificate -A                  # shortener-dev-tls·shortener-prod-tls의 READY가 True(인증서 발급. 몇 분 걸린다)
+# -k: 발급자가 letsencrypt-staging인 동안은 인증서를 믿을 수 없어 검사를 건너뛴다. prod 발급자로 바꾼 뒤에는 뺀다
+curl -ik -X POST https://dev.dev-ops-study.duckdns.org/api/v1/urls -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
+curl -ik -X POST https://dev-ops-study.duckdns.org/api/v1/urls     -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
 ```
 
 첫 배포에서 앱이 DB보다 먼저 뜨면 몇 번 재시작한 뒤 자리를 잡는다(정상).
 
-**ArgoCD UI**: EC2에서는 Ingress로 열지 않고 port-forward로 본다(`server.insecure: true`라 UI가 평문 HTTP이기 때문이다). `kubectl -n argocd port-forward svc/argocd-server 8080:80` 뒤 http://localhost:8080 , 사용자 `admin`.
+**ArgoCD UI**: EC2에서는 Ingress로 열지 않고 port-forward로 본다(`server.insecure: true`라 UI가 평문 HTTP이기 때문이다. HTTPS를 붙인 뒤에도 열지 않는 이유는 아래 "HTTPS"의 관리 UI). `kubectl -n argocd port-forward svc/argocd-server 8080:80` 뒤 http://localhost:8080 , 사용자 `admin`.
 초기 비밀번호는 ArgoCD 서버가 처음 시작할 때 Secret에 만들어 둔다. (로컬 k3d에서는 Ingress로 http://argocd.localhost:8090 이다.)
 
 ```bash
@@ -277,8 +287,8 @@ Loki는 같은 이미지·설정의 로컬 컨테이너에서 잰 값(쓰기만 
 
 ### 열어 보기 (port-forward)
 
-Ingress를 만들지 않는다. 80 포트는 인터넷에 열린 평문 HTTP라 Grafana 로그인 화면과 인증이 없는 Prometheus·Alertmanager의 UI·API를 그대로 내놓게 된다.
-HTTPS를 붙이기 전(6단계)에는 ArgoCD UI처럼 맥에서 port-forward로만 본다(인터넷을 건너는 구간은 k3s API의 TLS뿐이다).
+Ingress를 만들지 않는다. Ingress를 만들면 Grafana 로그인 화면과 인증이 없는 Prometheus·Alertmanager의 UI·API를 인터넷에 그대로 내놓게 된다.
+6단계에서 HTTPS를 붙였지만 그대로 ArgoCD UI처럼 맥에서 port-forward로만 본다(인터넷을 건너는 구간은 k3s API의 TLS뿐이다). HTTPS는 내용을 숨길 뿐 누가 들어오는지는 막지 않는다(아래 "HTTPS"의 관리 UI).
 
 ```bash
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80          # http://localhost:3000 (사용자 admin)
@@ -437,7 +447,7 @@ Application `argo-rollouts`가 Helm 차트 `argo/argo-rollouts` **2.43.2**(Argo 
 
 ### 대시보드 열기 (port-forward)
 
-Ingress를 만들지 않는다. 대시보드에는 인증이 없고 80 포트는 인터넷에 열린 평문 HTTP라서(위 "열어 보기"와 같은 이유) 맥에서 port-forward로만 본다.
+Ingress를 만들지 않는다. 대시보드에는 인증이 없어서 Ingress로 열면 HTTPS든 아니든 누구나 닿는다(위 "열어 보기"와 같은 이유). 맥에서 port-forward로만 본다.
 
 ```bash
 kubectl -n argo-rollouts port-forward svc/argo-rollouts-dashboard 3100:3100     # http://localhost:3100/rollouts
@@ -475,6 +485,151 @@ kubectl -n argo-rollouts port-forward svc/argo-rollouts-dashboard 3100:3100     
 - ArgoCD 컨트롤러의 메모리에 주는 영향은 작다. 이 차트가 더하는 매니페스트는 객체 20개, JSON으로 약 0.3MiB(그중 CRD 5개가 약 0.28MiB)로 kube-prometheus-stack(약 3.0MiB)의 10분의 1이다.
   그래도 새 인스턴스에서 처음 동기화할 때 컨트롤러의 최고 사용량(`memory.peak`)을 다시 본다(근거는 `bootstrap/argocd/values.yaml`의 컨트롤러 주석).
 
+## HTTPS (cert-manager, Let's Encrypt)
+
+Application `cert-manager`가 Helm 차트 `jetstack/cert-manager` **v1.21.2**를 `platform/cert-manager/values.yaml`의 값으로 `cert-manager` 네임스페이스에 배포한다(다른 플랫폼 앱과 같은 multi-source).
+Application `cert-issuers`는 `platform/cert-issuers/`의 ClusterIssuer 두 개(`letsencrypt-staging`, `letsencrypt-prod`)를 그대로 적용한다. 인증서를 요청하는 쪽은 앱 차트의 Ingress다(`ingress.tls`).
+
+| 파드 | 하는 일 | CPU 요청 | 메모리 요청 / 한도 |
+|---|---|---|---|
+| `cert-manager` | 컨트롤러: Ingress를 보고 Certificate를 만들고(ingress-shim), ACME 주문·검증·발급·갱신을 한다 | 10m | 64Mi / 192Mi |
+| `cert-manager-webhook` | cert-manager 리소스(ClusterIssuer, Certificate 등)를 적용할 때 검사하는 어드미션 웹훅 | 10m | 32Mi / 96Mi |
+| `cert-manager-cainjector` | 웹훅 설정의 caBundle에 웹훅 서버의 CA를 넣는다 | 10m | 64Mi / 192Mi |
+| **합계** | | **30m** | **160Mi / 480Mi** |
+
+값은 클러스터에서 잰 것이 아니라 이 규모(인증서 2개)를 가정한 추정이라 띄운 뒤 `kubectl top pods -n cert-manager`로 확인한다(근거는 값 파일의 resources 주석). 합계는 아래 메모리 메모에 들어 있다.
+발급·갱신하는 동안에는 앱 네임스페이스에 검증용 파드(`cm-acme-http-solver-<임의>`, 요청·한도 64Mi)가 수십 초 뜬다.
+
+### 인증서가 나오는 길
+
+```
+environments/<환경>/values.yaml의 ingress.tls(enabled, clusterIssuer)
+  → 앱 차트의 Ingress에 spec.tls(Secret shortener-<환경>-tls)와 어노테이션 cert-manager.io/cluster-issuer
+  → cert-manager의 ingress-shim이 같은 네임스페이스에 Certificate shortener-<환경>-tls를 만든다(소유자는 그 Ingress)
+  → CertificateRequest → ACME 주문(Order) → 이름마다 검증(Challenge, HTTP-01)
+       cert-manager가 검증용 파드·Service·Ingress(경로 /.well-known/acme-challenge/<토큰>)를 만들고, 클러스터 안에서 그 주소를 먼저 불러 본 뒤(self-check)
+       Let's Encrypt에 검증을 요청한다 → Let's Encrypt가 http://<이름>/.well-known/acme-challenge/<토큰>을 80 포트로 불러 확인한다
+  → 받은 인증서를 Secret shortener-<환경>-tls에 넣고 검증용 리소스를 지운다 → Traefik이 그 Secret을 읽어 443에서 SNI가 그 이름인 연결에 내놓는다
+  → 수명(Let's Encrypt 기본 90일)의 2/3이 지나면(만료 30일 전) 같은 길로 갱신한다
+```
+
+- **80 포트는 https로 돌려보낸다.** 앱 Ingress에 Traefik의 Middleware(`redirectScheme`, 차트 `templates/https-redirect.yaml`)가 붙는다. GET은 301, POST 등은 308이라 메서드와 본문이 그대로 https로 간다.
+  검증 요청은 cert-manager가 따로 만든 Ingress로 가서 돌려보내지지 않는다(경로가 더 길어 Traefik이 그 라우터를 먼저 고른다. 차트 `templates/ingress.yaml` 머리말).
+- **인증서가 나오기 전**(첫 배포 뒤 몇 분)에는 Traefik이 자기 기본 자체 서명 인증서(`TRAEFIK DEFAULT CERT`)로 응답한다. 80은 이미 https로 돌려보내므로 그동안은 `curl -k`로만 닿는다.
+- **Secret은 ArgoCD가 추적하지 않는다**(cert-manager가 만든다). prune되지 않고, 인스턴스를 멈췄다 켜도(k3s의 데이터가 EBS에 남는다) 그대로라 다시 발급하지 않는다.
+  `terraform destroy` → `apply`는 클러스터를 새로 만들어 Secret과 ACME 계정 키(`cert-manager` 네임스페이스의 `letsencrypt-<staging|prod>-account-key`)가 없으므로 계정을 새로 만들고 두 환경 모두 다시 발급한다(아래 발급 한도).
+- ClusterIssuer에는 email을 적지 않는다. ACME의 선택 필드이고, Let's Encrypt는 2025-06-04에 만료 알림 메일을 끝냈다. 만료는 cert-manager의 자동 갱신이 막고, 확인은 아래 명령과 Prometheus로 한다.
+- DNS-01이 아니라 HTTP-01인 이유: DuckDNS의 TXT 레코드를 쓰려면 cert-manager에 외부 웹훅을 더 설치해야 한다. 80 포트는 이미 열려 있다. 와일드카드 인증서가 필요하면 DNS-01로 바꾼다.
+
+### staging과 prod
+
+| | `letsencrypt-staging` | `letsencrypt-prod` |
+|---|---|---|
+| ACME 서버 | `https://acme-staging-v02.api.letsencrypt.org/directory` | `https://acme-v02.api.letsencrypt.org/directory` |
+| 인증서 | 브라우저가 믿지 않는 시험용 CA(이름이 `(STAGING)`으로 시작한다). 브라우저는 경고를 내고 curl에는 `-k`가 필요하다 | 브라우저가 믿는다 |
+| 발급 한도 | 훨씬 크다(같은 이름 묶음으로 주당 30000장, 검증 실패는 시간당 200번) | 아래 "발급 한도" |
+
+두 환경 모두 staging으로 시작한다. 발급 흐름(검증, Secret, Traefik의 인증서 선택, 리다이렉트)을 한도 걱정 없이 먼저 확인하려는 것이다.
+staging에서 `kubectl get certificate -A`의 READY가 True이고 아래 `curl -vk`의 issuer에 `(STAGING)`이 보이면 prod로 바꾼다. 바꾸는 것은 환경마다 한 줄짜리 PR이다(dev를 먼저 바꿔 확인한 뒤 prod):
+
+```bash
+git switch main && git pull
+git switch -c https/dev-prod-issuer
+yq -i '.ingress.tls.clusterIssuer = "letsencrypt-prod"' environments/dev/values.yaml     # prod 환경은 environments/prod/values.yaml
+git diff                                   # 한 줄만 바뀌어야 한다
+git commit -am "feat(dev): HTTPS 인증서 발급자를 letsencrypt-prod로 바꾼다"
+git push -u origin HEAD
+gh pr create --fill
+```
+
+머지되면 ArgoCD가 Ingress의 어노테이션을 바꾸고, ingress-shim이 Certificate의 발급자를 바꾼다. cert-manager는 Secret에 적힌 발급자(어노테이션 `cert-manager.io/issuer-name`)와 Certificate의 발급자가 다른 것을 보고
+새 발급자에게서 다시 받아 같은 Secret을 고친다. Traefik은 Secret이 바뀌면 다시 읽으므로 재시작할 것이 없다. 되돌릴 때도 같은 한 줄을 staging으로 바꾼다.
+`validate`가 이 값이 `platform/cert-issuers`에 있는 ClusterIssuer의 이름인지 확인한다(오타면 Certificate가 발급자를 찾지 못해 인증서가 영영 나오지 않는다).
+
+### 발급 한도 (Let's Encrypt production)
+
+`duckdns.org`는 Public Suffix List에 있어서 Let's Encrypt는 `dev-ops-study.duckdns.org`를 "등록 도메인"으로 본다. 그래서 다른 DuckDNS 사용자와 한도를 나눠 쓰지 않고,
+dev(`dev.dev-ops-study.duckdns.org`)와 prod가 이 등록 도메인의 한도를 함께 쓴다. 숫자는 [Let's Encrypt 문서](https://letsencrypt.org/docs/rate-limits/)(2026-08-05 갱신본)의 것이다.
+
+| 한도 | 값 | 여기서 |
+|---|---|---|
+| 같은 이름 묶음(Exact Set of Identifiers)의 새 인증서 | 7일에 5장(34시간마다 1장씩 다시 찬다) | 환경마다 이름이 하나라 환경마다 따로 센다. destroy → apply마다 환경마다 1장을 쓰고, 갱신도 1장으로 센다(cert-manager v1.21.2의 ARI는 알파라 꺼져 있어 ARI 갱신 면제를 받지 않는다). 한 주에 다시 만들기를 4번 넘게 하지 않는다 |
+| 등록 도메인의 새 인증서 | 7일에 50장 | dev와 prod를 합쳐 센다. 같은 이름 묶음의 재발급은 갱신으로 보아 이 한도에서 빠진다 |
+| 검증 실패 | 계정·이름마다 1시간에 5번 | 80 포트나 DNS가 틀린 채 발급을 되풀이하면 걸린다. 그런 문제는 staging으로 고친다 |
+| 새 계정 | IP마다 3시간에 10개 | destroy → apply마다 발급자마다 계정이 하나씩 새로 생긴다(계정 키 Secret이 사라진다) |
+
+- 한도에 걸리면 기다리는 것 말고는 방법이 없다(인증서를 폐기해도 줄지 않는다). 발급 흐름을 바꾸는 시험은 staging으로 한다.
+- 멈췄다 켜기(stop/start)는 Secret이 남아 발급하지 않는다. 멈춰 둔 사이에 갱신 시점(발급 60일 뒤)이 지났으면 켤 때 갱신한다.
+- cert-manager는 발급이 실패하면 1시간 뒤, 그다음은 2·4·8…시간 뒤(최대 32시간) 다시 시도한다. 원인을 고친 뒤 기다리지 않으려면 cert-manager의 CLI로
+  `cmctl renew -n shortener-dev shortener-dev-tls`를 실행한다(`brew install cmctl`. Certificate에 Issuing 조건을 직접 붙여 발급을 바로 시작한다). 시도마다 검증 실패 한도를 쓰므로 원인부터 고친다.
+  검증을 요청하기 전에 클러스터 안에서 검증 주소를 먼저 불러 보고(self-check) 될 때까지 기다리므로, 인스턴스를 켠 직후 DuckDNS가 아직 옛 IP를 가리키는 동안은 실패로 세지 않고 기다린다.
+
+### 확인하기
+
+```bash
+kubectl get clusterissuer                                          # READY True: ACME 계정이 등록됐다
+kubectl get certificate -A                                         # READY True: 인증서가 Secret에 있다
+kubectl -n shortener-dev describe certificate shortener-dev-tls    # Status의 Not After·Renewal Time, Events
+kubectl get certificaterequest,order,challenge -A                  # 발급 중인 것. 끝나면 challenge는 사라진다
+kubectl -n shortener-dev describe challenge                        # 멈춰 있으면 Reason: self-check 실패, Let's Encrypt의 검증 오류 등
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' http://dev.dev-ops-study.duckdns.org/   # 301 https://dev.dev-ops-study.duckdns.org/
+curl -vk https://dev.dev-ops-study.duckdns.org/ -o /dev/null 2>&1 | grep -E 'subject:|issuer:|expire date:'   # staging이면 issuer에 (STAGING)
+```
+
+- `curl -I`(HEAD)는 GET이 아니라서 301이 아니라 308이 나온다(Traefik이 GET만 301로 돌려보낸다).
+- Prometheus(위 "열어 보기")에서 `certmanager_certificate_ready_status{condition="True"}`가 1인지, `(certmanager_certificate_expiration_timestamp_seconds - time()) / 86400`이 남은 날 수인지 본다.
+  ServiceMonitor는 값 파일이 켠다(job `cert-manager`, `webhook`, `cainjector`). 만료·발급 실패 경보 규칙은 아직 없다(아래 "아직 하지 않은 것").
+- ArgoCD UI에서는 Certificate·CertificateRequest·Order·Challenge와 검증용 파드·Ingress가 앱 Ingress 아래에 자식으로 보인다(소유자 참조). ArgoCD가 만든 것이 아니라 prune하지 않는다.
+
+### 관리 UI는 HTTPS를 붙여도 port-forward로만 본다
+
+Grafana·Prometheus·Alertmanager·ArgoCD·Argo Rollouts 대시보드에는 Ingress를 만들지 않는다.
+
+- HTTPS는 오가는 내용을 숨기고 상대가 그 이름의 서버인지 확인해 줄 뿐, 누가 들어오는지는 막지 않는다. 80·443은 전 세계에 열려 있다(`infra/aws/security.tf`).
+- Prometheus·Alertmanager·Argo Rollouts 대시보드에는 로그인이 없다. 열면 누구나 지표를 읽고, Alertmanager API로 사일런스를 만들어 경보를 끌 수 있다.
+- Grafana와 ArgoCD는 로그인이 있지만 관리자 비밀번호 하나에 기대고, 무차별 대입과 그 앱의 취약점이 인터넷에 그대로 노출된다. ArgoCD의 admin은 이 저장소가 배포하는 모든 것을 바꿀 수 있어 사실상 클러스터 관리자다.
+- port-forward는 k3s API(6443)를 거친다. 그 포트는 보안 그룹이 관리자 IP 하나에만 열고, kubeconfig의 클라이언트 인증서로 인증하며, 구간이 TLS다.
+  관리 UI를 밖에 열려면 그 앞에 인증(OAuth 프록시 등)과 출발지 제한을 먼저 둔다.
+
+### ArgoCD·k3s 때문에 정한 것
+
+- **CRD는 차트가 설치한다**(`crds.enabled: true`). 이 차트에는 CRD에 `Prune=false`를 붙일 값이 없어서(Argo Rollouts와 다르다) `crds.enabled`를 끄지 않는 것으로 지킨다. 끄면 prune이 CRD를 지우고
+  모든 Certificate·ClusterIssuer가 함께 지워진다(인증서 Secret은 남는다: Certificate가 Secret의 소유자가 아니다).
+- **ServerSideApply=true**: 가장 큰 CRD(clusterissuers·issuers)가 JSON으로 약 143KiB라 클라이언트 쪽 적용의 어노테이션 한도(256KiB)에 아직 닿지 않지만 절반을 넘어서 미리 켰다.
+- **caBundle은 OutOfSync가 아니다.** 웹훅 설정의 caBundle은 cainjector가 클러스터에서 채우는데, 차트가 이 필드를 렌더링하지 않아 ArgoCD가 비교하지 않는다. 그래서 `ignoreDifferences`를 두지 않았다.
+- **startupapicheck를 껐다.** 설치 확인용 Helm 훅 Job(post-install)인데 ArgoCD는 이것을 동기화할 때마다 PostSync로 다시 돌린다(kube-prometheus-stack의 웹훅 훅 Job을 끈 것과 같은 이유).
+- **첫 동기화의 순서**: cert-manager의 ServiceMonitor는 kube-prometheus-stack의 CRD를, `cert-issuers`의 ClusterIssuer는 cert-manager의 CRD와 웹훅을 기다린다. 웨이브는 한 Application 안의 순서라
+  두 경우 모두 Argo Rollouts와 같은 방법을 쓴다: 그 리소스에만 `SkipDryRunOnMissingResource=true`를 붙여 동기화 전 검증을 건너뛰고, Application의 `retry`(6번, 합쳐 약 8분)가 다시 시도한다.
+  ClusterIssuer는 CRD가 있어도 웹훅 파드가 뜨고 cainjector가 CA를 넣기 전에는 웹훅 호출이 실패해 거부되는데, 이것도 같은 다시 시도로 풀린다.
+- **리다이렉트 Middleware는 sync-wave -1**이다. 없는 미들웨어를 가리키는 Ingress는 Traefik이 라우터를 버려 404가 되므로, 처음 켜는 동기화에서 Middleware를 Ingress보다 먼저 만든다.
+- **Traefik**은 k3s v1.35.8+k3s1이 노드가 뜰 때 설치하는 차트 `traefik-40.1.4+up40.1.0`(Traefik v3.7.8, k3s 저장소의 `manifests/traefik.yaml`)을 그대로 쓴다. 이 저장소가 기대는 그 차트의 기본값은 셋이다:
+  websecure(443) entrypoint에 TLS가 켜져 있다(그래서 Ingress의 라우터가 443에서 TLS로 받는다), kubernetesCRD 공급자가 켜져 있고 `crossProviderNamespaces`가 없다(Ingress가 Middleware를 가리킬 수 있다),
+  인증서 resolver가 없다(Traefik 자신의 ACME 라우터가 `/.well-known/acme-challenge/`를 가로채지 않는다). k3s를 올릴 때 셋이 그대로인지 본다.
+- ArgoCD 컨트롤러의 메모리에 주는 영향은 작다. 이 차트가 더하는 매니페스트는 객체 47개, JSON으로 약 0.48MiB(그중 CRD 6개가 약 0.45MiB)로 kube-prometheus-stack(약 3.0MiB)의 6분의 1 정도다.
+
+### 아직 하지 않은 것
+
+- 인증서 만료·발급 실패 경보 규칙(`certmanager_certificate_ready_status`, `certmanager_certificate_expiration_timestamp_seconds`). 지표는 수집하고 있다.
+- HSTS(브라우저에게 앞으로 https로만 오라고 알리는 헤더). staging 인증서인 동안 붙이면 브라우저가 경고를 넘어가는 길까지 막아서 두지 않았다. prod 발급자로 바꾼 뒤에 다시 본다.
+- 앱 저장소의 부하 테스트(`loadtest/`)는 `BASE_URL`을 https 주소로 바꿔야 한다. http로 두면 리다이렉트 검사(`redirects: 0`)가 앱의 302 대신 Traefik의 301을 받는다.
+  staging 인증서인 동안에는 k6에 `--insecure-skip-tls-verify`가 필요하다.
+
+### 로컬에서 확인하기
+
+CI 단계의 스크립트를 그대로 꺼내 돌린다. 위 "로컬에서 검증하기"에서 읽은 변수를 쓰고, GitHub가 넣어 주는 `RUNNER_TEMP`·`GITHUB_WORKSPACE`는 대신 준다:
+
+```bash
+export KUBERNETES_VERSION KUBECONFORM_IMAGE K8S_SCHEMA_LOCATION CRD_SCHEMA_LOCATION
+export RUNNER_TEMP=$(mktemp -d) GITHUB_WORKSPACE=$PWD
+for step in "렌더링 + 쿠버네티스 스키마 검사 (dev, prod × Rollout, Deployment)" "앱 Ingress HTTPS 확인 (TLS, 리다이렉트, 발급자 이름)" \
+            "인증서 발급자 검사 (platform/cert-issuers)"; do
+  bash -e -c "$(yq ".jobs.validate.steps[] | select(.name == \"$step\") | .run" .github/workflows/validate.yml)" || break
+done
+```
+
+cert-manager 차트는 위 "로컬에서 검증하기"의 플랫폼 차트 명령이 다른 플랫폼 차트와 함께 렌더링해 검사한다. 렌더링 결과를 직접 보려면
+`helm template cert-manager cert-manager --repo https://charts.jetstack.io --version v1.21.2 -n cert-manager -f platform/cert-manager/values.yaml`이다.
+
 ## 메모리 메모
 
 노드는 EC2 `m7i-flex.large`(2 vCPU, 메모리 8GiB = 8192Mi) 한 대다. 로컬 Docker VM(2.84GiB)은 dev 롤링 업데이트 중에 메모리가 모자라서 프로젝트를 이 노드로 옮겼다.
@@ -489,18 +644,20 @@ JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 `-XX:Max
 | 모니터링: kube-prometheus-stack (파드 6개, 위 "모니터링" 표) | 1056Mi | 2432Mi |
 | 모니터링: Loki·Alloy (파드 2개, 위 "모니터링" 표) | 368Mi | 832Mi |
 | 점진 배포: Argo Rollouts (파드 2개, 위 "Argo Rollouts" 표. 5단계) | 96Mi | 320Mi |
+| 인증서: cert-manager (파드 3개, 위 "HTTPS" 표. 6단계) | 160Mi | 480Mi |
 | dev (앱 384Mi/512Mi + PostgreSQL 128Mi/256Mi + Redis 32Mi/128Mi, 앱 2개) | 928Mi | 1408Mi |
 | prod, HPA가 최대 3개까지 늘었을 때 (앱 3개 + PostgreSQL 256Mi/512Mi로 키움 + Redis 32Mi/128Mi) | 1440Mi | 2176Mi |
-| 합계 | 5248Mi | 9760Mi |
+| 합계 | 5408Mi | 10240Mi |
 | 배포(카나리, Argo Rollouts가 없으면 롤링 업데이트) 중 환경마다 앱 파드 하나 추가 (maxSurge 1) | +384Mi | +512Mi |
-| 합계, 두 환경이 동시에 배포 중일 때 | 6016Mi | 10784Mi |
+| 합계, 두 환경이 동시에 배포 중일 때 | 6176Mi | 11264Mi |
 
 - **요청 합은 최악에도 노드 안에 든다.** 요청은 스케줄러가 자리를 계산하는 값이다. prod가 3개인 채 두 환경이 동시에 배포해도(차트의 파드 템플릿을 고치면 두 환경이 같은 `main`의 차트를 읽어 동시에 배포된다)
-  6016Mi로 8192Mi(실제 MemTotal은 약 7.6GiB)보다 작다. 카나리는 늘어난 파드 하나를 대기와 분석(약 2분 30초) 동안 띄워 두므로(prod가 3개면 카나리 2개·stable 2개) 이 최악이 롤링 업데이트보다 오래간다.
+  6176Mi로 8192Mi(실제 MemTotal은 약 7.6GiB)보다 작다. 카나리는 늘어난 파드 하나를 대기와 분석(약 2분 30초) 동안 띄워 두므로(prod가 3개면 카나리 2개·stable 2개) 이 최악이 롤링 업데이트보다 오래간다.
   4단계에서 새로 더하는 요청은 약 1.6GiB까지로 잡았고(ArgoCD 컨트롤러 요청을 128Mi에서 384Mi로 올린 256Mi는 위 ArgoCD 행에 따로 들어 있다),
-  그중 kube-prometheus-stack이 1056Mi, Loki·Alloy가 368Mi를 쓴다(합 1424Mi. Loki·Alloy 몫으로 남겨 둔 약 580Mi 가운데 약 210Mi가 남는다). 5단계의 Argo Rollouts 96Mi는 그 몫과 별개로 위 합계에 더했다.
+  그중 kube-prometheus-stack이 1056Mi, Loki·Alloy가 368Mi를 쓴다(합 1424Mi. Loki·Alloy 몫으로 남겨 둔 약 580Mi 가운데 약 210Mi가 남는다). 5단계의 Argo Rollouts 96Mi와 6단계의 cert-manager 160Mi는 그 몫과 별개로 위 합계에 더했다.
+  인증서를 발급·갱신하는 동안에는 앱 네임스페이스마다 HTTP-01 검증 파드(acmesolver, 요청·한도 64Mi. cert-manager의 기본값)가 수십 초 뜬다. 잠깐이라 표에는 넣지 않았다(두 환경이 겹쳐도 요청 6304Mi).
   같은 계산이 `environments/prod/values.yaml`의 `autoscaling` 위 주석에도 있다(prod의 HPA 최대 3개를 정한 근거).
-- **한도 합은 최악에 노드 메모리를 넘는다(오버커밋).** 3단계까지는 모든 컨테이너가 한도까지 쓰는 최악(5664Mi)도 노드 안에 들게 잡았지만, 모니터링과 ArgoCD 한도를 더하니 넘고, 5단계에서 Argo Rollouts의 한도 320Mi와 dev 앱 하나를 더해 10784Mi가 된다.
+- **한도 합은 최악에 노드 메모리를 넘는다(오버커밋).** 3단계까지는 모든 컨테이너가 한도까지 쓰는 최악(5664Mi)도 노드 안에 들게 잡았지만, 모니터링과 ArgoCD 한도를 더하니 넘고, 5단계에서 Argo Rollouts의 한도 320Mi와 dev 앱 하나를 더해 10784Mi, 6단계에서 cert-manager의 480Mi를 더해 11264Mi가 된다.
   모든 컨테이너가 한꺼번에 한도까지 쓰는 일은 드물다고 보고 받아들인다. 한도는 컨테이너 하나가 폭주할 때 그 컨테이너만 OOMKilled로 멈추게 하는 상한이다.
   한도보다 노드가 먼저 모자라면 kubelet이 요청을 넘게 쓰는 파드부터 내쫓는다(그래서 요청을 평소 사용량 가까이 잡는다). 띄운 뒤 실제 사용량으로 다시 본다.
 - 위 합계는 추정이다. k3s 행의 약 800Mi는 로컬 k3d의 빈 클러스터에서 잰 약 770MiB를 올려 잡은 값이고 EC2에서는 재지 않았다. 8GiB는 명목 크기라 실제 MemTotal은 조금 작고 호스트 OS도 메모리를 쓰므로 그만큼 위 여유가 줄어든다.
@@ -533,11 +690,12 @@ mkdir -p tests/slo/rendered     # 렌더링해서 꺼낸 SLO 규칙을 둘 곳(.
 for env in dev prod; do
   diff <(yq '.' environments/$env/values.yaml) environments/$env/values.yaml     # 값 파일이 yq가 쓰는 모양인가 (출력이 없어야 한다)
   helm lint charts/shortener --strict --kube-version $KUBERNETES_VERSION -f environments/$env/values.yaml
-  # --api-versions: 모니터링 CRD와 Argo Rollouts가 있는 클러스터(지금의 EC2)처럼 렌더링해서 ServiceMonitor·PrometheusRule·Rollout·AnalysisTemplate도 나오게 한다
+  # --api-versions: 모니터링 CRD와 Argo Rollouts, Traefik이 있는 클러스터(지금의 EC2)처럼 렌더링해서 ServiceMonitor·PrometheusRule·Rollout·AnalysisTemplate·Middleware도 나오게 한다
   # (ArgoCD는 클러스터의 API 목록을 넘긴다)
   helm template shortener-$env charts/shortener --namespace shortener-$env --kube-version $KUBERNETES_VERSION \
     --api-versions monitoring.coreos.com/v1 --api-versions monitoring.coreos.com/v1/ServiceMonitor --api-versions monitoring.coreos.com/v1/PrometheusRule \
     --api-versions argoproj.io/v1alpha1 --api-versions argoproj.io/v1alpha1/Rollout --api-versions argoproj.io/v1alpha1/AnalysisTemplate \
+    --api-versions traefik.io/v1alpha1 --api-versions traefik.io/v1alpha1/Middleware \
     -f environments/$env/values.yaml > $out/shortener-$env.yaml
   docker run -i --rm $KUBECONFORM_IMAGE -strict -summary -schema-location "$K8S_SCHEMA_LOCATION" -schema-location "$CRD_SCHEMA_LOCATION" \
     -kubernetes-version $KUBERNETES_VERSION - < $out/shortener-$env.yaml
@@ -556,14 +714,14 @@ docker run --rm -v "$PWD/tests/slo:/slo:ro" --entrypoint /bin/promtool "$PROMETH
   test rules /slo/shortener-slo.test.yaml /slo/shortener-slo-deployment.test.yaml
 
 docker run --rm -v "$PWD":/work:ro -w /work $KUBECONFORM_IMAGE -strict -summary \
-  -schema-location "$K8S_SCHEMA_LOCATION" -schema-location "$CRD_SCHEMA_LOCATION" -kubernetes-version $KUBERNETES_VERSION argocd/
+  -schema-location "$K8S_SCHEMA_LOCATION" -schema-location "$CRD_SCHEMA_LOCATION" -kubernetes-version $KUBERNETES_VERSION argocd/ platform/cert-issuers/
 ```
 
 `helm template`은 ArgoCD가 하는 것과 같이 릴리스 이름(`shortener-dev`)과 네임스페이스를 주고 환경 값 파일을 얹어 렌더링한다. `image.tag`가 커밋 SHA 40자가 아니거나 DB Secret 이름이 없으면
 차트가 안내 메시지와 함께 실패한다. `helm lint`에는 `--api-versions` 옵션이 없어서 ServiceMonitor·PrometheusRule은 lint에서 렌더링되지 않는다(내용은 렌더링·kubeconform·promtool이 검사한다).
 SLO 규칙 테스트의 시나리오와 읽는 법은 `tests/slo/shortener-slo.test.yaml`의 머리말에 있다. 워크플로 파일은 `docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.12`로 검사한다.
 
-플랫폼 차트(argocd/apps에서 `chart:` 소스를 쓰는 Application. 지금은 kube-prometheus-stack, loki, alloy, argo-rollouts)는 CI 단계의 스크립트를 그대로 꺼내 돌린다.
+플랫폼 차트(argocd/apps에서 `chart:` 소스를 쓰는 Application. 지금은 kube-prometheus-stack, loki, alloy, argo-rollouts, cert-manager)는 CI 단계의 스크립트를 그대로 꺼내 돌린다.
 GitHub가 넣어 주는 변수 셋(`GITHUB_SERVER_URL`, `GITHUB_REPOSITORY`, `RUNNER_TEMP`)은 대신 준다. 위에서 읽은 변수를 그대로 쓴다:
 
 ```bash
@@ -635,13 +793,15 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | Terraform (CI) | 1.16.4 (로컬에서 `apply`하는 버전과 같게 둔다: `user_data`의 gzip 결과가 빌드한 Go 버전에 따라 달라질 수 있다) | `terraform-plan.yml`의 `setup-terraform` 입력 `terraform_version` |
 | kubeconform | v0.8.0 (태그@다이제스트) | `validate.yml`의 `KUBECONFORM_IMAGE` |
 | 쿠버네티스 내장 리소스 스키마 | yannh/kubernetes-json-schema 커밋 `8df8a88`(2026-09-29의 최신 커밋) | `validate.yml`의 `K8S_SCHEMA_LOCATION` |
-| CRD 스키마 (Argo CD, monitoring.coreos.com) | datreeio/CRDs-catalog 커밋 `d373c2d`(2026-09-29. Argo CD 3.5.0 CRD 기준. monitoring.coreos.com 스키마는 클러스터의 Prometheus Operator v0.94.1보다 오래됐다: `validate.yml`의 주석) | `validate.yml`의 `CRD_SCHEMA_LOCATION` |
+| CRD 스키마 (Argo CD, monitoring.coreos.com, traefik.io Middleware, cert-manager.io ClusterIssuer) | datreeio/CRDs-catalog 커밋 `d373c2d`(2026-09-29. Argo CD 3.5.0 CRD 기준. monitoring.coreos.com 스키마는 클러스터의 Prometheus Operator v0.94.1보다 오래됐다: `validate.yml`의 주석) | `validate.yml`의 `CRD_SCHEMA_LOCATION` |
 | Prometheus (promtool) | v3.15.0 (태그@다이제스트. kube-prometheus-stack 91.8.2가 띄우는 Prometheus와 같은 버전) | `validate.yml` "SLO 규칙 검사" 단계의 `PROMETHEUS_IMAGE` |
 | 검증 기준 쿠버네티스 | 1.35.0 (클러스터는 k3s v1.35.8) | `validate.yml`의 `KUBERNETES_VERSION`, `clusters/local/k3d.yaml` |
 | kube-prometheus-stack 차트 | 91.8.2 (Prometheus Operator v0.94.1. 이미지 태그도 이 차트 버전이 정한다) | `argocd/apps/kube-prometheus-stack.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
 | Loki 차트 | `grafana/loki` 7.3.0 (Loki 3.6.11. 이 차트는 이제 GEL용이고 OSS용은 grafana-community로 옮겨 갔다: 값 파일 맨 위 주석) | `argocd/apps/loki.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
 | Alloy 차트 | `grafana/alloy` 1.13.0 (Alloy v1.20.0, config-reloader v0.94.0) | `argocd/apps/alloy.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
 | Argo Rollouts 차트 | `argo/argo-rollouts` 2.43.2 (Argo Rollouts v1.10.0. 이미지 태그도 이 차트 버전이 정한다) | `argocd/apps/argo-rollouts.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
+| cert-manager 차트 | `jetstack/cert-manager` v1.21.2 (cert-manager v1.21.2. 이미지 태그도 이 차트 버전이 정한다) | `argocd/apps/cert-manager.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
+| Traefik (고정하지 않는다) | k3s v1.35.8+k3s1에 들어 있는 차트 `traefik-40.1.4+up40.1.0`(Traefik v3.7.8). k3s 버전을 따라간다 | k3s의 `manifests/traefik.yaml`. 기대는 기본값은 위 "HTTPS" |
 | kustomize (CI) | v5.8.1 (릴리스 파일을 받아 SHA-256으로 확인한다. ArgoCD v3.5.3에 들어 있는 kustomize와 같다) | `validate.yml` 대시보드 단계의 `KUSTOMIZE_VERSION`·`KUSTOMIZE_SHA256` |
 | CustomResourceDefinition 객체의 스키마 | yannh/kubernetes-json-schema 커밋 `8df8a88`의 `-local` 디렉터리 (`-standalone`에는 없다) | `validate.yml` 플랫폼 차트 단계의 `K8S_LOCAL_SCHEMA_LOCATION` |
 
@@ -662,11 +822,13 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 - `validate` 잡은 룰셋 "PR 필수"의 필수 상태 검사다(저장소 설정). 룰셋이 잡 이름으로 검사를 찾으므로 이름을 바꾸지 않는다. deploy key는 그 룰셋을 우회하므로 CI의 dev 태그 직접 커밋은
   이 검사를 기다리지 않고, 푸시된 뒤에 `push` 이벤트로 검사가 돈다(결과를 알려 줄 뿐 막지는 못한다. ArgoCD는 GitHub의 검사 결과를 보지 않는다).
 - Application을 지우면(루트의 prune 포함) 그것이 배포한 리소스는 클러스터에 남는다(삭제 finalizer를 붙이지 않았다). 네임스페이스와 PostgreSQL의 PVC도 남는다.
-- 외부 차트를 쓰는 Application(지금은 `kube-prometheus-stack`, `loki`, `alloy`, `argo-rollouts`)은 값을 `platform/<Application 이름>/values.yaml`에 두고 `$values/`로 가리킨다. 이 값 파일도 환경 값 파일처럼
+- 외부 차트를 쓰는 Application(지금은 `kube-prometheus-stack`, `loki`, `alloy`, `argo-rollouts`, `cert-manager`)은 값을 `platform/<Application 이름>/values.yaml`에 두고 `$values/`로 가리킨다. 이 값 파일도 환경 값 파일처럼
   빈 줄 없는 yq 모양을 지킨다(`validate`의 플랫폼 차트 단계가 검사한다). 인라인 값(`helm.values`·`valuesObject`·`parameters`)은 그 단계가 렌더링에 넣지 못해 거부한다.
 - kube-prometheus-stack의 `crds.enabled`는 끄지 않는다. 렌더링에서 CRD가 빠지면 prune이 CRD를 지우고, CRD가 지워지면 그 종류의 리소스(앱 차트의 ServiceMonitor·SLO 규칙 포함)가 모든 네임스페이스에서 함께 지워진다.
 - Argo Rollouts의 `installCRDs`도 끄지 않는다. 값 파일의 `crdAnnotations`(`Prune=false`)가 prune에서는 CRD를 지켜 주지만, CRD가 지워지면 Rollout이 모든 네임스페이스에서 지워지고 그 ReplicaSet과 파드까지 따라 지워져 앱이 내려간다.
   Argo Rollouts를 정말 없앨 때는 먼저 모든 Rollout을 Deployment로 되돌린 뒤 `kubectl delete crd`로 손으로 지운다.
+- cert-manager의 `crds.enabled`도 끄지 않는다. 이 차트는 CRD에 `Prune=false`를 붙일 수 없어서, 끄면 prune이 CRD를 지우고 모든 Certificate·ClusterIssuer가 함께 지워진다(인증서 Secret은 남는다).
+- 인증서 발급 흐름(발급자, 검증, Ingress의 TLS·리다이렉트)을 바꾸는 시험은 `letsencrypt-staging`으로 한다. production은 같은 이름으로 7일에 5장까지다(위 "HTTPS"의 발급 한도).
 - Alloy 설정(`platform/alloy/values.yaml`의 `alloy.configMap.content`)은 차트가 Helm의 tpl로 한 번 더 렌더링한다. 여는 중괄호 두 개를 연달아 쓰면 Helm 템플릿으로 읽히므로 쓰지 않는다.
   파이프라인을 고친 뒤에는 위 "로컬에서 검증하기"의 `alloy validate`로 확인한다.
 - Loki 레이블은 다섯 개(`namespace`, `pod`, `container`, `app`, `level`)로 둔다. 값이 많은 필드(요청 ID, URL 등)는 레이블로 올리지 않고 쿼리에서 `| json`으로 꺼낸다.
@@ -689,6 +851,11 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | argo-rollouts 동기화가 `Failed`로 보이고 메시지에 `ServiceMonitor`가 나온다 | 새 클러스터에서 kube-prometheus-stack보다 먼저 동기화돼, 그 차트가 설치하는 ServiceMonitor CRD(`kubectl get crd servicemonitors.monitoring.coreos.com`)가 아직 없다. CRD·컨트롤러·대시보드는 이미 적용돼 있고 ServiceMonitor만 다시 시도 중이라(6번, 약 8분) kube-prometheus-stack이 그 CRD를 만들고 나면 저절로 풀린다. 다시 시도를 모두 쓰고도 `Failed`로 멈춰 있으면 UI에서 직접 Sync한다(위 "Argo Rollouts") |
 | Grafana의 로그 패널이 비어 있거나 Loki 데이터 소스가 오류 | `kubectl -n monitoring get pods`로 `loki-0`이 Ready인지(뜬 뒤 준비까지 1분 안쪽), `alloy-*` 파드가 Running인지 본다. Alloy UI(위 "로그")에서 컴포넌트가 healthy인지와 읽고 있는 대상을, `kubectl -n monitoring logs ds/alloy -c alloy`에서 `loki.write`의 전송 오류를 본다. 단, Alloy 파드가 새로 뜬 직후 나오는 `final error sending batch, no retries left, dropping data` ... `status=400` ... `entry too far behind`는 문제가 아니다: 각 컨테이너의 로그 파일을 처음부터 다시 보내다가 그 스트림의 가장 새 줄보다 1시간 넘게 오래된 줄(이미 저장된 줄)을 Loki가 거절한 것이고, 같은 묶음의 다른 줄은 저장된다(`platform/alloy/values.yaml`의 mounts 주석) |
 | Alloy 로그에 `forbidden` | Alloy의 ClusterRole(`platform/alloy/values.yaml`의 `rbac`)에 그 컴포넌트가 쓰는 권한이 없다. 컴포넌트를 더했다면 필요한 권한도 더한다(차트 values.yaml의 rbac 주석에 컴포넌트별 권한이 있다) |
+| `kubectl get certificate -A`의 READY가 오래 False이다 | `kubectl -n <네임스페이스> describe certificate <이름>`의 Events와 `kubectl get challenge -A`를 본다. challenge가 `pending`이고 Reason이 self-check(`Waiting for HTTP-01 challenge propagation`)면 클러스터 안에서도 검증 주소가 열리지 않는 것이다: DuckDNS가 지금 IP를 가리키는지(`dig +short dev.dev-ops-study.duckdns.org`), 80이 보안 그룹에 열려 있는지, 검증용 Ingress(`cm-acme-http-solver-*`)가 생겼는지 본다. Let's Encrypt가 검증에 실패했으면 Order·Challenge에 그 오류가 남고, 다음 시도는 1시간 뒤부터다(위 "HTTPS"의 발급 한도) |
+| `kubectl get clusterissuer`의 READY가 False이다 | ACME 계정 등록이 실패했다. `kubectl describe clusterissuer <이름>`의 Status 메시지를 본다(서버 주소 오타, Let's Encrypt에 닿지 않음) |
+| cert-issuers 동기화가 `Running`이고 `Retrying attempt #N`, 메시지에 `no matches for kind "ClusterIssuer"`나 `failed calling webhook "webhook.cert-manager.io"` | 새 클러스터에서 cert-manager보다 먼저 동기화됐다. cert-manager의 CRD와 웹훅이 준비되면 다시 시도(6번, 약 8분)로 풀린다. 다시 시도를 모두 쓰고 멈춰 있으면 `kubectl -n cert-manager get pods`로 웹훅이 Ready인지 보고 UI에서 Sync한다 |
+| https 주소가 `TRAEFIK DEFAULT CERT`로 응답한다 | 인증서가 아직 Secret에 없다(첫 발급 중이거나 실패). 위 READY False 행을 본다. Secret이 있는데도 그렇다면 Ingress의 `spec.tls[].hosts`가 접속한 이름과 같은지 본다 |
+| 리다이렉트를 켠 뒤 그 호스트가 404다 | Traefik이 Ingress의 `router.middlewares`가 가리키는 Middleware를 찾지 못해 라우터를 버렸다. `kubectl -n <네임스페이스> get middleware.traefik.io`와 Traefik 로그(`kubectl -n kube-system logs deploy/traefik`의 `middleware ... does not exist`)를 본다 |
 | Discord로 알림이 오지 않는다 | Alertmanager UI(port-forward)에 그 경보가 있는지, 경로(위 "경보가 가는 길")에 맞는지 본다. `kubectl -n monitoring logs alertmanager-kube-prometheus-stack-alertmanager-0 -c alertmanager`에 notify 오류가 있으면 웹훅 주소 Secret을 확인한다(바꾸는 방법은 `infra/aws/README.md`) |
 
 ## 카나리 배포 (Argo Rollouts)

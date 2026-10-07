@@ -6,8 +6,8 @@
 # kube-state-metrics v2.20.0, node-exporter v1.12.1). 앱 차트처럼 이미지마다 태그@다이제스트로 고정하지 않는다: 이 차트는 Operator·CRD·이미지를
 # 서로 맞춰 둔 묶음이라 고정의 단위가 차트 버전이다(이미지만 따로 고정하면 차트를 올릴 때 Operator와 CRD·이미지가 어긋날 수 있다).
 #
-# 접속: Grafana·Prometheus·Alertmanager에 Ingress를 만들지 않는다(차트 기본값도 꺼짐). 80 포트는 인터넷에 열린 평문 HTTP라서 Ingress를 만들면
-# 로그인 화면과 관리 API를 그대로 내놓게 된다. HTTPS를 붙이기 전(6단계)에는 kubectl port-forward로만 본다(README의 모니터링 절).
+# 접속: Grafana·Prometheus·Alertmanager에 Ingress를 만들지 않는다(차트 기본값도 꺼짐). Ingress를 만들면 로그인 화면과 인증이 없는 관리 API(Alertmanager의 사일런스 등)를
+# 인터넷에 그대로 내놓게 된다. 6단계에서 앱에 HTTPS를 붙였지만 HTTPS는 내용을 숨길 뿐 누가 들어오는지는 막지 않아서, 그대로 kubectl port-forward로만 본다(README의 HTTPS 절).
 # 리소스: 모든 컨테이너에 요청과 메모리 한도를 두고 CPU 한도는 두지 않는다(앱 차트와 같은 이유: CPU 한도는 CFS 쿼터 스로틀링을 부른다).
 # 값은 클러스터에서 잰 것이 아니라 이 규모(노드 1개, 파드 수십 개)를 가정한 추정이다. 띄운 뒤 kubectl top pods -n monitoring으로 보고 고친다. 합계는 README에 있다.
 #
