@@ -168,6 +168,23 @@ true
 {{- end }}
 
 {{- /*
+HTTP→HTTPS 리다이렉트를 만들지. 참이면 "true", 아니면 빈 문자열을 돌려준다(shortener.rolloutEnabled와 같은 방식).
+Ingress와 TLS가 켜져 있고 클러스터가 Traefik의 Middleware kind를 알 때만 참이다. 조건의 이유는 https-redirect.yaml 머리말의 [조건부 생성]에 있다.
+https-redirect.yaml(Middleware)과 ingress.yaml(그것을 가리키는 어노테이션)이 이 한 곳을 함께 써서 둘이 함께 나오거나 함께 빠진다:
+어노테이션만 남으면 Traefik이 없는 미들웨어를 가리키는 라우터를 오류로 버려 그 호스트가 404가 된다.
+*/}}
+{{- define "shortener.httpsRedirectEnabled" -}}
+{{- if and .Values.ingress.enabled .Values.ingress.tls.enabled (.Capabilities.APIVersions.Has "traefik.io/v1alpha1/Middleware") -}}
+true
+{{- end -}}
+{{- end }}
+
+{{- /* 리다이렉트 Middleware의 이름. 41자로 자른 접두사에 15자를 붙여 쿠버네티스 이름 한계(253자) 안이다. */}}
+{{- define "shortener.httpsRedirectName" -}}
+{{- printf "%s-https-redirect" (include "shortener.fullname" .) -}}
+{{- end }}
+
+{{- /*
 장애 주입 비율(fault.errorRate)을 환경 변수 값으로 돌려준다. 0 이상 1 이하의 소수(예: "0", "0.05", "1")만 받고, 비어 있거나 그 밖의 값이면 여기서 템플릿이 실패한다.
 앱은 빈 값이나 범위 밖의 값을 받으면 시작할 때 설정 검증에서 실패해서, 그 값으로 배포하면 파드가 재시작을 되풀이한다(50%를 뜻하고 50을 적는 실수 같은 것).
 그 전에 렌더링(validate, ArgoCD)에서 걸리게 하려는 것이다. toString은 따옴표 없이 적은 숫자(0.5)도 받으려는 것이다.

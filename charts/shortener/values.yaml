@@ -57,6 +57,15 @@ ingress:
   # *.localhost는 RFC 6761이 루프백(127.0.0.1)으로 해석하라고 권고하는 이름이라, 브라우저와 curl 대부분이 /etc/hosts를 고치지 않아도 로컬로 보낸다.
   # Traefik은 이 호스트 이름(Host 헤더)으로 요청을 이 릴리스의 Service로 나눈다.
   host: shortener.localhost
+  # HTTPS. 켜면 Ingress에 spec.tls(호스트 ingress.host, Secret <fullname>-tls)와 cert-manager.io/cluster-issuer 어노테이션을 붙인다. cert-manager가 그 어노테이션을 보고
+  # Certificate를 만들어 아래 ClusterIssuer에서 인증서를 받아 그 Secret에 넣고, Traefik이 443 포트에서 그 인증서로 응답한다(templates/ingress.yaml 머리말).
+  # 클러스터가 Traefik의 Middleware kind를 알면 80 포트의 요청을 https로 돌려보내는 리다이렉트도 함께 만든다(templates/https-redirect.yaml).
+  tls:
+    # 기본은 끈다: cert-manager와 공개 DNS 이름이 없는 클러스터(예: 로컬 k3d의 *.localhost)에서는 인증서를 받을 수 없다. 이 저장소의 dev·prod는 환경 값 파일에서 켠다.
+    enabled: false
+    # 인증서를 받을 ClusterIssuer의 이름(platform/cert-issuers. letsencrypt-staging 또는 letsencrypt-prod). enabled가 true인데 비어 있으면 템플릿이 실패한다.
+    # 바꾸면 cert-manager가 Secret에 적힌 발급자와 달라진 것을 보고 새 발급자에게서 인증서를 다시 받는다.
+    clusterIssuer: ""
 
 autoscaling:
   enabled: true

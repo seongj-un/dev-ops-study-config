@@ -17,6 +17,13 @@
     k3d 클러스터(clusters/local/k3d.yaml)에서는 맥의 8090 포트가 Traefik의 80 포트로 이어진다.
 
     curl -i -X POST {{ .Values.baseUrl }}/api/v1/urls -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
+{{- if .Values.ingress.tls.enabled }}
+
+    HTTPS: 인증서는 cert-manager가 ClusterIssuer {{ .Values.ingress.tls.clusterIssuer }}에서 받아 Secret {{ include "shortener.fullname" . }}-tls에 넣는다.
+    READY가 True가 되기 전에는 Traefik의 기본 자체 서명 인증서로 응답한다. staging 발급자의 인증서는 신뢰되지 않아 curl에 -k가 필요하다.
+
+    kubectl -n {{ .Release.Namespace }} get certificate {{ include "shortener.fullname" . }}-tls
+{{- end }}
 {{- end }}
 
     port-forward 경유 (Ingress 없이 앱 Service의 80 포트로 바로):
