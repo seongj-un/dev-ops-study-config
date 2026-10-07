@@ -1,0 +1,86 @@
+# cert-manager 값: Helm 차트 jetstack/cert-manager v1.21.2 (cert-manager v1.21.2). ArgoCD의 cert-manager Application(argocd/apps/cert-manager.yaml)이 차트의 기본값 위에 이 파일을 얹어 cert-manager 네임스페이스에 배포한다.
+# 적지 않은 값은 그 차트 버전의 기본값이다: helm show values jetstack/cert-manager --version v1.21.2
+#
+# 하는 일: Certificate 리소스(어느 이름의 인증서를 어느 발급자에게서 받아 어느 Secret에 둘지)를 보고 인증서를 받아 Secret에 넣고, 만료 전에 갱신한다.
+# 이 저장소는 Certificate를 직접 적지 않는다. 앱 차트의 Ingress에 붙은 어노테이션(cert-manager.io/cluster-issuer)과 spec.tls를 컨트롤러 안의 ingress-shim이 보고
+# Certificate(이름은 spec.tls의 secretName)를 만든다. 인증서는 Let's Encrypt에서 ACME HTTP-01 검증으로 받고, 발급자(ClusterIssuer)는 다른 Application이 만든다
+# (platform/cert-issuers, argocd/apps/cert-issuers.yaml). 전체 흐름은 README의 HTTPS 절에 있다.
+# 파드는 셋이다: 컨트롤러(발급·갱신, ingress-shim, HTTP-01 검증용 파드·Service·Ingress 만들기), 웹훅(cert-manager 리소스를 적용할 때 검사하는 어드미션 웹훅),
+# cainjector(웹훅 설정의 caBundle에 웹훅 서버 인증서의 CA를 넣는다).
+#
+# 이미지는 차트 버전이 정하는 태그를 그대로 쓴다(quay.io/jetstack/cert-manager-controller·webhook·cainjector·acmesolver:v1.21.2. 모두 amd64·arm64 지원).
+# CRD가 차트에 들어 있어서 고정의 단위가 차트 버전인 것은 kube-prometheus-stack 값 파일 맨 위와 같은 이유다.
+# 접속: 이 Application이 만드는 것 중 클러스터 밖으로 열리는 것은 없다. HTTP-01 검증 동안 컨트롤러가 앱 네임스페이스에 잠깐 만드는 검증용 Ingress만 80 포트로 열린다(README의 HTTPS 절).
+# 리소스: 모든 컨테이너에 요청과 메모리 한도를 두고 CPU 한도는 두지 않는다(앱 차트와 같은 이유: CPU 한도는 CFS 쿼터 스로틀링을 부른다).
+# 값은 클러스터에서 잰 것이 아니라 이 규모(인증서 2개)를 가정한 추정이다. 띄운 뒤 kubectl top pods -n cert-manager로 보고 고친다. 합계는 README에 있다.
+#
+# 이 파일에는 빈 줄을 두지 않는다(환경 값 파일과 같은 yq 모양. validate 워크플로가 yq '.'로 다시 써도 그대로인지 검사한다).
+#
+# --- CRD ---
+# 차트가 CRD 6개(Certificate, CertificateRequest, Issuer, ClusterIssuer, Order, Challenge)를 설치하게 한다(차트 기본값은 설치하지 않는다).
+# keep(차트 기본값 true)은 CRD에 helm.sh/resource-policy: keep을 붙인다. ArgoCD는 이것을 Application을 지울 때 CRD를 지우지 않는 표시로 읽지만, prune은 이 어노테이션을 보지 않는다.
+# 이 차트에는 CRD에 어노테이션을 더하는 값이 없어서 Argo Rollouts처럼 Prune=false를 붙이지 못한다(platform/argo-rollouts/values.yaml의 crdAnnotations).
+# 그래서 crds.enabled는 끄지 않는다: 렌더링에서 CRD가 빠지면 prune이 CRD를 지우고, 그러면 모든 네임스페이스의 Certificate·ClusterIssuer·Order 등이 함께 지워진다.
+# 인증서 Secret은 남는다(enableCertificateOwnerRef의 기본값 false: Certificate가 Secret의 소유자로 등록되지 않아 함께 지워지지 않는다). 그래서 Traefik은 그 인증서로 계속 응답하지만,
+# 다시 켜기 전까지는 아무것도 갱신되지 않는다. 다시 켜면 selfHeal이 ClusterIssuer를, ingress-shim이 Certificate를 다시 만들고, Secret의 인증서가 아직 유효하고 발급자가 같으면 새로 발급하지 않는다.
+crds:
+  enabled: true
+  keep: true
+# --- 컨트롤러 ---
+# 파드 1개(차트 기본값). 리더 선출(Lease. 차트 기본값대로 kube-system에 둔다)로 하나만 일하므로 노드가 하나인 이 클러스터에서 늘릴 이유가 없다.
+# 컨트롤러가 잠시 없어도 이미 받은 인증서는 Secret에 있어 Traefik이 계속 쓴다. 발급과 갱신만 컨트롤러가 돌아올 때까지 미뤄진다(갱신은 만료 30일 전에 시작해 여유가 크다).
+# 클러스터 전체의 Certificate·CertificateRequest·Order·Challenge·Ingress와 Secret을 감시해 메모리에 캐시한다. Secret은 cert-manager가 만든 인증서 Secret(레이블 controller.cert-manager.io/fao)만
+# 통째로, 나머지는 메타데이터만 캐시한다(기능 게이트 SecretsFilteredCaching, v1.21.2의 기본값 켜짐). 그래서 다른 앱의 Secret 개수에 메모리가 크게 좌우되지 않는다.
+# 요청 64Mi는 이 규모(인증서 2개)의 평소 사용량으로 짐작한 값(추정)이고, 한도 192Mi는 그 세 배다: 시작할 때 감시 대상을 한꺼번에 읽어 캐시를 채우는 때의 여유다.
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 192Mi
+# --- 지표 ---
+prometheus:
+  enabled: true
+  servicemonitor:
+    # 컨트롤러·웹훅·cainjector의 /metrics(포트 http-metrics)를 Prometheus가 수집하게 하는 ServiceMonitor 하나를 만든다(차트 기본값은 꺼짐). job은 컴포넌트 이름(cert-manager, webhook, cainjector)이다.
+    # 인증서 만료 시각(certmanager_certificate_expiration_timestamp_seconds)과 준비 상태(certmanager_certificate_ready_status)가 여기서 나온다. 경보 규칙은 아직 두지 않았다(README의 HTTPS 절).
+    # kube-prometheus-stack의 Prometheus는 레이블이 없는 ServiceMonitor도 모든 네임스페이스에서 고르므로(platform/kube-prometheus-stack/values.yaml의 *SelectorNilUsesHelmValues: false) 레이블을 더하지 않는다.
+    # 차트가 붙이는 prometheus: default 레이블은 Prometheus가 셀렉터로 쓰지 않아 상관없다. 수집 주기는 차트 기본값(60s)이다: 인증서 지표는 하루 단위로 바뀐다.
+    # ServiceMonitor CRD는 kube-prometheus-stack이 설치한다. 새 클러스터에서 이쪽이 먼저 동기화되는 경우를 위해 이 리소스 하나만 동기화 전 검증을 건너뛰게 한다
+    # (Argo Rollouts의 ServiceMonitor와 같은 방법. 이유와 다시 시도는 argocd/apps/cert-manager.yaml의 retry 주석).
+    enabled: true
+    annotations:
+      argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+# --- 웹훅 ---
+webhook:
+  # 파드 1개(차트 기본값). 웹훅이 없으면 cert-manager 리소스(ClusterIssuer, Certificate 등)를 만들거나 고치는 요청이 실패한다(failurePolicy: Fail).
+  # 이미 받은 인증서와 Ingress·앱 요청에는 영향이 없다. 캐시를 두지 않아 메모리가 적다(cert-manager의 Best Practice 문서).
+  # 요청 32Mi는 차트 values.yaml의 예시 값과 같고, 한도 96Mi는 그 세 배다(추정).
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 96Mi
+  # 노드의 네트워크를 같이 쓰지 않는다(차트 기본값 false지만 적어 둔다). hostNetwork 파드는 IMDSv2의 홉 제한 1을 비켜 가 인스턴스 역할의 자격 증명을 얻을 수 있다.
+  # 이 클러스터는 hostNetwork 파드를 띄우지 않는다는 전제로 그것을 막는다(platform/kube-prometheus-stack/values.yaml의 node-exporter, infra/aws/README.md).
+  hostNetwork: false
+# --- cainjector ---
+cainjector:
+  # 파드 1개(차트 기본값, 리더 선출). 하는 일은 웹훅 설정(Validating·MutatingWebhookConfiguration cert-manager-webhook)의 caBundle을 채우는 것뿐이다:
+  # 웹훅이 시작할 때 자체 CA로 서버 인증서를 만들어 Secret cert-manager-webhook-ca에 두고, cainjector가 그 CA를 웹훅 설정에 넣어야 API 서버가 웹훅의 TLS를 믿는다.
+  # caBundle은 Git에 없는 값이지만 ArgoCD는 OutOfSync로 보지 않는다(argocd/apps/cert-manager.yaml의 ServerSideApply 주석). 그래서 ignoreDifferences를 두지 않는다.
+  # 메모리: 주입 대상인지는 어노테이션으로만 알 수 있어서 클러스터의 모든 CRD·웹훅 설정·APIService를 통째로 캐시한다(Secret은 메타데이터만).
+  # 이 클러스터에는 kube-prometheus-stack의 큰 CRD(가장 큰 것이 JSON으로 약 486KiB)가 있어서 컨트롤러와 같은 요청 64Mi·한도 192Mi로 잡았다(추정).
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+# --- 끈 것 ---
+# startupapicheck: 설치 뒤에 웹훅이 응답하는지 확인하는 Job이다. 차트가 Helm 훅(post-install)으로 만드는데, ArgoCD는 설치와 업그레이드를 구분하지 못해
+# 이 훅을 PostSync로 동기화할 때마다 다시 돌린다(Job과 그 ServiceAccount·Role·RoleBinding, 이미지 하나 더). kube-prometheus-stack의 웹훅 훅 Job을 끈 것과 같은 이유다.
+# 웹훅이 준비됐는지는 cert-issuers Application이 대신 드러낸다: 웹훅이 응답하지 않으면 ClusterIssuer를 적용하지 못하고 다시 시도한다(argocd/apps/cert-issuers.yaml).
+startupapicheck:
+  enabled: false
