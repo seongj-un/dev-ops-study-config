@@ -46,7 +46,9 @@ jobs:
       # Dependabot이 갱신해 주지 않으니 쿠버네티스 마이너 버전을 올려 새 스키마가 필요할 때 손으로 새 커밋 SHA로 바꾼다.
       K8S_SCHEMA_LOCATION: https://raw.githubusercontent.com/yannh/kubernetes-json-schema/8df8a883b68a24a104b4a9e43c1288090ae60b3b/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json
       # CRD(쿠버네티스 내장 리소스가 아닌 kind)의 스키마 위치. CRD는 위 내장 리소스 스키마에 없어서 datreeio의 CRD 스키마 모음에서 받는다. 이 저장소는 이것으로
-      # ArgoCD의 Application(argoproj.io, Argo CD 3.5.0 CRD 기준)과 차트의 ServiceMonitor·PrometheusRule(monitoring.coreos.com, Prometheus Operator의 CRD)을 검사한다.
+      # ArgoCD의 Application(argoproj.io, Argo CD 3.5.0 CRD 기준)과 차트의 ServiceMonitor·PrometheusRule(monitoring.coreos.com, Prometheus Operator의 CRD),
+      # 차트의 Middleware(traefik.io/middleware_v1alpha1.json), 발급자 ClusterIssuer(cert-manager.io/clusterissuer_v1.json)를 검사한다.
+      # 이 커밋의 두 스키마에는 쓰는 필드(redirectScheme의 scheme·permanent, ACME의 server·privateKeySecretRef·solvers[].http01.ingress.ingressClassName)가 모두 있다.
       # 이 커밋의 monitoring.coreos.com 스키마는 클러스터의 Prometheus Operator(v0.94.1, kube-prometheus-stack 91.8.2)보다 오래됐다(PrometheusRule은 0.80.1,
       # ServiceMonitor는 2026-02의 main 기준). 차트가 쓰는 필드는 모두 들어 있지만, 그 뒤에 생긴 필드를 쓰면 스키마에 없는 필드라서 검사가 실패한다.
       # 모음의 main 브랜치는 거의 매일 바뀌어서 브랜치 이름이 아니라 커밋 SHA로 고정했다: 남이 스키마를 바꿔도 이 저장소의 검증 결과가 어느 날 갑자기 달라지지 않는다.
@@ -101,9 +103,9 @@ jobs:
 
       # --strict: 경고도 실패로 취급한다. 값 파일(environments/<환경>/values.yaml)을 넘기는 이유는 image.tag와 DB Secret 이름이 차트의 필수 값이라
       # 값 없이 lint하면 템플릿이 안내 메시지와 함께 실패하기 때문이다. 그 값 파일이 차트 검증(태그가 커밋 SHA 40자인가 등)을 통과하는지도 함께 확인된다.
-      # 차트의 ServiceMonitor·PrometheusRule·Rollout·AnalysisTemplate은 여기서 렌더링되지 않는다. 네 템플릿은 클러스터에 그 CRD가 있을 때(.Capabilities.APIVersions)만 만들어지는데,
+      # 차트의 ServiceMonitor·PrometheusRule·Rollout·AnalysisTemplate·Middleware는 여기서 렌더링되지 않는다. 다섯 템플릿은 클러스터에 그 CRD가 있을 때(.Capabilities.APIVersions)만 만들어지는데,
       # helm lint에는 API 목록을 더하는 --api-versions 옵션이 없어서 CRD가 없는 클러스터처럼 렌더링한다(템플릿 문법 오류는 파일을 읽을 때 걸린다). 그래서 lint에서 앱은 Deployment다.
-      # 네 템플릿의 내용은 아래 단계들(렌더링 + 스키마 검사, 두 갈래 확인, promtool)이 검사한다.
+      # 다섯 템플릿의 내용은 아래 단계들(렌더링 + 스키마 검사, 두 갈래 확인, HTTPS 확인, promtool)이 검사한다.
       - name: 차트 lint (dev, prod)
         run: |
           for environment in dev prod; do
@@ -131,6 +133,8 @@ jobs:
       #     ArgoCD 자신의 CRD(Application 등)가 이 그룹/버전이라 클러스터에 늘 있으므로, 이것만으로 Rollout이 나온다면 조건이 틀린 것이다(다음 단계가 잡는다).
       # Rollout·AnalysisTemplate의 스키마도 CRD_SCHEMA_LOCATION의 커밋에 있다(argoproj.io/rollout_v1alpha1.json, analysistemplate_v1alpha1.json). Rollout의 스키마에는
       # 파드 템플릿 전체가 들어 있어서 -strict가 그 안의 오타까지 잡는다.
+      # 두 갈래 모두 Traefik의 traefik.io/v1alpha1/Middleware도 더한다. k3s는 노드가 뜰 때 Traefik의 CRD를 설치하므로 ArgoCD가 렌더링할 때 늘 있는 kind이고,
+      # 그러면 차트가 HTTP→HTTPS 리다이렉트 Middleware와 그것을 가리키는 Ingress 어노테이션을 만든다(차트 templates/https-redirect.yaml). Traefik이 없는 경우는 다음다음 단계가 따로 렌더링한다.
       - name: 렌더링 + 쿠버네티스 스키마 검사 (dev, prod × Rollout, Deployment)
         run: |
           for environment in dev prod; do
@@ -141,6 +145,8 @@ jobs:
                 --api-versions monitoring.coreos.com/v1/ServiceMonitor
                 --api-versions monitoring.coreos.com/v1/PrometheusRule
                 --api-versions argoproj.io/v1alpha1
+                --api-versions traefik.io/v1alpha1
+                --api-versions traefik.io/v1alpha1/Middleware
               )
               if [ "$workload" = rollout ]; then
                 api_versions+=(--api-versions argoproj.io/v1alpha1/Rollout --api-versions argoproj.io/v1alpha1/AnalysisTemplate)
@@ -202,6 +208,54 @@ jobs:
           done
           expect "prod Rollout 갈래의 HPA(apiVersion/kind/name)" argoproj.io/v1alpha1/Rollout/shortener-prod \
             '[select(.kind == "HorizontalPodAutoscaler") | .spec.scaleTargetRef | .apiVersion + "/" + .kind + "/" + .name] | join(",")' "$RUNNER_TEMP/prod.yaml"
+          exit "$status"
+
+      # 앱 Ingress의 HTTPS 설정을 yq로 확인한다. kubeconform은 리소스 하나하나의 모양만 보고, 이름으로 서로를 가리키는 것이 맞는지는 보지 않는다.
+      #   - 위 렌더링 단계의 네 결과(dev·prod × 두 갈래)마다: Ingress와 Middleware가 하나씩 있고, Ingress의 TLS 호스트가 규칙의 호스트와 같으며 Secret이 <릴리스>-tls다.
+      #     어노테이션 router.middlewares가 같은 결과의 Middleware를 <네임스페이스>-<이름>@kubernetescrd로 가리킨다(어긋나면 Traefik이 그 라우터를 버려 호스트가 404다).
+      #     어노테이션 cert-manager.io/cluster-issuer가 platform/cert-issuers에 있는 ClusterIssuer의 이름이다(오타면 Certificate가 발급자를 찾지 못해 인증서가 영영 나오지 않는다).
+      #   - Traefik의 Middleware kind를 모르는 클러스터처럼 한 번 더 렌더링해서, Middleware와 router.middlewares 어노테이션이 함께 빠지고 TLS는 남는지 본다
+      #     (차트의 shortener.httpsRedirectEnabled 하나가 둘을 정한다. 어노테이션만 남으면 위와 같은 404다).
+      # 기대와 다른 것이 있어도 바로 멈추지 않고 모두 오류로 남긴 뒤 실패한다.
+      - name: 앱 Ingress HTTPS 확인 (TLS, 리다이렉트, 발급자 이름)
+        run: |
+          status=0
+          # 인자: 설명, 기대값, yq ea 식, 파일
+          expect() {
+            actual="$(yq ea "$3" "$4")"
+            if [ "$actual" != "$2" ]; then
+              echo "::error::${1}: ${2}이어야 하는데 ${actual}이다"
+              status=1
+            fi
+          }
+          ingress='select(.kind == "Ingress")'
+          middlewares='.metadata.annotations."traefik.ingress.kubernetes.io/router.middlewares"'
+          issuers="$(yq ea '[select(.kind == "ClusterIssuer") | .metadata.name] | join(" ")' platform/cert-issuers/*.yaml)"
+          for environment in dev prod; do
+            # 릴리스 이름과 네임스페이스는 둘 다 shortener-<환경>이다(Application 이름과 destination.namespace).
+            release="shortener-$environment"
+            for suffix in "" -deployment; do
+              rendered="$RUNNER_TEMP/$environment$suffix.yaml"
+              expect "$release$suffix의 Ingress 수" 1 "[$ingress] | length" "$rendered"
+              expect "$release$suffix의 Middleware 수" 1 '[select(.kind == "Middleware")] | length' "$rendered"
+              expect "$release$suffix Ingress의 TLS Secret" "$release-tls" "[$ingress | .spec.tls[].secretName] | join(\",\")" "$rendered"
+              expect "$release$suffix Ingress의 TLS 호스트" "$(yq ea "[$ingress | .spec.rules[].host] | join(\",\")" "$rendered")" \
+                "[$ingress | .spec.tls[].hosts[]] | join(\",\")" "$rendered"
+              middleware="$(yq ea '[select(.kind == "Middleware") | .metadata.name] | join(",")' "$rendered")"
+              expect "$release$suffix Ingress의 router.middlewares" "$release-$middleware@kubernetescrd" "$ingress | $middlewares" "$rendered"
+              issuer="$(yq ea "$ingress | .metadata.annotations.\"cert-manager.io/cluster-issuer\"" "$rendered")"
+              if [[ " $issuers " != *" $issuer "* ]]; then
+                echo "::error::$release$suffix Ingress의 cert-manager.io/cluster-issuer($issuer)가 platform/cert-issuers의 ClusterIssuer($issuers) 중 하나가 아니다"
+                status=1
+              fi
+            done
+            no_traefik="$RUNNER_TEMP/$environment-no-traefik.yaml"
+            helm template "$release" charts/shortener --namespace "$release" --kube-version "$KUBERNETES_VERSION" \
+              -f "environments/$environment/values.yaml" > "$no_traefik"
+            expect "$release(Traefik 없음)의 Middleware 수" 0 '[select(.kind == "Middleware")] | length' "$no_traefik"
+            expect "$release(Traefik 없음) Ingress의 router.middlewares" null "$ingress | $middlewares" "$no_traefik"
+            expect "$release(Traefik 없음) Ingress의 TLS Secret" "$release-tls" "[$ingress | .spec.tls[].secretName] | join(\",\")" "$no_traefik"
+          done
           exit "$status"
 
       # 차트의 SLO 규칙과 앱 파드 경보(PrometheusRule)를 Prometheus의 도구 promtool로 검사한다. kubeconform은 리소스의 모양만 보고 그 안의 PromQL은 문자열로만 본다.
@@ -274,6 +328,29 @@ jobs:
             -schema-location "$CRD_SCHEMA_LOCATION" \
             -kubernetes-version "$KUBERNETES_VERSION" \
             argocd/
+
+      # platform/cert-issuers(cert-issuers Application)의 ClusterIssuer를 검사한다. ArgoCD가 이 디렉터리의 YAML을 렌더링 없이 그대로 적용하므로 파일을 바로 넘긴다.
+      #   1) kubeconform: 스키마는 CRD_SCHEMA_LOCATION의 커밋에 있다(cert-manager.io/clusterissuer_v1.json). -strict가 필드 이름의 오타(예: ingressClassname)를 잡는다.
+      #   2) yq: 이름과 ACME 서버 주소의 짝이 맞는지 본다. 스키마는 주소를 문자열로만 본다. 둘이 뒤바뀌면 staging이라고 믿고 하는 시험이 production의 발급 한도(같은 이름 묶음으로 7일에 5장)를 쓴다.
+      - name: 인증서 발급자 검사 (platform/cert-issuers)
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/work:ro" -w /work "$KUBECONFORM_IMAGE" \
+            -strict -summary \
+            -schema-location "$K8S_SCHEMA_LOCATION" \
+            -schema-location "$CRD_SCHEMA_LOCATION" \
+            -kubernetes-version "$KUBERNETES_VERSION" \
+            platform/cert-issuers/
+          status=0
+          for pair in "letsencrypt-staging https://acme-staging-v02.api.letsencrypt.org/directory" \
+                      "letsencrypt-prod https://acme-v02.api.letsencrypt.org/directory"; do
+            read -r name server <<< "$pair"
+            actual="$(yq ea "[select(.kind == \"ClusterIssuer\" and .metadata.name == \"$name\") | .spec.acme.server] | join(\",\")" platform/cert-issuers/*.yaml)"
+            if [ "$actual" != "$server" ]; then
+              echo "::error::ClusterIssuer $name의 ACME 서버가 ${server}이어야 하는데 ${actual}이다"
+              status=1
+            fi
+          done
+          exit "$status"
 
       # argocd/apps의 Application 가운데 Helm 차트 저장소의 차트를 쓰는 것(chart가 있는 소스. 예: kube-prometheus-stack)을 ArgoCD처럼 렌더링해 스키마로 검사한다.
       # 차트 저장소·차트 이름·버전·릴리스 이름(helm.releaseName, 없으면 Application 이름)·네임스페이스·값 파일을 모두 Application 파일에서 yq로 읽으므로
