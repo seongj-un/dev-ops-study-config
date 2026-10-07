@@ -1,0 +1,206 @@
+# terraform plan: infra/aws를 바꾸는 PR마다 AWS의 실제 상태와 비교한 계획을 만들어, 무엇이 생기고 바뀌고 지워지는지(특히 EC2 인스턴스 교체)를 머지 전에 보여 준다.
+# AWS 자격 증명은 저장소에 없다. 잡마다 GitHub의 OIDC 토큰으로 읽기 전용 역할(infra/bootstrap/github_oidc.tf의 dev-ops-study-github-plan)을 맡아
+# 짧게 사는 임시 자격 증명을 받는다. 흐름과 역할의 한계는 infra/aws/README.md의 "GitHub Actions에서 plan (OIDC)"에 있다.
+#
+# 이 저장소는 공개 저장소라서 실행 로그와 잡 요약을 누구나 본다. 그래서:
+#  - plan이 화면에 찍는 계획(속성 값이 모두 보인다)은 로그에 내지 않고 러너의 파일로 버린다. 잡 요약(Step Summary)에는 개수와 리소스 주소, 동작, 교체 이유만 쓴다.
+#  - plan 파일은 아티팩트로 올리지 않는다. 변수 값(관리자 IP)과 리소스 속성 전체가 들어 있다. GitHub 호스트 러너는 잡이 끝나면 통째로 사라진다.
+#  - 관리자 IP(admin_cidr)는 시크릿 ADMIN_CIDR에서 받는다. GitHub는 로그에 나온 시크릿 값을 ***로 가리지만, 그 전에 로그에 내지 않는 것이 먼저다.
+#
+# 필수 상태 검사가 아니다. 그래서 paths 필터를 쓸 수 있다. validate는 룰셋 "PR 필수"의 필수 검사라서, 필터로 워크플로가 건너뛰어지면 그 검사가
+# "Expected"로 남아 PR을 머지할 수 없다. 이 워크플로는 필수가 아니므로 건너뛰어도 PR을 막지 않는다.
+# 필수로 두지 않는 이유: AWS(자격 증명, API, state 버킷)에 기대는 검사이고, 포크와 Dependabot의 PR에서는 OIDC 토큰과 시크릿을 받지 못해 돌 수 없다.
+# 그리고 결과는 통과·실패가 아니라 사람이 읽고 판단할 정보다(plan이 "교체"를 보여 줘도 의도한 것일 수 있다).
+name: terraform-plan
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - infra/aws/**
+      # ec2.tf가 user_data(cloud-init)에 그대로 넣는 파일이다. 바뀌면 렌더링 결과가 달라져 인스턴스가 교체된다(user_data_replace_on_change).
+      - bootstrap/argocd/values.yaml
+      # 이 워크플로 자신. 워크플로를 고친 PR에서 바로 돌려 본다(pull_request는 PR 쪽의 워크플로 파일로 돈다).
+      - .github/workflows/terraform-plan.yml
+  # drift 검사: main의 코드와 AWS의 실제 상태를 손으로 비교한다(콘솔에서 바꾼 것, 바뀐 관리자 IP 등). Actions 탭에서 main을 골라 돌린다.
+  # 역할의 신뢰 정책이 PR 말고는 main(sub ...:ref:refs/heads/main)만 받으므로 다른 브랜치에서 돌리면 아래 "설정 확인"에서 멈춘다.
+  workflow_dispatch:
+
+# 기본 권한은 저장소 읽기뿐이다. OIDC 토큰(id-token: write)은 아래 plan 잡에만 준다.
+permissions:
+  contents: read
+
+# PR마다(수동 실행은 ref마다) 하나만 돈다. 새 커밋이 오면 이전 실행을 취소한다. plan은 -lock=false로 잠금을 잡지 않고 state를 쓰지 않아서 중간에 끊어도 남는 것이 없다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: terraform plan (infra/aws)
+    # 포크에서 온 PR과 Dependabot의 PR은 건너뛴다(실패가 아니라 skipped로 남는다). 둘 다 시크릿을 받지 못하고, GitHub는 포크 PR의 실행에 OIDC 토큰을 주지 않는다.
+    # Dependabot이 이 파일의 액션을 올린 PR은 그래서 여기서 검증되지 않는다. 머지한 뒤 main에서 workflow_dispatch로 한 번 돌려 확인한다.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.user.login != 'dependabot[bot]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # id-token: write가 있어야 잡이 GitHub에서 OIDC 토큰을 받는다. 잡 수준의 permissions는 위 워크플로 수준의 것을 통째로 대신하므로 contents: read도 다시 적는다.
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        # shell을 bash로 적으면 GitHub가 bash -eo pipefail로 실행한다(적지 않으면 pipefail이 없다). 파이프 앞쪽의 terraform이 실패해도 단계가 실패하게 한다.
+        shell: bash
+        working-directory: infra/aws
+    env:
+      # 상태 버킷 이름(infra/bootstrap이 만든다). 비밀이 아니다(계정 ID는 ARN과 콘솔에 그대로 보인다). backend.tf는 부분 구성이라 init 때 넘긴다.
+      TF_STATE_BUCKET: dev-ops-study-tfstate-803879842357
+      # infra/aws의 필수 변수 하나. 다른 하나(admin_cidr)는 시크릿이라 plan 단계에서만 넣는다.
+      TF_VAR_duckdns_subdomain: dev-ops-study
+    steps:
+      # 액션은 커밋 SHA로 고정하고 버전을 주석으로 남긴다(이유는 validate.yml의 같은 자리). Dependabot이 SHA와 주석을 함께 올린다.
+      - name: 소스 체크아웃
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 저장소 변수·시크릿이 없거나 main이 아닌 브랜치에서 손으로 돌렸을 때, AWS 오류(Not authorized 등) 대신 무엇을 하면 되는지 알려 주고 멈춘다.
+      # 값은 출력하지 않는다. 비어 있는지만 본다.
+      - name: 설정 확인 (저장소 변수·시크릿, 실행 브랜치)
+        env:
+          ROLE_ARN: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          ADMIN_CIDR: ${{ secrets.ADMIN_CIDR }}
+        run: |
+          status=0
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::수동 실행은 main에서만 된다(역할의 신뢰 정책이 받는 sub는 pull_request와 ref:refs/heads/main뿐이다). 지금 ref: $GITHUB_REF"
+            status=1
+          fi
+          if [ -z "$ROLE_ARN" ]; then
+            echo "::error::저장소 변수 AWS_PLAN_ROLE_ARN이 없다. infra/aws/README.md의 \"GitHub Actions에서 plan (OIDC)\"대로 gh variable set으로 넣는다."
+            status=1
+          fi
+          if [ -z "$ADMIN_CIDR" ]; then
+            echo "::error::저장소 시크릿 ADMIN_CIDR이 없다. infra/aws/README.md의 \"GitHub Actions에서 plan (OIDC)\"대로 gh secret set으로 넣는다."
+            status=1
+          fi
+          exit "$status"
+
+      # OIDC 토큰으로 역할을 맡는다(STS AssumeRoleWithWebIdentity). 받은 임시 자격 증명은 이 잡의 다음 단계들에 환경 변수로 들어간다.
+      #  - role-duration-seconds 900: 자격 증명을 15분(STS가 허용하는 최소)만 살린다. plan은 몇 분이면 끝나고, 잡이 끝난 뒤에도 만료 전까지는 유효하므로 짧을수록 좋다.
+      #  - role-session-name: CloudTrail에 이 이름이 남아 어느 실행이 무엇을 읽었는지 찾을 수 있다.
+      #  - allowed-account-ids: 다른 계정의 자격 증명을 받으면(변수를 잘못 넣는 등) 여기서 실패한다.
+      - name: AWS 자격 증명 (OIDC로 plan 역할 맡기)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ap-northeast-2
+          role-session-name: terraform-plan-${{ github.run_id }}
+          role-duration-seconds: 900
+          allowed-account-ids: "803879842357"
+
+      # Terraform은 로컬에서 apply하는 버전과 정확히 같은 1.16.4로 고정한다. infra/aws의 user_data는 base64gzip으로 압축하는데, 압축 결과의 바이트가
+      # Terraform을 빌드한 Go 버전에 따라 달라질 수 있다(ec2.tf의 주석). 버전이 다르면 내용이 같아도 plan이 인스턴스 교체를 보여 줄 수 있다.
+      # 로컬의 Terraform을 올릴 때 이 값도 함께 올린다. 액션 입력이라 Dependabot이 올려 주지 않는다(.github/dependabot.yml).
+      # terraform_wrapper: false: 래퍼는 terraform의 표준 출력을 잡아 단계 출력(outputs)으로 내보내고 로그에도 다시 찍는다. 이 워크플로는 출력을 파일로 버려야 하므로 끈다.
+      - name: Terraform 설치 (1.16.4)
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.16.4
+          terraform_wrapper: false
+
+      # -lockfile=readonly: .terraform.lock.hcl에 적힌 프로바이더 버전과 해시(linux_amd64 포함)만 받는다. 맞지 않으면 잠금 파일을 고치지 않고 실패한다.
+      # init은 백엔드에서 state 목록을 읽기만 한다(s3:ListBucket). 출력에는 값이 없다.
+      - name: terraform init
+        run: terraform init -input=false -lockfile=readonly -backend-config="bucket=$TF_STATE_BUCKET"
+
+      # -lock=false: 잠금 객체(aws/terraform.tfstate.tflock)를 만들지 않는다. 역할에 S3 쓰기가 없으므로(명시적 Deny) 잠그려 하면 AccessDenied로 실패한다.
+      #   plan은 state를 쓰지 않으니 잠그지 않아도 state가 깨질 일은 없다. 대신 누가 동시에 apply 중이면 그 도중의 state를 읽은 계획일 수 있다(참고용이라 받아들인다).
+      # 표준 출력(계획 전체와 refresh 줄)은 러너의 파일로 보내고 로그에 내지 않는다. 오류는 표준 오류로 나와 로그에 보이고, 그때 terraform이 0이 아닌 값으로 끝나 잡이 실패한다.
+      - name: terraform plan (출력은 로그에 내지 않는다)
+        env:
+          TF_VAR_admin_cidr: ${{ secrets.ADMIN_CIDR }}
+        run: terraform plan -lock=false -input=false -no-color -out="$RUNNER_TEMP/aws.tfplan" > "$RUNNER_TEMP/plan.txt"
+
+      # 저장한 계획을 JSON으로 바꿔(terraform show -json) jq로 요약만 꺼낸다. JSON에는 값이 모두 들어 있어서 파일로만 두고 출력하지 않는다.
+      # 요약에 넣는 것: 동작별 개수, 바뀌는 리소스의 주소·동작·이유(action_reason), 교체를 일으킨 속성의 이름(replace_paths. 값이 아니라 경로다),
+      # Terraform 밖에서 바뀐 리소스(resource_drift)의 주소. 속성 값과 출력(output) 값은 넣지 않는다.
+      # 교체나 삭제가 있으면 PR의 검사 화면에도 보이도록 경고(annotation)를 남긴다.
+      - name: 요약 (개수와 리소스 주소만)
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          plan_json="$RUNNER_TEMP/plan.json"
+          terraform show -json "$RUNNER_TEMP/aws.tfplan" > "$plan_json"
+          read -r create update replace delete read_ drift < <(jq -r '
+            [.resource_changes[]? | .change.actions] as $a
+            | [ ($a | map(select(. == ["create"])) | length),
+                ($a | map(select(. == ["update"])) | length),
+                ($a | map(select(contains(["create", "delete"]))) | length),
+                ($a | map(select(. == ["delete"])) | length),
+                ($a | map(select(. == ["read"])) | length),
+                ([.resource_drift[]?] | length) ]
+            | @tsv' "$plan_json")
+          {
+            echo "## terraform plan (infra/aws)"
+            echo
+            echo "이벤트 \`$GITHUB_EVENT_NAME\`, 커밋 \`${HEAD_SHA:0:7}\`. 속성 값은 싣지 않는다(공개 저장소). 자세한 계획은 로컬에서 \`terraform plan\`으로 본다."
+            echo
+            echo "| 추가 | 변경 | 교체 | 삭제 | 읽기(apply 때) | Terraform 밖에서 바뀐 것 |"
+            echo "|---|---|---|---|---|---|"
+            echo "| ${create} | ${update} | ${replace} | ${delete} | ${read_} | ${drift} |"
+            echo
+            jq -r '
+              def act:
+                if . == ["create"] then "추가"
+                elif . == ["update"] then "변경"
+                elif . == ["delete"] then "삭제"
+                elif . == ["delete", "create"] then "교체(지운 뒤 생성)"
+                elif . == ["create", "delete"] then "교체(생성한 뒤 삭제)"
+                elif . == ["read"] then "읽기(apply 때)"
+                else join("+") end;
+              def why:
+                {
+                  "replace_because_cannot_update": "제자리에서 바꿀 수 없는 속성이 바뀌었다",
+                  "replace_because_tainted": "tainted로 표시되어 있다",
+                  "replace_by_request": "-replace로 요청했다",
+                  "replace_by_triggers": "replace_triggered_by의 대상이 바뀌었다",
+                  "delete_because_no_resource_config": "코드에서 리소스가 없어졌다",
+                  "delete_because_no_module": "코드에서 모듈이 없어졌다",
+                  "delete_because_wrong_repetition": "count·for_each 사용 여부가 바뀌었다",
+                  "delete_because_count_index": "count 범위를 벗어났다",
+                  "delete_because_each_key": "for_each에 그 키가 없다",
+                  "delete_because_no_move_target": "moved의 대상이 없다",
+                  "read_because_config_unknown": "설정 값이 apply 때 정해진다",
+                  "read_because_dependency_pending": "의존하는 리소스가 바뀐다"
+                } as $m
+                | if . == null then "" else ($m[.] // .) end;
+              [.resource_changes[]? | select(.change.actions != ["no-op"])] as $changes
+              | [.resource_drift[]?] as $drift
+              | if ($changes | length) == 0 then "바뀌는 리소스가 없다."
+                else
+                  "### 바뀌는 리소스",
+                  "",
+                  "| 리소스 | 동작 | 이유 | 교체를 일으킨 속성 |",
+                  "|---|---|---|---|",
+                  ($changes[]
+                    | "| `\(.address)` | \(.change.actions | act) | \(.action_reason | why) | \([.change.replace_paths[]? | map(tostring) | join(".") | "`\(.)`"] | join(", ")) |")
+                end,
+              if ($drift | length) == 0 then empty
+                else
+                  "",
+                  "### Terraform 밖에서 바뀐 것 (drift)",
+                  "",
+                  "state에 적힌 것과 AWS의 실제가 다르다(콘솔에서 고치거나 지운 것 등). 코드와 다른 부분은 위의 계획이 코드대로 되돌린다.",
+                  "",
+                  ($drift[] | "- `\(.address)`: \(.change.actions | act)")
+                end
+            ' "$plan_json"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=terraform plan::추가 ${create}, 변경 ${update}, 교체 ${replace}, 삭제 ${delete}, Terraform 밖에서 바뀐 것 ${drift} (잡 요약에 리소스 주소가 있다)"
+          if [ "$replace" -gt 0 ] || [ "$delete" -gt 0 ]; then
+            echo "::warning title=terraform plan::교체 ${replace}개, 삭제 ${delete}개가 있다. 교체되는 EC2 인스턴스는 안의 데이터(DB 포함)가 모두 사라진다. 잡 요약에서 어느 리소스인지 본다."
+          fi

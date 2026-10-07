@@ -344,6 +344,7 @@ terraform destroy \
 - **kubeconfig는 cluster-admin이다.** 받은 파일이 새면 `admin_cidr` 안의 누구나 클러스터를 지배한다. 나만 읽게 두고, 저장소에 올리지 않고, 실습이 끝나면 지운다(`destroy`하면 그 자격 증명이 가리키던 클러스터도 사라진다). 같은 내용이 SSM 명령 기록에 약 30일 남는다는 점도 기억한다([접속하기](#접속하기)).
 - **ArgoCD UI는 인터넷에 공개하지 않는다.** 위 [접속하기](#접속하기)의 port-forward만 쓴다.
 - **80·443은 전 세계에 열려 있다.** 지금은 평문 HTTP라서 앱에 실제 개인 정보나 중요한 비밀번호를 넣지 않는다. k3s의 Traefik은 443에서도 이미 듣는다. 신뢰할 수 있는 인증서를 붙이기 전인 지금은 Traefik이 만든 자체 서명 기본 인증서로 응답하므로 `https://`로 열면 브라우저가 경고를 띄운다. HTTPS(cert-manager + Let's Encrypt)는 나중에 붙인다.
+- **CI는 읽기 전용 역할로만 AWS에 들어온다.** PR의 `terraform plan`은 GitHub OIDC로 역할 `dev-ops-study-github-plan`을 잠깐 맡는다. 저장소에 AWS 키는 없고, 그 역할은 쓰기와 이 프로젝트의 비밀 읽기가 막혀 있다([GitHub Actions에서 plan (OIDC)](#github-actions에서-plan-oidc)).
 - **IMDSv2 필수, 홉 제한 1.** 파드 안에서는 인스턴스 메타데이터에 닿지 못해서, 파드가 침해되어도 인스턴스 역할을 가져갈 수 없다(호스트 네트워크를 쓰는 `hostNetwork: true` 파드는 예외이므로 띄우지 않는다).
 - **인스턴스 역할은 파라미터 둘(DuckDNS 토큰, Discord 웹훅 URL)만 읽는다.** SSM 에이전트용 관리형 정책 `AmazonSSMManagedInstanceCore`는 `ssm:GetParameter`·`ssm:GetParameters`를 모든 파라미터(`Resource "*"`)에 허용하고, `aws/ssm` 키의 키 정책은 같은 계정의 모든 주체에게 SSM을 거친 복호화를 허용한다. 그대로 두면 이 역할이 계정의 다른 파라미터와 SecureString까지 읽는다.
   그래서 인라인 정책에 명시적 Deny(`DenyOtherParameters`)를 넣어, 그 둘이 아닌 모든 파라미터에 대해 값을 돌려주는 API 넷(`GetParameter`, `GetParameters`, `GetParametersByPath`, `GetParameterHistory`)을 막는다. 명시적 Deny는 어느 Allow보다 우선한다. Session Manager 셸과 Run Command는 파라미터를 읽지 않으므로 영향이 없다.
@@ -402,6 +403,104 @@ terraform destroy \
 
 2026-10-01 첫 부팅(`v1.35.5+k3s1`)이 이 경우였다. k3s에 들어 있는 CCM이 쓸 권한이 아직 없을 때 configmap `extension-apiserver-authentication`을 읽다가 forbidden을 받고 끝났고, k3s는 그 컨트롤러가 끝나면 프로세스 전체를 끝내서 재시작이 되풀이됐다(인스턴스를 띄우고 12분 뒤 `NRestarts` 59).
 업스트림 이슈 [k3s-io/k3s#7328](https://github.com/k3s-io/k3s/issues/7328)이고 [PR #14201](https://github.com/k3s-io/k3s/pull/14201)로 고쳐져 `v1.35.6+k3s1`부터 들어 있어서, 그 수정이 든 가장 새 안정 v1.35 릴리스인 `v1.35.8+k3s1`(2026-08-27)로 올렸다. 같은 버전의 로컬 k3d(맥)에서는 나지 않았다: 시간 순서에 달린 경쟁이라 빠른 맥에서는 권한이 먼저 생기고, 2 vCPU EC2에서는 CCM이 먼저 읽었다.
+
+## GitHub Actions에서 plan (OIDC)
+
+`infra/aws`(와 `user_data`에 들어가는 `bootstrap/argocd/values.yaml`)를 바꾸는 PR마다 워크플로 `.github/workflows/terraform-plan.yml`이 `terraform plan`을 돌려,
+무엇이 추가·변경·교체·삭제되는지를 PR의 검사 화면(잡 요약)에 보여 준다. `main`에서 손으로 돌리면(Actions 탭 → terraform-plan → Run workflow) drift 검사가 된다:
+콘솔에서 손으로 바꾼 것처럼 state와 실제 AWS가 다른 리소스가 요약에 따로 나온다. `apply`는 하지 않는다. 적용은 지금처럼 로컬에서 한다.
+
+### 어떻게 AWS에 들어가나
+
+GitHub 저장소에는 AWS 액세스 키가 없다. 잡마다 GitHub가 발급하는 OIDC 토큰을 AWS STS가 확인하고 임시 자격 증명을 내준다.
+
+```mermaid
+sequenceDiagram
+    participant job as plan 잡 (GitHub Actions)
+    participant gh as GitHub OIDC 발급자<br/>token.actions.githubusercontent.com
+    participant sts as AWS STS
+    participant aws as AWS API·S3 state
+    job->>gh: ID 토큰 요청 (permissions: id-token: write)
+    gh-->>job: 서명된 JWT (sub = 저장소·이벤트, aud = sts.amazonaws.com), 몇 분 뒤 만료
+    job->>sts: AssumeRoleWithWebIdentity(역할 ARN, 토큰)
+    sts->>sts: 서명 확인(OIDC 공급자), 신뢰 정책의 aud·sub 조건 확인
+    sts-->>job: 임시 자격 증명 (15분, 역할 dev-ops-study-github-plan)
+    job->>aws: terraform init / plan -lock=false (읽기만)
+```
+
+- **오래 사는 비밀이 없다.** 토큰은 잡마다 새로 받고 몇 분 안에 만료된다. 자격 증명도 워크플로가 15분(`role-duration-seconds: 900`, 역할의 최대는 1시간)만 요청한다. 새어 나갈 키가 저장소에 없고, 새어 나가도 곧 쓸 수 없다.
+- **누가 받을 수 있는지는 AWS 쪽이 정한다.** 역할의 신뢰 정책(`infra/bootstrap/github_oidc.tf`)은 `aud`가 `sts.amazonaws.com`이고 `sub`가 아래 둘 중 하나인 토큰만 받는다(`StringEquals`, 글자 그대로 비교).
+
+| `sub` | 언제 |
+|---|---|
+| `repo:seongj-un@173442979/dev-ops-study-config@1397588081:pull_request` | 이 저장소에서 연 PR |
+| `repo:seongj-un@173442979/dev-ops-study-config@1397588081:ref:refs/heads/main` | `main`에서 도는 실행(손으로 돌리는 drift 검사) |
+
+- `@` 뒤의 숫자는 GitHub 계정과 저장소의 바뀌지 않는 ID다. 2026-07-15 이후에 만든 저장소는 `sub`가 이 형식(immutable subject)이고, 이 저장소는 2026-09-30에 만들어졌다. 이름만 쓰는 예전 형식(`repo:seongj-un/dev-ops-study-config:...`)으로 적으면 역할을 맡지 못한다(`Not authorized to perform sts:AssumeRoleWithWebIdentity`). 이 저장소의 값은 `gh api repos/seongj-un/dev-ops-study-config/actions/oidc/customization/sub --jq .sub_claim_prefix`로 본다.
+- **`*`를 쓰지 않는 이유.** OIDC 공급자는 GitHub 전체가 쓰는 발급자 하나이고, `aud`(`sts.amazonaws.com`)도 모든 저장소의 기본값이다. `sub` 조건이 없거나 넓으면 세상의 어느 저장소의 워크플로든, 또는 이 저장소에서 리뷰 없이 만든 아무 브랜치·태그의 워크플로든 이 역할을 맡는다. 필요한 두 값만 정확히 적는다.
+- **`main`을 믿는 이유.** `main`에 코드를 넣을 수 있는 주체(PR 머지, 룰셋을 우회하는 앱 저장소 CI의 deploy key)는 이미 ArgoCD로 클러스터에 무엇이든 배포할 수 있다. 이 역할의 AWS 읽기는 그보다 훨씬 작다. 다른 브랜치는 믿지 않는다. 브랜치는 리뷰 없이 만들 수 있고 그 브랜치의 워크플로를 바로 돌릴 수 있기 때문이다.
+- **포크 PR은 돌지 않는다.** `pull_request`라는 `sub`는 포크에서 온 PR에도 같지만, GitHub는 포크 PR의 실행에 OIDC 토큰과 시크릿을 주지 않는다. 워크플로도 포크와 Dependabot의 PR에서는 잡을 건너뛴다(skipped). `pull_request_target`은 쓰지 않는다.
+- **PR의 워크플로는 PR 쪽 파일로 돈다.** 이 저장소에 브랜치를 올려 PR을 열 수 있는 사람은 워크플로를 고쳐 이 역할로 아무 코드나 돌릴 수 있다. 그래서 역할은 읽기만 하고 비밀은 막는다(아래).
+
+### 역할이 할 수 있는 것과 없는 것
+
+역할 `dev-ops-study-github-plan` = AWS 관리형 정책 `ReadOnlyAccess` + 명시적 Deny 넷(인라인 정책 `deny-secrets-and-writes`). Deny는 어느 Allow보다 우선한다.
+
+| | 무엇 | 왜 |
+|---|---|---|
+| 된다 | 거의 모든 서비스의 `Describe*`·`Get*`·`List*`(`ReadOnlyAccess`) | `plan`의 refresh·data 소스(EC2·IAM·KMS·SSM 공개 AMI 파라미터·STS)와 S3 state 읽기가 모두 여기에 들어 있다. CloudTrail에 남은 이 스택의 Terraform 읽기 호출로 확인했다 |
+| 안 된다 | `ssm:GetParameter*` on `parameter/dev-ops-study/*`(모든 리전) | DuckDNS 토큰과 Discord 웹훅 URL. `aws/ssm` 키의 키 정책이 같은 계정에 SSM을 거친 복호화를 열어 두어서 막지 않으면 평문으로 읽힌다 |
+| 안 된다 | `ssm:GetParametersByPath`(전부) | 상위 경로(`/`)로 재귀 조회하면 하위 파라미터를 따로 거부해도 값이 나온다(Systems Manager 문서의 주의 사항). `plan`은 쓰지 않는다 |
+| 안 된다 | `ssm:GetCommandInvocation`, `ssm:ListCommandInvocations` | [접속하기](#접속하기)의 방법으로 받은 kubeconfig(cluster-admin 키)가 Run Command 기록에 약 30일 남는다 |
+| 안 된다 | `s3:PutObject`, `s3:DeleteObject`, `s3:DeleteObjectVersion` | CI는 state와 잠금 객체를 쓰지 않는다(`-lock=false`). 이전 버전(state 이력)의 영구 삭제도 막는다 |
+| 안 된다 | 쓰기 전반(`apply`) | `ReadOnlyAccess`에 없다. 이 역할로는 아무것도 만들거나 바꾸지 못한다 |
+
+한계: `ReadOnlyAccess`는 넓다. 이 계정의 리소스 목록·정책·태그, S3 객체(state 포함), EC2 콘솔 출력, CloudWatch Logs를 읽을 수 있다. 이 계정에는 이 실습 말고 다른 것이 없고 state와 `user_data`에는 비밀을 넣지 않도록 설계해서 받아들였다. 비밀을 담는 곳을 새로 만들면(예: 다른 경로의 SSM 파라미터, 새 S3 버킷) Deny도 함께 늘린다. Secrets Manager의 값 읽기(`GetSecretValue`)와 KMS 복호화는 `ReadOnlyAccess`에 원래 없다.
+
+### 공개 로그에 남기지 않는 것
+
+이 저장소는 공개라서 Actions 로그와 잡 요약을 누구나 본다.
+
+- `plan`이 찍는 계획(속성 값 전체)은 로그에 내지 않고 러너의 파일로 버린다. 오류만 로그에 나온다.
+- 잡 요약에는 개수와 리소스 주소, 동작, 이유, 교체를 일으킨 속성의 **이름**(예: `user_data_base64`)만 쓴다. 값은 쓰지 않는다.
+- plan 파일은 아티팩트로 올리지 않는다(변수 값과 속성 전체가 들어 있다). GitHub 호스트 러너는 잡이 끝나면 사라진다.
+- 관리자 IP는 시크릿 `ADMIN_CIDR`로 넣는다. GitHub는 로그에 나온 시크릿 값을 `***`로 가린다.
+
+### 처음 한 번: 역할 만들기와 저장소 설정
+
+1. `infra/bootstrap`을 `apply`한다(OIDC 공급자와 역할이 생긴다. 그 README의 실행 순서).
+2. 역할 ARN을 저장소 **변수**에 넣는다. ARN은 비밀이 아니다(안다고 역할을 맡을 수 있는 것이 아니다).
+3. 내 공인 IP를 `/32`로 저장소 **시크릿**에 넣는다. 값은 파이프로 넘겨서 화면과 셸 기록에 남지 않는다(`gh secret set`은 `--body`가 없으면 표준 입력을 읽는다).
+4. 이름만 확인한다. `gh secret list`는 값을 보여 주지 않는다.
+
+```bash
+cd infra/bootstrap
+gh variable set AWS_PLAN_ROLE_ARN --repo seongj-un/dev-ops-study-config --body "$(terraform output -raw github_plan_role_arn)"
+printf '%s/32' "$(curl -s https://checkip.amazonaws.com)" | gh secret set ADMIN_CIDR --repo seongj-un/dev-ops-study-config
+gh variable list --repo seongj-un/dev-ops-study-config
+gh secret list --repo seongj-un/dev-ops-study-config
+```
+
+공인 IP가 바뀌면 3번만 다시 한다. 시크릿이 옛 IP면 CI의 계획에 보안 그룹 규칙(`aws_vpc_security_group_ingress_rule.kube_api`) 변경이 함께 나온다.
+
+### 필수 검사가 아니다
+
+`terraform-plan`은 룰셋의 필수 상태 검사가 아니다(필수는 `validate` 하나다). 그래서 `paths` 필터를 써서 관련 파일이 바뀐 PR에서만 돈다.
+`validate`에 필터를 두지 않는 이유와 반대다: 필수 검사가 필터로 건너뛰어지면 "Expected"로 남아 PR을 머지할 수 없다. 이 검사는 AWS에 기대고 포크·Dependabot PR에서는 돌 수 없으며,
+결과는 통과·실패가 아니라 사람이 읽을 정보라서 필수로 두지 않는다. Dependabot이 이 워크플로의 액션을 올린 PR에서는 잡이 건너뛰어지므로, 머지한 뒤 `main`에서 한 번 손으로 돌려 확인한다.
+
+CI의 Terraform은 로컬과 같은 1.16.4로 고정했다. `user_data`의 gzip 압축 결과가 Terraform을 빌드한 Go 버전에 따라 달라질 수 있어서([이 스택의 설계 메모](#이-스택의-설계-메모)), 버전이 다르면 CI만 인스턴스 교체를 보여 줄 수 있다. 로컬의 Terraform을 올리면 워크플로의 `terraform_version`도 함께 올린다.
+
+### 실패할 때
+
+| 증상 | 원인과 해결 |
+|---|---|
+| "설정 확인" 단계에서 `AWS_PLAN_ROLE_ARN`이나 `ADMIN_CIDR`이 없다고 멈춘다 | 위 "처음 한 번"의 2·3번을 한다 |
+| `Not authorized to perform sts:AssumeRoleWithWebIdentity` | 토큰의 `sub`가 신뢰 정책과 다르다. `main`이 아닌 브랜치에서 손으로 돌렸거나(설정 확인 단계가 먼저 막는다), 저장소 이름을 바꿨다(이름 부분이 바뀐다. `infra/bootstrap`의 `github_oidc_sub_prefix`를 새 값으로 고쳐 `apply`한다) |
+| "AWS 자격 증명" 단계가 OIDC 토큰을 받지 못했다는 오류로 실패한다 | 잡의 `permissions`에 `id-token: write`가 없다(포크 PR이라면 GitHub가 토큰을 주지 않는다. 워크플로가 그 경우는 건너뛴다) |
+| `Error acquiring the state lock` … `AccessDenied` | `plan`에서 `-lock=false`가 빠졌다. 역할은 잠금 객체를 만들 수 없다 |
+| `AccessDenied`가 `ssm:GetParameter`에서 난다 | 코드가 `/dev-ops-study/` 아래 파라미터를 data 소스로 읽기 시작했다. 이 역할은 그 값을 읽지 못하게 만들었다. 값이 plan에 필요하면 설계를 다시 본다 |
+| 계획에 `aws_instance.k3s` 교체가 나오는데 고친 것이 없다 | 로컬과 CI의 Terraform 버전이 다르거나(위), 로컬에서 `apply`한 뒤의 변경이 아직 `main`에 없다 |
 
 ## 이 스택의 설계 메모
 
