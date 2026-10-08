@@ -91,6 +91,70 @@ prometheusOperator:
         memory: 16Mi
       limits:
         memory: 64Mi
+# --- 이 저장소가 더하는 경보 규칙 ---
+# 키마다 차트가 PrometheusRule 하나(이름 kube-prometheus-stack-<키>, 네임스페이스 monitoring)를 만든다(templates/prometheus/additionalPrometheusRules.yaml).
+# 그 템플릿은 groups를 toYaml로 그대로 옮기므로, 어노테이션의 {{ $labels.* }}·{{ $value }}는 Helm이 건드리지 않고 Prometheus가 경보를 만들 때 채운다.
+# PrometheusRule CRD를 설치하는 이 Application이 규칙도 함께 만든다. 다른 Application에 두면 새 클러스터에서 CRD를 기다리며 다시 시도하다가, 다시 시도를 다 쓰면
+# 규칙 없이(경보가 울리지 않는 채로) 조용히 남을 수 있다.
+additionalPrometheusRulesMap:
+  # 인증서 경보: cert-manager가 내놓는 인증서 지표로, 갱신이 막혀 만료가 다가오는 것과 인증서가 준비되지 않은 것을 Discord로 알린다.
+  # 지표(cert-manager v1.21.2의 internal/collectors/certificate_collector.go): 컨트롤러가 수집될 때마다 클러스터의 모든 Certificate를 읽어 값을 만든다. Certificate가 지워지면 계열도 사라진다.
+  #   - certmanager_certificate_expiration_timestamp_seconds{name, namespace, issuer_name, issuer_kind, issuer_group}: 인증서의 만료 시각(status.notAfter, 유닉스 초).
+  #     아직 인증서를 받은 적이 없으면(notAfter가 없으면) 0이다.
+  #   - certmanager_certificate_ready_status{name, namespace, condition, issuer_name, issuer_kind, issuer_group}: Certificate의 Ready 조건. condition이 True·False·Unknown인
+  #     계열 셋을 늘 내고 지금 상태인 계열만 1이다. Ready 조건이 아직 없으면 Unknown이 1이다.
+  #   이 저장소의 Certificate는 앱 Ingress마다 하나다(shortener-<환경>-tls. ingress-shim이 만든다). 발급자는 dev가 letsencrypt-staging, prod가 letsencrypt-prod다.
+  #   수집은 cert-manager 차트의 ServiceMonitor가 한다(platform/cert-manager/values.yaml의 prometheus.servicemonitor, 주기 60초).
+  # 레이블: 그 ServiceMonitor는 honorLabels가 false(차트 기본값)라서, 지표의 namespace(인증서의 네임스페이스)는 exported_namespace로 바뀌어 저장되고 namespace에는 수집 대상인
+  #   컨트롤러의 네임스페이스 cert-manager가 붙는다(Argo Rollouts의 지표와 같다. 앱 차트 templates/prometheusrule.yaml의 [앱 파드 경보]).
+  #   그래서 식은 label_replace로 namespace를 exported_namespace의 값으로 덮어쓴 뒤 max by (namespace, name, issuer_name)로 묶는다.
+  #   - 경보의 namespace가 shortener-dev·shortener-prod가 된다. Alertmanager가 환경마다 따로 묶고(group_by: alertname, namespace) Discord에 어느 환경인지 보인다.
+  #   - max가 수집 대상의 레이블(pod, instance 등)을 지워서 컨트롤러 파드가 바뀌어도 같은 경보로 이어진다.
+  #   - 정규식 (.+)는 exported_namespace가 없으면 맞지 않아 namespace를 그대로 둔다. 나중에 honorLabels를 켜도(지표의 namespace가 그대로 남는다) 같은 결과다.
+  # 라우팅: 둘 다 severity: critical이라 아래 alertmanager.config의 "그 밖의 critical → Discord" 경로로 간다. 앱의 경보가 아니라서 service 레이블은 붙이지 않는다.
+  # 단위 테스트: tests/certificates/certificate-alerts.test.yaml(validate의 "인증서 경보 검사" 단계가 이 키를 꺼내 promtool로 돌린다).
+  certificates:
+    groups:
+      - name: certificates
+        rules:
+          # 남은 기간이 14일보다 짧으면 울린다. cert-manager는 수명의 2/3이 지나면(남은 기간이 수명의 1/3이 되면) 갱신하므로, 14일보다 짧게 남았는데 인증서가 그대로라는 것은
+          # 갱신이 한동안 실패하고 있다는 뜻이다(실패하면 1시간 뒤부터 2배씩, 최대 32시간 간격으로 다시 시도한다. README의 발급 한도).
+          # 14일은 갱신 시점보다 뒤에 와야 뜻이 있다: 수명의 1/3이 14일보다 길어야, 곧 수명이 42일보다 길어야 한다. Let's Encrypt는 기본 수명을 90일에서 45일까지 줄인다고 알렸다.
+          # 45일이면 갱신은 15일 남았을 때라 이 기준이 아직 그 뒤에 온다(갱신이 하루쯤 실패하면 울린다). 수명이 42일 이하가 되면 이 기준을 줄인다.
+          # 갱신이 실패해도 인증서가 아직 유효하면 Ready는 True로 남아서 CertificateNotReady로는 보이지 않는다. 이 경보가 그 빈자리를 맡는다.
+          # 만료 시각이 0인 계열(아직 받은 적이 없다)은 뺀다(> 0). 0 - time()은 늘 기준 아래라 첫 발급 전마다 울리게 된다. 받지 못한 인증서는 CertificateNotReady가 맡는다.
+          # 발급자로 거르지 않는다: dev의 staging 인증서도 똑같이 갱신되어야 하고, 갱신이 막힌 것은 발급 흐름이 깨졌다는 신호다.
+          # for: 15m: EC2를 오래 멈춰 두었다 켜면 갱신 시점이 이미 지나 있어 켜자마자 갱신한다(몇 분 걸린다). 그 사이의 평가로 울리지 않게 기다린다.
+          # 값은 남은 초(만료가 지났으면 음수)이고, humanizeDuration이 13d 23h 45m 0s처럼 쓴다.
+          - alert: CertificateExpiringSoon
+            expr: |-
+              max by (namespace, name, issuer_name) (
+                label_replace(certmanager_certificate_expiration_timestamp_seconds > 0, "namespace", "$1", "exported_namespace", "(.+)")
+              ) - time() < 14 * 24 * 3600
+            for: 15m
+            labels:
+              severity: critical
+            annotations:
+              summary: '{{ $labels.namespace }}: 인증서 {{ $labels.name }}의 남은 기간이 14일보다 짧다(갱신이 실패하고 있다)'
+              description: >-
+                남은 기간 {{ $value | humanizeDuration }}(음수면 이미 만료됐다), 발급자 {{ $labels.issuer_name }}. cert-manager는 수명의 2/3이 지나면 갱신하므로 지금쯤 이미 새 인증서를 받았어야 한다. 갱신이 실패하고 있고, 만료되면 브라우저와 클라이언트가 연결을 거부한다. kubectl -n {{ $labels.namespace }} describe certificate {{ $labels.name }}의 Issuing 조건과 Events, kubectl get order,challenge -A로 원인을 본다.
+          # Ready가 15분 넘게 True가 아니면 울린다: 인증서가 아직 없거나(첫 발급), 만료됐거나, 지금 스펙(이름, 발급자)과 맞지 않는데 다시 받아 오는 것이 끝나지 않는다.
+          # False와 Unknown(Ready 조건이 아직 없다)을 모두 준비되지 않은 것으로 본다. Unknown은 Certificate가 만들어진 직후 잠깐뿐이라 15분을 채울 일이 없다.
+          # for: 15m: HTTP-01 발급은 보통 1~2분이고, 클러스터 안의 검증 주소 확인(self-check)은 DuckDNS가 새 IP를 가리킬 때까지 기다린다. 첫 발급, 발급자 변경(staging → prod),
+          # 오래 멈췄다 켠 뒤의 갱신이 그 안에 끝나므로 평소의 발급으로는 울리지 않는다. 실패하면 cert-manager가 1시간 뒤에야 다시 시도하므로 그때는 계속 울린다.
+          # condition 레이블은 max로 지운다: Unknown에서 False로 바뀌어도 같은 경보로 이어진다.
+          - alert: CertificateNotReady
+            expr: |-
+              max by (namespace, name, issuer_name) (
+                label_replace(certmanager_certificate_ready_status{condition!="True"} == 1, "namespace", "$1", "exported_namespace", "(.+)")
+              )
+            for: 15m
+            labels:
+              severity: critical
+            annotations:
+              summary: '{{ $labels.namespace }}: 인증서 {{ $labels.name }}가 15분 넘게 준비되지 않았다'
+              description: >-
+                Certificate {{ $labels.name }}(발급자 {{ $labels.issuer_name }})의 Ready가 15분 넘게 True가 아니다. 첫 발급이면 Traefik이 아직 자기 기본 자체 서명 인증서로 응답하고 있다. 흔한 원인은 HTTP-01 검증 실패(80 포트, DuckDNS가 옛 IP), Let's Encrypt의 발급 한도다. kubectl -n {{ $labels.namespace }} describe certificate {{ $labels.name }}, kubectl get order,challenge -A, kubectl -n {{ $labels.namespace }} describe challenge로 원인을 본다.
 prometheus:
   prometheusSpec:
     # 데이터 보존: 3일과 4GB 중 먼저 닿는 쪽까지. 이 클러스터는 공부하는 동안만 띄우고 끝나면 인스턴스째 없애서 30일치를 쌓을 일이 없다.

@@ -1,8 +1,9 @@
-# 인증서 경보(platform/cert-issuers/certificate-alerts.yaml의 CertificateExpiringSoon, CertificateNotReady)의 단위 테스트. 읽는 법은 tests/slo/shortener-slo.test.yaml 머리말과 같다.
-# 규칙 파일은 그 PrometheusRule의 spec을 꺼낸 것이다(rendered/는 .gitignore). validate 워크플로의 "인증서 경보 검사" 단계가 하는 일을 로컬에서 하려면 저장소 루트에서:
+# 인증서 경보(platform/kube-prometheus-stack/values.yaml의 additionalPrometheusRulesMap.certificates: CertificateExpiringSoon, CertificateNotReady)의 단위 테스트.
+# 읽는 법은 tests/slo/shortener-slo.test.yaml 머리말과 같다. 규칙 파일은 그 키의 값(groups)을 그대로 꺼낸 것이다: 차트가 groups를 toYaml로 PrometheusRule에 옮기므로 같은 규칙이다
+# (rendered/는 .gitignore). validate 워크플로의 "인증서 경보 검사" 단계가 하는 일을 로컬에서 하려면 저장소 루트에서:
 #   PROMETHEUS_IMAGE=$(yq '.jobs.validate.env.PROMETHEUS_IMAGE' .github/workflows/validate.yml)
 #   mkdir -p tests/certificates/rendered
-#   yq ea 'select(.kind == "PrometheusRule") | .spec' platform/cert-issuers/*.yaml > tests/certificates/rendered/certificate-alerts.yaml
+#   yq '.additionalPrometheusRulesMap.certificates' platform/kube-prometheus-stack/values.yaml > tests/certificates/rendered/certificate-alerts.yaml
 #   docker run --rm -v "$PWD/tests/certificates:/certificates:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
 #     test rules /certificates/certificate-alerts.test.yaml
 #
@@ -20,7 +21,7 @@ tests:
   - name: (a) 만료가 14일보다 가까우면 15분 뒤에 울린다(staging 인증서도). 인증서가 아직 유효해 Ready는 True라 CertificateNotReady는 조용하다. 먼 인증서도 조용하다
     interval: 1m
     input_series:
-      # dev(staging): 13일 남았다. 갱신 시점(30일 전)을 17일 넘겼는데 갱신이 계속 실패하는 경우다.
+      # dev(staging): 13일 남았다. 90일 인증서라면 갱신 시점(수명의 2/3이 지난 때, 곧 30일 남았을 때)에서 17일이 지났는데 갱신이 계속 실패하는 경우다.
       - series: 'certmanager_certificate_expiration_timestamp_seconds{exported_namespace="shortener-dev", name="shortener-dev-tls", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
         values: '1123200x20'
       - series: 'certmanager_certificate_ready_status{exported_namespace="shortener-dev", name="shortener-dev-tls", condition="True", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
@@ -55,7 +56,7 @@ tests:
               summary: 'shortener-dev: 인증서 shortener-dev-tls의 남은 기간이 14일보다 짧다(갱신이 실패하고 있다)'
               description: >-
                 남은 기간 12d 23h 45m 0s(음수면 이미 만료됐다), 발급자 letsencrypt-staging.
-                cert-manager는 만료 30일 전(수명 90일의 1/3)에 갱신하므로 갱신이 2주 넘게 실패하고 있다. 만료되면 브라우저와 클라이언트가 연결을 거부한다.
+                cert-manager는 수명의 2/3이 지나면 갱신하므로 지금쯤 이미 새 인증서를 받았어야 한다. 갱신이 실패하고 있고, 만료되면 브라우저와 클라이언트가 연결을 거부한다.
                 kubectl -n shortener-dev describe certificate shortener-dev-tls의 Issuing 조건과 Events, kubectl get order,challenge -A로 원인을 본다.
       - eval_time: 15m
         alertname: CertificateNotReady
@@ -94,7 +95,7 @@ tests:
               summary: 'shortener-prod: 인증서 shortener-prod-tls의 남은 기간이 14일보다 짧다(갱신이 실패하고 있다)'
               description: >-
                 남은 기간 13d 23h 44m 0s(음수면 이미 만료됐다), 발급자 letsencrypt-prod.
-                cert-manager는 만료 30일 전(수명 90일의 1/3)에 갱신하므로 갱신이 2주 넘게 실패하고 있다. 만료되면 브라우저와 클라이언트가 연결을 거부한다.
+                cert-manager는 수명의 2/3이 지나면 갱신하므로 지금쯤 이미 새 인증서를 받았어야 한다. 갱신이 실패하고 있고, 만료되면 브라우저와 클라이언트가 연결을 거부한다.
                 kubectl -n shortener-prod describe certificate shortener-prod-tls의 Issuing 조건과 Events, kubectl get order,challenge -A로 원인을 본다.
       # 61분: 갱신된 인증서의 만료 시각이 90일 뒤라 풀린다(Alertmanager가 RESOLVED를 보낸다).
       - eval_time: 61m

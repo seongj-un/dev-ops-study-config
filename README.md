@@ -46,11 +46,11 @@ argocd/apps/argo-rollouts.yaml      점진 배포 Application (Argo Rollouts: �
 platform/argo-rollouts/values.yaml  그 값 (컨트롤러·CRD·대시보드. 아래 "Argo Rollouts")
 argocd/apps/cert-manager.yaml       인증서 Application (cert-manager: 외부 차트 + 이 저장소의 값, multi-source)
 platform/cert-manager/values.yaml   그 값 (컨트롤러·웹훅·cainjector·CRD. 아래 "HTTPS")
-argocd/apps/cert-issuers.yaml       인증서 발급자·경보 Application (이 저장소의 디렉터리를 그대로 적용)
-platform/cert-issuers/              Let's Encrypt ClusterIssuer 두 개(letsencrypt-staging, letsencrypt-prod)와 인증서 경보(PrometheusRule)
+argocd/apps/cert-issuers.yaml       인증서 발급자 Application (이 저장소의 디렉터리를 그대로 적용)
+platform/cert-issuers/              Let's Encrypt ClusterIssuer 두 개(letsencrypt-staging, letsencrypt-prod)
 tests/slo/                       앱 SLO 규칙(차트의 PrometheusRule)의 promtool 단위 테스트. validate가 차트를 렌더링해 꺼낸 규칙으로 돌린다
 tests/canary/                    카나리 분석 쿼리(차트의 AnalysisTemplate)의 promtool 단위 테스트. validate가 렌더링 결과에서 쿼리를 꺼내 돌린다
-tests/certificates/              인증서 경보(platform/cert-issuers의 PrometheusRule)의 promtool 단위 테스트
+tests/certificates/              인증서 경보(kube-prometheus-stack 값 파일의 additionalPrometheusRulesMap)의 promtool 단위 테스트
 .github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링(Rollout·Deployment 두 갈래), 스키마 검사, Ingress HTTPS 확인, SLO 규칙·카나리 분석 쿼리 검사, 플랫폼 차트 렌더링, 인증서 발급자·경보·대시보드 검사)
 infra/aws/up.sh, down.sh           명령 한 번으로 EC2/k3s 환경을 만들고(up.sh) 지운다(down.sh). 사용법은 infra/aws/README.md
 .github/workflows/terraform-plan.yml  infra/aws를 바꾸는 PR의 terraform plan 요약 (GitHub OIDC로 읽기 전용 역할을 맡는다. 필수 검사 아님. infra/aws/README.md)
@@ -366,8 +366,11 @@ available 0이 1분을 넘기 쉬운데, 그때마다 critical이 Discord로 가
 전체 요청의 5xx는 약 12%라 5분 비율(최고 11.8%)은 7.2%를 넘었지만, 1시간 비율(2.9%)이 7.2%에, 30분 비율(최고 2.89%)이 3%에 못 미쳐 가용성 경보는 pending조차 되지 않았다.
 장애가 짧고 실패하지 않은 GET이 비율을 묽혀서 예산으로는 "아직 괜찮다"였지만, 그동안 단축 URL은 하나도 만들어지지 않았다.
 `ShortenerWritePathFailing`(같은 PrometheusRule의 `<릴리스>-write-path` 그룹)은 예산이 아니라 증상을 본다: `POST /api/v1/urls`의 5분 5xx 비율이 20%를 넘고
-그 요청이 초당 0.05건(5분에 15건)보다 많은 상태가 5분 이어지면 울린다. `severity="warning"`이지만 `service="shortener"`라 Discord로 간다. v5 모양이면 장애 6분째에 울린다(`tests/slo`의 (l)).
+그 요청이 초당 0.05건(5분에 15건)보다 많은 상태가 3분 이어지면 울린다. `severity="warning"`이지만 `service="shortener"`라 Discord로 간다.
+v5 모양이면 장애 4~5분째, 곧 v5 길이(약 5분 20초)의 장애가 끝나기 전에 울린다(`tests/slo`의 (l), 500 계열이 첫 실패 때 생기는 경우는 (o)).
 최소 요청 수는 실패 한두 건으로 비율이 100%가 되는 것을 막는 대신, 그보다 드물게 오는 생성은 모두 실패해도 이 경보가 보지 못한다(`tests/slo`의 (n)).
+앱의 장애 주입(`fault.errorRate`)이 만든 500은 이 경보가 일부러 보지 않는다. 장애 주입은 요청을 컨트롤러에 닿기 전에 필터에서 끊어서 그 요청의 `uri`가 `UNKNOWN`이다
+(`/actuator`만 거르는 카나리 분석과 SLO 경보는 그대로 센다). 이 경보를 연습하려면 v5처럼 DB를 끊는다.
 
 **아직 덮지 못하는 것.**
 - 앱 파드는 Ready인데 그 앞(Traefik, Ingress 설정, 노드의 네트워크)에서 실패하는 요청: 앱 지표에도 파드 수에도 보이지 않는다. 클러스터 밖에서 요청을 보내 보는 검사나
@@ -627,11 +630,12 @@ curl -v https://dev-ops-study.duckdns.org/ -o /dev/null 2>&1 | grep -E 'subject:
 
 ### 인증서 경보
 
-`platform/cert-issuers/certificate-alerts.yaml`(PrometheusRule, `cert-manager` 네임스페이스)을 `cert-issuers` Application이 ClusterIssuer와 함께 적용한다. 둘 다 `severity="critical"`이라 Discord로 간다.
+`platform/kube-prometheus-stack/values.yaml`의 `additionalPrometheusRulesMap.certificates`에 있다. kube-prometheus-stack 차트가 그것으로 PrometheusRule `kube-prometheus-stack-certificates`(`monitoring` 네임스페이스)를 만든다.
+PrometheusRule CRD를 설치하는 Application이 규칙도 함께 만들어서, 새 클러스터에서 다른 Application이 CRD를 기다리다 다시 시도를 다 써 규칙 없이 남는 일이 없다. 둘 다 `severity="critical"`이라 Discord로 간다.
 
 | 경보 | 조건 | 무엇을 뜻하나 |
 |---|---|---|
-| `CertificateExpiringSoon` | 남은 기간이 14일보다 짧은 것이 15분 이어진다 | cert-manager는 만료 30일 전(수명의 2/3)에 갱신하므로 갱신이 16일째 실패하고 있다. 갱신이 실패해도 인증서가 아직 유효하면 Ready는 True라서 이 경보만 보인다 |
+| `CertificateExpiringSoon` | 남은 기간이 14일보다 짧은 것이 15분 이어진다 | cert-manager는 수명의 2/3이 지나면(남은 기간이 수명의 1/3이 되면) 갱신하므로, 그 뒤로도 인증서가 그대로라 갱신이 실패하고 있다. 갱신이 실패해도 인증서가 아직 유효하면 Ready는 True라서 이 경보만 보인다 |
 | `CertificateNotReady` | Ready가 True가 아닌(False, 또는 조건이 아직 없는 Unknown) 것이 15분 이어진다 | 첫 발급이나 다시 받기(만료, 발급자 변경)가 끝나지 않는다. 평소의 발급은 1~2분이다 |
 
 - 지표는 cert-manager 컨트롤러의 `certmanager_certificate_expiration_timestamp_seconds`(받기 전에는 0이라 `> 0`으로 뺀다)와 `certmanager_certificate_ready_status`(condition이 True·False·Unknown인 계열 중 지금 상태만 1)다.
@@ -639,6 +643,8 @@ curl -v https://dev-ops-study.duckdns.org/ -o /dev/null 2>&1 | grep -E 'subject:
 - cert-manager의 ServiceMonitor는 honorLabels가 false라 인증서의 네임스페이스가 `exported_namespace`로 저장된다. 식이 `label_replace`로 그 값을 `namespace`에 되돌리고
   `max by (namespace, name, issuer_name)`로 묶어서, 경보는 환경(`shortener-dev`·`shortener-prod`)마다 따로 묶이고 컨트롤러 파드가 바뀌어도 이어진다.
 - `for: 15m`은 몇 분이면 끝나는 평소의 발급·갱신(새 클러스터의 첫 발급, 발급자 변경, 오래 멈췄다 켠 뒤 지난 갱신)으로 울리지 않게 하려는 것이다.
+- 14일 기준은 갱신 시점(남은 기간이 수명의 1/3)보다 뒤에 와야 뜻이 있어서 수명이 42일보다 길어야 한다. Let's Encrypt는 기본 수명을 90일에서 45일까지 줄인다고 알렸는데,
+  45일이어도 갱신은 15일 남았을 때라 아직 맞는다. 수명이 42일 이하가 되면 기준을 줄인다.
 - 시나리오별 기대는 `tests/certificates/certificate-alerts.test.yaml`이고, `validate`의 "인증서 경보 검사" 단계가 promtool로 돌린다.
 
 ### 관리 UI는 HTTPS를 붙여도 port-forward로만 본다
@@ -776,9 +782,9 @@ docker run --rm -v "$PWD/tests/slo:/slo:ro" --entrypoint /bin/promtool "$PROMETH
 docker run --rm -v "$PWD":/work:ro -w /work $KUBECONFORM_IMAGE -strict -summary \
   -schema-location "$K8S_SCHEMA_LOCATION" -schema-location "$CRD_SCHEMA_LOCATION" -kubernetes-version $KUBERNETES_VERSION argocd/ platform/cert-issuers/
 
-# 인증서 경보: platform/cert-issuers의 PrometheusRule에서 규칙을 꺼내 promtool로 검사하고 tests/certificates의 테스트를 돌린다
+# 인증서 경보: kube-prometheus-stack 값 파일의 additionalPrometheusRulesMap.certificates를 꺼내 promtool로 검사하고 tests/certificates의 테스트를 돌린다
 mkdir -p tests/certificates/rendered
-yq ea 'select(.kind == "PrometheusRule") | .spec' platform/cert-issuers/*.yaml > tests/certificates/rendered/certificate-alerts.yaml
+yq '.additionalPrometheusRulesMap.certificates' platform/kube-prometheus-stack/values.yaml > tests/certificates/rendered/certificate-alerts.yaml
 docker run --rm -v "$PWD/tests/certificates:/certificates:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
   check rules --lint-fatal /certificates/rendered/certificate-alerts.yaml
 docker run --rm -v "$PWD/tests/certificates:/certificates:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \

@@ -46,7 +46,7 @@ jobs:
       # Dependabot이 갱신해 주지 않으니 쿠버네티스 마이너 버전을 올려 새 스키마가 필요할 때 손으로 새 커밋 SHA로 바꾼다.
       K8S_SCHEMA_LOCATION: https://raw.githubusercontent.com/yannh/kubernetes-json-schema/8df8a883b68a24a104b4a9e43c1288090ae60b3b/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json
       # CRD(쿠버네티스 내장 리소스가 아닌 kind)의 스키마 위치. CRD는 위 내장 리소스 스키마에 없어서 datreeio의 CRD 스키마 모음에서 받는다. 이 저장소는 이것으로
-      # ArgoCD의 Application(argoproj.io, Argo CD 3.5.0 CRD 기준)과 차트·인증서 경보의 ServiceMonitor·PrometheusRule(monitoring.coreos.com, Prometheus Operator의 CRD),
+      # ArgoCD의 Application(argoproj.io, Argo CD 3.5.0 CRD 기준)과 차트의 ServiceMonitor·PrometheusRule(monitoring.coreos.com, Prometheus Operator의 CRD),
       # 차트의 Middleware(traefik.io/middleware_v1alpha1.json), 발급자 ClusterIssuer(cert-manager.io/clusterissuer_v1.json)를 검사한다.
       # 이 커밋의 두 스키마에는 쓰는 필드(redirectScheme의 scheme·permanent, headers의 stsSeconds·stsIncludeSubdomains·stsPreload,
       # ACME의 server·privateKeySecretRef·solvers[].http01.ingress.ingressClassName)가 모두 있다.
@@ -307,7 +307,7 @@ jobs:
       #   3) promtool test rules: 테스트 파일이 가짜 시계열을 넣고, 정한 시각에 울려야 할 알림과 울리지 않아야 할 알림을 확인한다.
       #      tests/slo/shortener-slo.test.yaml은 Rollout 갈래의 두 환경 규칙을 함께 읽는다(5xx 100%, 5xx 0.1%, 20%가 느린 요청, 요청 없음, 5xx 4%의 느린 소진,
       #      le 버킷이 없는 옛 파드와 있는 새 파드가 섞인 롤아웃, le 버킷이 없는 앱, 앱 파드 0개·순간 0개·컨트롤러 교체와 지표 없음·노드 부팅 직후,
-      #      생성만 모두 실패하는 v5 모양·생성 5xx 10%와 리다이렉트만 실패·드문 생성의 실패).
+      #      생성만 모두 실패하는 v5 모양과 첫 실패 때 생기는 5xx 계열·생성 5xx 10%와 리다이렉트만 실패·드문 생성의 실패).
       #      tests/slo/shortener-slo-deployment.test.yaml은 Deployment 갈래의 앱 파드 경보만 본다(앱 Deployment 0개, 다른 Deployment 0개, 지표 없음, 노드 부팅 직후).
       # promtool의 버전과 이미지는 잡의 PROMETHEUS_IMAGE(위 env)다. promtool은 파일을 읽기만 하므로 tests/slo를 읽기 전용으로 마운트한다.
       - name: SLO 규칙 검사 (promtool check + test)
@@ -372,7 +372,6 @@ jobs:
 
       # platform/cert-issuers(cert-issuers Application)의 ClusterIssuer를 검사한다. ArgoCD가 이 디렉터리의 YAML을 렌더링 없이 그대로 적용하므로 파일을 바로 넘긴다.
       #   1) kubeconform: 스키마는 CRD_SCHEMA_LOCATION의 커밋에 있다(cert-manager.io/clusterissuer_v1.json). -strict가 필드 이름의 오타(예: ingressClassname)를 잡는다.
-      #      같은 디렉터리의 인증서 경보(PrometheusRule)도 여기서 모양을 검사한다(monitoring.coreos.com/prometheusrule_v1.json). 그 PromQL은 다음 단계가 promtool로 본다.
       #   2) yq: 이름과 ACME 서버 주소의 짝이 맞는지 본다. 스키마는 주소를 문자열로만 본다. 둘이 뒤바뀌면 staging이라고 믿고 하는 시험이 production의 발급 한도(같은 이름 묶음으로 7일에 5장)를 쓴다.
       - name: 인증서 발급자 검사 (platform/cert-issuers)
         run: |
@@ -394,21 +393,23 @@ jobs:
           done
           exit "$status"
 
-      # platform/cert-issuers의 인증서 경보(PrometheusRule)를 promtool로 검사한다. kubeconform(위 단계)은 그 안의 PromQL을 문자열로만 본다.
-      #   1) yq로 PrometheusRule의 spec만 꺼내 tests/certificates/rendered/certificate-alerts.yaml에 쓴다(.gitignore). ArgoCD가 렌더링 없이 적용하는 파일이라 그대로 꺼낸다.
-      #      PrometheusRule이 정확히 하나여야 한다(없으면 파일이 빠졌거나 kind가 틀린 것이다).
+      # 인증서 경보(platform/kube-prometheus-stack/values.yaml의 additionalPrometheusRulesMap.certificates)를 promtool로 검사한다.
+      # 아래 플랫폼 차트 단계가 그 PrometheusRule(kube-prometheus-stack-certificates)의 모양을 kubeconform으로 보지만, 그 안의 PromQL은 문자열로만 본다.
+      #   1) yq로 그 키의 값(groups)을 꺼내 tests/certificates/rendered/certificate-alerts.yaml에 쓴다(.gitignore). 차트는 groups를 toYaml로 그대로 옮기므로
+      #      렌더링하지 않고 값 파일에서 바로 꺼낸 것이 클러스터의 규칙과 같다. 키가 없거나 groups가 비면(이름을 바꾼 경우 등) 실패시킨다.
       #   2) promtool check rules --lint-fatal: YAML 구조, PromQL 문법, 어노테이션의 템플릿 문법, 중복을 검사한다.
       #   3) promtool test rules: tests/certificates/certificate-alerts.test.yaml(14일보다 가까운 만료(staging 인증서 포함), 기준을 넘는 순간과 갱신, 첫 발급 실패와 컨트롤러 교체,
       #      몇 분 안에 끝나는 평소의 발급·갱신, honorLabels를 켠 모양).
       - name: 인증서 경보 검사 (promtool check + test)
         run: |
           mkdir -p tests/certificates/rendered
-          count="$(yq ea '[select(.kind == "PrometheusRule")] | length' platform/cert-issuers/*.yaml)"
-          if [ "$count" != 1 ]; then
-            echo "::error::platform/cert-issuers에 PrometheusRule이 ${count}개 있다(1개여야 한다)"
+          values=platform/kube-prometheus-stack/values.yaml
+          count="$(yq '.additionalPrometheusRulesMap.certificates.groups | length' "$values")"
+          if [ "$count" = 0 ]; then
+            echo "::error file=$values::additionalPrometheusRulesMap.certificates.groups가 없다(인증서 경보 규칙이 빠졌다)"
             exit 1
           fi
-          yq ea 'select(.kind == "PrometheusRule") | .spec' platform/cert-issuers/*.yaml > tests/certificates/rendered/certificate-alerts.yaml
+          yq '.additionalPrometheusRulesMap.certificates' "$values" > tests/certificates/rendered/certificate-alerts.yaml
           docker run --rm -v "$GITHUB_WORKSPACE/tests/certificates:/certificates:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
             check rules --lint-fatal /certificates/rendered/certificate-alerts.yaml
           docker run --rm -v "$GITHUB_WORKSPACE/tests/certificates:/certificates:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
