@@ -5,7 +5,8 @@ management 포트(8081)는 라우팅하지 않으므로 actuator 엔드포인트
 
 [TLS] ingress.tls.enabled이면 둘을 더한다.
   - spec.tls: 이 호스트의 인증서가 Secret <fullname>-tls에 있다고 알린다. Traefik은 그 Secret의 인증서를 읽어 443 포트에서 SNI가 이 호스트인 연결에 내놓는다.
-    Secret이 아직 없으면(첫 발급 전) Traefik은 오류를 남기고 자기 기본 자체 서명 인증서로 응답한다. 라우팅은 그대로라서 80 포트는 계속 동작한다.
+    Secret이 아직 없으면(첫 발급 전) Traefik은 오류를 남기고 자기 기본 자체 서명 인증서로 응답한다(라우터는 그대로 만들어진다).
+    리다이렉트가 켜져 있으면 80 포트는 앱 요청을 https로 돌려보내고 ACME HTTP-01 검증 요청에만 직접 답한다. 그래서 첫 발급 전에는 앱에 curl -k로만 닿는다.
   - 어노테이션 cert-manager.io/cluster-issuer: cert-manager의 ingress-shim이 이것을 보고 Certificate(이름은 secretName과 같은 <fullname>-tls, 인증서에 넣을 도메인은 spec.tls의 hosts)를
     이 네임스페이스에 만들고 소유자를 이 Ingress로 둔다. 인증서를 받으면 그 Secret을 만들고, 만료 30일 전(수명 90일의 1/3)에 갱신한다. Secret은 ArgoCD가 추적하지 않아 prune되지 않는다.
 [HTTP→HTTPS] shortener.httpsRedirectEnabled이면 Traefik 어노테이션 router.middlewares로 리다이렉트 미들웨어(https-redirect.yaml)를 이 Ingress의 라우터에 붙인다.

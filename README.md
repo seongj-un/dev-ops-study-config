@@ -668,7 +668,9 @@ JVM 최대 힙은 컨테이너 메모리 한도의 75%(앱 이미지의 `-XX:Max
   그래서 prod의 PostgreSQL은 `max_connections`를 60으로, 메모리를 요청 256Mi·한도 512Mi로 키웠다. dev도 5단계에서 파드 2개 + 배포 중 1개 = 30개가 되어 `max_connections`만 50으로 올렸다
   (계산은 각 환경 값 파일의 `postgresql` 위 주석).
 - **로컬 k3d(`devops-study`)는 멈춰 두었다**(`k3d cluster stop devops-study`. 데이터는 남는다). 다시 켜면(`k3d cluster start devops-study`) 그 안의 ArgoCD가 `main`의 값(EC2 주소와 크기)으로 맞추려 하므로, 로컬에서 쓰려면 먼저 두 환경 값 파일을 덮어써야 한다:
-  `baseUrl`·`ingress.host`는 `*.localhost` 이름(예전 값: `shortener-dev.localhost:8090`, `shortener.localhost:8090`)으로, 앱 메모리·HPA는 2.84GiB VM에 맞춘 예전 크기(앱 요청 256Mi·한도 384Mi, 두 환경 모두 파드 1개 고정)로. 예전 값은 `git log -p -- environments/`에 있다.
+  `baseUrl`·`ingress.host`는 `*.localhost` 이름(예전 값: `shortener-dev.localhost:8090`, `shortener.localhost:8090`)으로, 앱 메모리·HPA는 2.84GiB VM에 맞춘 예전 크기(앱 요청 256Mi·한도 384Mi, 두 환경 모두 파드 1개 고정)로,
+  `ingress.tls.enabled`는 `false`로(`baseUrl`도 http로). TLS를 켠 채 두면 `http://shortener.localhost:8090`이 포트가 빠진 `https://shortener.localhost/`로 리다이렉트되어 닿지 않고,
+  `*.localhost`는 Let's Encrypt가 검증할 수 없는 이름이라 cert-manager가 주문을 계속 실패한다. 예전 값은 `git log -p -- environments/`에 있다.
 - dev를 잠시 끄고 싶다면 `kubectl scale`이 아니라 Git에서 `environments/dev/values.yaml`의 `replicaCount`를 0으로 바꾼다. dev는 HPA가 없어 selfHeal이 손으로 바꾼 파드 수를 되돌리기 때문이다.
   prod는 HPA가 켜져 있어 `replicaCount`가 쓰이지 않는다: 끄려면 `autoscaling.enabled`를 false로 바꾸고 `replicaCount: 0`을 적는다.
 - OOMKilled(exit 137)가 보이면 그 컨테이너의 메모리 한도를 올린다. ArgoCD는 `bootstrap/argocd/values.yaml`을 고치고 `helm upgrade --install`을 다시 실행한다(EC2에서는 `--set server.ingress.enabled=false`도 다시 준다).

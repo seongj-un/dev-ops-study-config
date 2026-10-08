@@ -216,6 +216,7 @@ jobs:
       #     어노테이션 cert-manager.io/cluster-issuer가 platform/cert-issuers에 있는 ClusterIssuer의 이름이다(오타면 Certificate가 발급자를 찾지 못해 인증서가 영영 나오지 않는다).
       #   - Traefik의 Middleware kind를 모르는 클러스터처럼 한 번 더 렌더링해서, Middleware와 router.middlewares 어노테이션이 함께 빠지고 TLS는 남는지 본다
       #     (차트의 shortener.httpsRedirectEnabled 하나가 둘을 정한다. 어노테이션만 남으면 위와 같은 404다).
+      #   - TLS를 끈 경로(차트 기본값)를 한 번 렌더링해 kubeconform으로 검사하고, Middleware·어노테이션·spec.tls가 없는지 본다.
       # 기대와 다른 것이 있어도 바로 멈추지 않고 모두 오류로 남긴 뒤 실패한다.
       - name: 앱 Ingress HTTPS 확인 (TLS, 리다이렉트, 발급자 이름)
         run: |
@@ -256,6 +257,21 @@ jobs:
             expect "$release(Traefik 없음) Ingress의 router.middlewares" null "$ingress | $middlewares" "$no_traefik"
             expect "$release(Traefik 없음) Ingress의 TLS Secret" "$release-tls" "[$ingress | .spec.tls[].secretName] | join(\",\")" "$no_traefik"
           done
+          # TLS를 끈 경로(차트 기본값 ingress.tls.enabled: false. 로컬 k3d처럼 인증서를 받을 수 없는 클러스터)를 한 번 렌더링한다. Traefik이 있는 클러스터처럼 Middleware kind를 넘겨도
+          # 리다이렉트는 TLS가 켜져 있을 때만 만들어야 하므로 Middleware·어노테이션·spec.tls가 하나도 없어야 한다. 환경 값 파일은 dev를 쓰고 TLS만 끈다. kubeconform으로 모양도 검사한다.
+          no_tls="$RUNNER_TEMP/dev-no-tls.yaml"
+          helm template shortener-dev charts/shortener --namespace shortener-dev --kube-version "$KUBERNETES_VERSION" \
+            --api-versions traefik.io/v1alpha1 --api-versions traefik.io/v1alpha1/Middleware \
+            -f environments/dev/values.yaml --set ingress.tls.enabled=false > "$no_tls"
+          docker run -i --rm "$KUBECONFORM_IMAGE" \
+            -strict -summary \
+            -schema-location "$K8S_SCHEMA_LOCATION" \
+            -schema-location "$CRD_SCHEMA_LOCATION" \
+            -kubernetes-version "$KUBERNETES_VERSION" - < "$no_tls"
+          expect "shortener-dev(TLS 끔)의 Ingress 수" 1 "[$ingress] | length" "$no_tls"
+          expect "shortener-dev(TLS 끔)의 Middleware 수" 0 '[select(.kind == "Middleware")] | length' "$no_tls"
+          expect "shortener-dev(TLS 끔) Ingress의 어노테이션" null "$ingress | .metadata.annotations" "$no_tls"
+          expect "shortener-dev(TLS 끔) Ingress의 spec.tls" null "$ingress | .spec.tls" "$no_tls"
           exit "$status"
 
       # 차트의 SLO 규칙과 앱 파드 경보(PrometheusRule)를 Prometheus의 도구 promtool로 검사한다. kubeconform은 리소스의 모양만 보고 그 안의 PromQL은 문자열로만 본다.
