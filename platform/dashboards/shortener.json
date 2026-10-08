@@ -1016,6 +1016,122 @@
           "sort": "desc"
         }
       }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "엣지(Traefik)와 앱: 초당 요청·5xx",
+      "description": "같은 환경의 요청을 두 곳에서 센다(둘 다 5분 창). 엣지는 Traefik이 이 환경의 Ingress로 받은 요청(앱 차트의 기록 규칙 namespace_job:traefik_router_requests*:rate5m, 엣지 경보 ShortenerEdgeFailing의 입력), 앱은 앱이 처리한 요청(http_server_requests, /actuator 제외)이다. 평소에는 엣지가 앱보다 조금 많다: 80 포트로 온 요청을 Traefik이 https로 돌려보낸 301·308은 앱에 닿지 않는다. 앱 파드가 모두 NotReady면 Traefik이 503을 직접 돌려주어 엣지 5xx가 엣지 요청과 같아지고, 앱의 선은 0으로 떨어지거나(파드가 떠 있다) 끊긴다(파드가 없다). 앱의 지표로 계산하는 SLO 패널은 그동안 비어 있다(v4 연습). 엣지 5xx가 있는데 앱 5xx가 없으면 요청이 앱에 닿기 전(Traefik과 파드 사이)에서 실패한 것이다.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "namespace_job:traefik_router_requests:rate5m{namespace=\"$namespace\"}",
+          "legendFormat": "엣지 요청"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B",
+          "editorMode": "code",
+          "expr": "namespace_job:traefik_router_requests_errors:rate5m{namespace=\"$namespace\"}",
+          "legendFormat": "엣지 5xx"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "C",
+          "editorMode": "code",
+          "expr": "sum(rate(http_server_requests_seconds_count{namespace=\"$namespace\", uri!~\"/actuator.*\"}[5m]))",
+          "legendFormat": "앱 요청"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "D",
+          "editorMode": "code",
+          "expr": "sum(rate(http_server_requests_seconds_count{namespace=\"$namespace\", uri!~\"/actuator.*\", status=~\"5..\"}[5m])) or (0 * sum(rate(http_server_requests_seconds_count{namespace=\"$namespace\", uri!~\"/actuator.*\"}[5m])))",
+          "legendFormat": "앱 5xx"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "앱 .*"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*5xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     }
   ],
   "schemaVersion": 41,
