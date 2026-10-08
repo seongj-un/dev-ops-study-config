@@ -75,7 +75,7 @@ plan_rc=0
 # -detailed-exitcode: 0 변경 없음, 1 오류, 2 변경 있음. 계획 본문은 파일로 버린다(속성 값 전체가 있다).
 tf plan -input=false -no-color -detailed-exitcode -out="$WORK/aws.tfplan" >"$WORK/plan.txt" 2>"$WORK/plan.err" || plan_rc=$?
 if [ "$plan_rc" = 1 ]; then
-  cat "$WORK/plan.err" >&2
+  show_masked "$WORK/plan.err"
   die "terraform plan 실패"
 fi
 phase_done "terraform init/plan" "$phase_start"
@@ -94,7 +94,7 @@ else
   phase_start=$SECONDS
   tf apply -input=false -no-color "$WORK/aws.tfplan" >"$WORK/apply.txt" 2>&1 || {
     # apply 출력은 리소스 ID와 오류뿐이고 비밀이 없다. 실패 원인을 보이기 위해 꼬리를 낸다.
-    tail -n 30 "$WORK/apply.txt" >&2
+    show_masked "$WORK/apply.txt" 30
     die "terraform apply 실패. 같은 명령을 다시 실행하면 이어서 진행한다."
   }
   phase_done "terraform apply" "$phase_start"
@@ -207,7 +207,7 @@ ARGO_LAST=""
 check_argo() {
   local out total bad
   out=$(ssm_run "$INSTANCE_ID" "$ARGO_CMD" 2>/dev/null) || { WAIT_MSG="SSM 명령 실패(재시도)"; return 1; }
-  if grep -qiE 'error|not found|refused' <<<"$out"; then
+  if grep -qE '^(error:|Error from server|The connection to the server|Unable to connect|k3s: )' <<<"$out"; then
     WAIT_MSG="ArgoCD API 응답 없음"
     return 1
   fi
@@ -219,6 +219,7 @@ check_argo() {
 }
 phase_start=$SECONDS
 if ! wait_for "ArgoCD Application 전부 Synced/Healthy" "$T_ARGO" 20 check_argo; then
+  say "Application 수: 확인된 $(grep -c . <<<"$ARGO_LAST" || true)개 / 예상 ${EXPECTED_APPS}개 이상 (모자라면 아직 만들어지지 않은 것이 있다)" >&2
   say "준비되지 않은 Application (이름 / 동기화 / 건강):" >&2
   awk 'NF && !($2 == "Synced" && $3 == "Healthy") {printf "  %s / %s / %s\n", $1, $2, $3}' <<<"$ARGO_LAST" >&2
   print_timing

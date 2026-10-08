@@ -25,8 +25,17 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 
 # 임시 파일(계획, 계획 JSON)은 나만 읽는 디렉터리에 두고 끝날 때 지운다. 계획 파일에는 변수 값(관리자 IP)과 속성 전체가 들어 있다.
 WORK=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/devops-infra.XXXXXX")
-cleanup_work() { rm -rf "$WORK"; }
-trap cleanup_work EXIT
+TIMING_PRINTED=0
+# 어떤 경로로 끝나든(정상, die, set -e 중단, Ctrl-C) 임시 파일을 지우고, 단계별 시간이 아직 안 나왔다면 지금까지의 시간을 보인다.
+on_exit() {
+  local rc=$?
+  if [ "$TIMING_PRINTED" = 0 ] && [ "${#PHASE_NAMES[@]}" -gt 0 ]; then
+    print_timing >&2
+  fi
+  rm -rf "$WORK"
+  exit "$rc"
+}
+trap on_exit EXIT
 
 ASSUME_YES=0
 PHASE_NAMES=()
@@ -38,6 +47,21 @@ warn() { printf '경고: %s\n' "$*" >&2; }
 die() { printf '오류: %s\n' "$*" >&2; exit 1; }
 fmt_secs() { printf '%d분 %02d초' $(($1 / 60)) $(($1 % 60)); }
 
+# mask: terraform이 남긴 출력(오류 포함)에서 관리자 IP를 가린다. AWS 오류가 보안 그룹 규칙의 CIDR을 그대로 되풀이할 수 있다.
+# 터미널에 terraform 출력 파일의 내용을 낼 때는 항상 이 함수를 거친다(show_masked).
+mask() {
+  local ip=${TF_VAR_admin_cidr%/32}
+  if [ -n "$ip" ]; then
+    sed "s#${ip//./\\.}\(/32\)\{0,1\}#<현재 IP>#g"
+  else
+    cat
+  fi
+}
+# show_masked <파일> [꼬리 줄 수]: 파일(의 마지막 N줄)을 IP를 가려 표준 오류로 낸다.
+show_masked() {
+  if [ -n "${2:-}" ]; then tail -n "$2" "$1" | mask >&2; else mask <"$1" >&2; fi
+}
+
 # phase_done <이름> <시작 SECONDS>: 단계별 걸린 시간을 기록하고 한 줄 출력한다.
 phase_done() {
   local took=$((SECONDS - $2))
@@ -48,6 +72,7 @@ phase_done() {
 
 print_timing() {
   local i
+  TIMING_PRINTED=1
   say ""
   say "단계별 시간"
   for i in "${!PHASE_NAMES[@]}"; do
@@ -89,9 +114,15 @@ preflight_aws() {
 }
 
 # 현재 공인 IP를 받아 TF_VAR_admin_cidr에 넣는다(k3s API 6443이 이 IP에만 열린다). 값은 화면에 찍지 않는다.
+# preflight_ip [--fallback]: --fallback이면 조회에 실패해도 문서용 주소(203.0.113.1, RFC 5737)로 대신한다. destroy는 admin_cidr 값이
+# 변수 검증만 통과하면 되기 때문이다(보안 그룹을 어차피 지운다).
 preflight_ip() {
   local ip
   ip=$(curl -fsS --max-time 10 https://checkip.amazonaws.com 2>/dev/null | tr -d '[:space:]') || ip=""
+  if [ -z "$ip" ] && [ "${1:-}" = --fallback ]; then
+    say "현재 IP를 받지 못했다. 삭제에는 IP가 필요 없어서 문서용 주소(203.0.113.1/32)로 대신한다."
+    ip=203.0.113.1
+  fi
   [ -n "$ip" ] || die "현재 공인 IP를 받지 못했다(checkip.amazonaws.com). 네트워크를 확인한다. 빈 값으로 진행하면 /32만 든 admin_cidr이 되어 plan이 실패한다."
   # IPv4 모양과 각 자리 0~255를 확인한다. IPv6 응답이나 오류 페이지가 admin_cidr로 흘러 들어가지 못하게 한다.
   [[ $ip =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || die "받은 값이 IPv4가 아니다. IPv4로 나가는 네트워크에서 다시 한다."
@@ -130,7 +161,7 @@ tf() { terraform -chdir="$SCRIPT_DIR" "$@"; }
 tf_init() {
   say "terraform init (백엔드 버킷: $STATE_BUCKET)"
   if ! tf init -input=false -no-color -backend-config="bucket=$STATE_BUCKET" >"$WORK/init.txt" 2>&1; then
-    cat "$WORK/init.txt" >&2
+    show_masked "$WORK/init.txt"
     die "terraform init 실패"
   fi
 }

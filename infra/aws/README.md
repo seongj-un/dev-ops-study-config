@@ -129,7 +129,7 @@ infra/aws/down.sh
 | 부트스트랩 완료 | SSM으로 완료 표시(`/var/lib/devops-bootstrap.done`)가 이번 부팅 뒤에 생겼는지, 서비스 상태, 마지막 `STEP:` 줄만 읽는다. `failed`면 바로 멈춘다(25분) |
 | DuckDNS | `<서브도메인>.duckdns.org`가 새 인스턴스 IP로 풀릴 때까지(10분) |
 | kubeconfig | SSM으로 받아 `~/.kube/dev-ops-study-aws.yaml`에 저장(`umask 077`, 서버 주소는 DuckDNS 이름, 내용은 출력하지 않는다) |
-| ArgoCD | Application이 `argocd/`의 파일 수만큼 있고 전부 `Synced`/`Healthy`가 될 때까지(20분). 시간이 지나면 준비 안 된 것의 이름과 상태를 나열하고 0이 아닌 값으로 끝난다 |
+| ArgoCD | Application이 전부(개수는 이 체크아웃의 `argocd/apps/*.yaml`과 `argocd/root.yaml` 중 `kind: Application`인 파일 수이고, 원격 `main`과 다르면 어긋날 수 있는 하한이다)  `Synced`/`Healthy`가 될 때까지(20분). 시간이 지나면 준비 안 된 것의 이름과 상태를 나열하고 0이 아닌 값으로 끝난다 |
 | 끝 | https 주소, 단계별 걸린 시간, 합계 |
 
 **`down.sh`가 하는 일**: 같은 사전 점검, `init`, `plan -destroy` 요약, 확인, 저장한 계획으로 destroy(`terraform destroy`와 결과가 같고, 화면에서 확인한 것과 지워지는 것이 같다), 남은 인스턴스·볼륨 조회, `up.sh`가 만든 kubeconfig 삭제, 걸린 시간.
@@ -164,7 +164,7 @@ terraform apply aws.tfplan
 
 ### 멈춘 인스턴스
 
-인스턴스를 콘솔이나 CLI로 멈춰 둔 채 `apply`하면 안 된다. 멈춘 인스턴스는 공인 IP가 없어서 state(옛 IP)와 실제가 어긋난 채로 계획이 만들어지고, 시작하면 IP가 또 바뀐다. 그래서 `up.sh`는 인스턴스가 `stopped`면 먼저 시작하고 `running`을 기다린 뒤 `plan`한다. 시작은 과금이 다시 시작된다는 뜻이다.
+인스턴스를 콘솔이나 CLI로 멈춰 둔 채 `apply`하면 안 된다. 멈춘 인스턴스는 공인 IP가 없어서 state(옛 IP)와 실제가 어긋난 채로 계획이 만들어지고, 시작하면 IP가 또 바뀐다. 그래서 `up.sh`는 인스턴스가 `stopped`면 먼저 시작하고 `running`을 기다린 뒤 `plan`한다. 시작은 과금이 다시 시작된다는 뜻이다. 시작한 뒤 계획 확인에서 거절하면 인스턴스는 `running`으로 남아 계속 과금되니 직접 멈추거나 `down.sh`로 지운다.
 쓰지 않을 때는 멈추지 말고 `down.sh`로 지우는 것이 이 실습의 방식이다([비용](#비용)).
 
 ### 왕복 점검표 (지우고 다시 만들기)

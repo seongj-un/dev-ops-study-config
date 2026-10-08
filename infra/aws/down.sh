@@ -30,7 +30,7 @@ say "== 사전 점검 =="
 preflight_tools
 preflight_aws
 # destroy에도 같은 변수가 필요하다(값은 검증만 통과하면 된다). 관리자 IP는 화면에 쓰지 않는다.
-preflight_ip
+preflight_ip --fallback
 
 say ""
 say "== terraform =="
@@ -38,7 +38,7 @@ phase_start=$SECONDS
 tf_init
 # 저장한 destroy 계획을 그대로 적용한다. 화면에서 확인한 것과 지워지는 것이 같다는 점이 terraform destroy를 바로 실행하는 것과 다르다(결과는 같다).
 tf plan -destroy -input=false -no-color -out="$WORK/destroy.tfplan" >"$WORK/plan.txt" 2>"$WORK/plan.err" || {
-  cat "$WORK/plan.err" >&2
+  show_masked "$WORK/plan.err"
   die "terraform plan -destroy 실패"
 }
 phase_done "terraform init/plan -destroy" "$phase_start"
@@ -51,7 +51,7 @@ else
   confirm "위 리소스를 모두 삭제할까?" || die "취소했다. 아무것도 지우지 않았다."
   phase_start=$SECONDS
   tf apply -input=false -no-color "$WORK/destroy.tfplan" >"$WORK/destroy.txt" 2>&1 || {
-    tail -n 30 "$WORK/destroy.txt" >&2
+    show_masked "$WORK/destroy.txt" 30
     die "destroy 실패. 같은 명령을 다시 실행하면 남은 것을 이어서 지운다."
   }
   phase_done "terraform destroy" "$phase_start"
