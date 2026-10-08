@@ -23,11 +23,18 @@ image:
   # 값은 따옴표로 감싼다: 40자 16진수가 우연히 숫자(예: 1234...)나 지수 표기(예: 1234e5...)처럼 생겨도 YAML이 숫자가 아닌 문자열로 읽게 하려는 것이다.
   tag: "fc2c8d1647d73f0a4dba17acbefdb5cb02464957"
 # 응답의 shortUrl 앞에 붙는 공개 주소. Ingress로 들어오는 주소와 같아야 한다. DuckDNS 이름 dev-ops-study가 EC2 노드의 IP를 가리키고, DuckDNS가 그 아래의 하위 이름(dev.dev-ops-study.duckdns.org)도 같은 IP로 해석한다.
-# 그 노드의 80 포트로 들어온 요청을 k3s 기본 Traefik이 받는다. 평문 HTTP의 기본 포트(80)라서 주소에 포트 번호가 없다. HTTPS는 나중에 cert-manager로 붙인다(붙이면 이 주소도 https로 바꾼다).
-baseUrl: http://dev.dev-ops-study.duckdns.org
+# 그 노드의 443 포트로 들어온 요청을 k3s 기본 Traefik이 아래 ingress.tls의 인증서로 받는다. HTTPS의 기본 포트(443)라서 주소에 포트 번호가 없다.
+# 80 포트(평문 HTTP)로 온 요청은 Traefik이 이 주소의 https로 돌려보낸다(차트 templates/https-redirect.yaml). 그래서 공개 주소는 https다.
+baseUrl: https://dev.dev-ops-study.duckdns.org
 ingress:
-  # prod(dev-ops-study.duckdns.org)와 같은 IP로 들어오므로, 이름이 달라야 Traefik이 Host 헤더로 요청을 나눈다.
+  # prod(dev-ops-study.duckdns.org)와 같은 IP로 들어오므로, 이름이 달라야 Traefik이 Host 헤더로 요청을 나눈다. HTTPS에서는 TLS의 SNI도 이 이름이라 Traefik이 이 이름의 인증서를 고른다.
   host: dev.dev-ops-study.duckdns.org
+  # HTTPS(6단계): cert-manager가 Let's Encrypt에서 이 호스트의 인증서를 받아 Secret shortener-dev-tls에 넣는다(README의 HTTPS 절).
+  # clusterIssuer는 letsencrypt-staging(신뢰되지 않는 시험용 인증서, 발급 한도가 크다)으로 시작한다. 발급 흐름을 확인한 뒤 letsencrypt-prod로 바꾸는 한 줄짜리 PR을 올린다.
+  # 바꾸면 cert-manager가 발급자가 달라진 것을 보고 인증서를 다시 받는다. staging인 동안 https 주소는 브라우저 경고가 나고 curl에는 -k가 필요하다.
+  tls:
+    enabled: true
+    clusterIssuer: letsencrypt-staging
 # 파드 2개로 고정한다. autoscaling.enabled가 false이면 차트가 HPA를 만들지 않고 워크로드(Rollout, Argo Rollouts가 없으면 Deployment)에 replicas를 적으므로(replicaCount)
 # 그 값이 쓰인다(차트 기본값은 HPA를 켠다). dev는 prod로 승격하기 전에 확인하는 환경이라 부하에 맞춰 늘릴 이유는 없다.
 # 2개인 것은 prod(HPA 최소 2개)와 같은 파드 수로 카나리를 확인하고(setWeight 50 → 카나리 1개·stable 1개), 파드 하나가 죽어도(5단계 장애 훈련) 다른 하나가 요청을 받게 하려는 것이다.

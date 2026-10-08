@@ -1,0 +1,55 @@
+# 인증서 Application: cert-manager(jetstack/cert-manager 차트)를 platform/cert-manager/values.yaml 값으로 cert-manager 네임스페이스에 배포한다.
+# 루트 Application(argocd/root.yaml)이 이 파일을 읽어 클러스터에 Application을 만든다.
+#
+# 모양은 kube-prometheus-stack Application과 같은 multi-source다(차트 저장소의 차트 + 이 저장소의 값 파일. 설명은 argocd/apps/kube-prometheus-stack.yaml).
+# 차트 버전을 올릴 때는 아래 targetRevision과 값 파일 맨 위의 버전 표기를 함께 바꾸고, cert-manager의 업그레이드 안내(릴리스마다 cert-manager.io/docs/releases/의 upgrading 문서)를 먼저 읽는다.
+# CI(validate.yml)가 이 파일에서 차트와 값 파일을 읽어 렌더링하고 스키마로 검사한다.
+# 이 Application은 컨트롤러·웹훅·cainjector와 CRD만 설치한다. 발급자(ClusterIssuer)는 cert-issuers Application이, 인증서를 요청하는 Ingress는 앱 차트가 따로 배포한다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  # ArgoCD는 이 이름을 Helm 릴리스 이름으로 쓴다. 릴리스 이름이 차트 이름과 같아서 리소스 이름이 cert-manager, cert-manager-webhook, cert-manager-cainjector가 된다.
+  name: cert-manager
+  namespace: argocd
+spec:
+  project: default
+  sources:
+    - repoURL: https://charts.jetstack.io
+      chart: cert-manager
+      # 정확한 버전으로 고정한다(이 저장소의 차트 버전은 앞에 v가 붙는다). 이미지 태그도 이 차트 버전이 정한다(값 파일 맨 위 주석).
+      targetRevision: v1.21.2
+      helm:
+        valueFiles:
+          - $values/platform/cert-manager/values.yaml
+    - repoURL: https://github.com/seongj-un/dev-ops-study-config.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    # 차트는 리소스를 이 네임스페이스(Helm의 릴리스 네임스페이스)에 만든다. 예외: 리더 선출용 Role·RoleBinding은 kube-system에 생긴다(차트 기본값 global.leaderElection.namespace).
+    # ClusterIssuer가 쓰는 ACME 계정 키 Secret도 컨트롤러가 이 네임스페이스에 만든다(--cluster-resource-namespace의 기본값).
+    namespace: cert-manager
+  syncPolicy:
+    # 자동 동기화와 prune·selfHeal은 다른 Application과 같다(argocd/apps/shortener-dev.yaml 참고).
+    # prune은 CRD도 대상이다. 이 차트는 CRD에 Prune=false를 붙일 수 없어서 값 파일의 crds.enabled를 끄지 않는 것으로 지킨다(값 파일의 CRD 주석).
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # cert-manager 네임스페이스가 없으면 만든다. 이미 있으면 건드리지 않는다.
+      - CreateNamespace=true
+      # 서버 쪽 적용(설명은 argocd/apps/kube-prometheus-stack.yaml). 이 차트의 CRD는 가장 큰 clusterissuers·issuers가 JSON으로 약 143KiB라(challenges 약 122KiB)
+      # 클라이언트 쪽 적용이 쓰는 어노테이션의 한도(256KiB)에 아직 닿지 않지만 절반을 넘는다. ACME 검증 파드의 설정 필드가 늘 때마다 커지는 CRD라서 막히기 전에 서버 쪽 적용으로 둔다(Argo Rollouts와 같은 판단).
+      # caBundle: 웹훅 설정(Validating·MutatingWebhookConfiguration)의 caBundle은 cainjector가 클러스터에서 채우는 값이고 차트는 이 필드를 렌더링하지 않는다.
+      # 서버 쪽 적용은 객체 전체가 아니라 렌더링한 필드만 이 Application의 것으로 기록하고(metadata.managedFields), ArgoCD의 비교도 Git에 적힌 필드만 본다.
+      # 그래서 caBundle은 cainjector의 필드로 남아 동기화가 지우지 않고 OutOfSync로도 보이지 않는다. ignoreDifferences는 Git에 caBundle을 빈 값 등으로 적는 차트에서나 필요하다.
+      - ServerSideApply=true
+    # 컨트롤러의 ServiceMonitor는 kube-prometheus-stack이 설치하는 CRD가 있어야 적용된다. 값 파일이 ServiceMonitor에만 SkipDryRunOnMissingResource=true를 붙여
+    # (prometheus.servicemonitor.annotations) 새 클러스터에서 이쪽이 먼저 동기화되어도 CRD·컨트롤러·웹훅이 먼저 적용되고 ServiceMonitor만 CRD가 생길 때까지 다시 시도된다.
+    # 재시도의 모양과 대가는 argocd/apps/argo-rollouts.yaml의 retry 주석과 같다: 10초에서 시작해 2배씩, 3분을 넘지 않게 6번(합쳐 약 8분).
+    retry:
+      limit: 6
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

@@ -16,12 +16,17 @@ image:
   # 이 파일을 지켜 주는 것은 룰셋이 아니라 그 스크립트의 절제다.
   # 값은 따옴표로 감싼다: dev 파일과 같은 형식으로 두어 SHA를 통째로 복사·붙여넣을 수 있게 하고, 숫자나 지수 표기로 읽히지 않게 한다.
   tag: "fc2c8d1647d73f0a4dba17acbefdb5cb02464957"
-# 응답의 shortUrl 앞에 붙는 공개 주소. Ingress로 들어오는 주소와 같아야 한다. DuckDNS 이름 dev-ops-study가 EC2 노드의 IP를 가리키고, 그 노드의 80 포트로 들어온 요청을 k3s 기본 Traefik이 받는다.
-# 평문 HTTP의 기본 포트(80)라서 주소에 포트 번호가 없다. HTTPS는 나중에 cert-manager로 붙인다(붙이면 이 주소도 https로 바꾼다).
-baseUrl: http://dev-ops-study.duckdns.org
+# 응답의 shortUrl 앞에 붙는 공개 주소. Ingress로 들어오는 주소와 같아야 한다. DuckDNS 이름 dev-ops-study가 EC2 노드의 IP를 가리키고, 그 노드의 443 포트로 들어온 요청을
+# k3s 기본 Traefik이 아래 ingress.tls의 인증서로 받는다. HTTPS의 기본 포트(443)라서 주소에 포트 번호가 없다. 80 포트로 온 요청은 Traefik이 https로 돌려보낸다(dev 파일과 같다).
+baseUrl: https://dev-ops-study.duckdns.org
 ingress:
-  # DuckDNS에 등록한 이름 그대로다. dev(dev.dev-ops-study.duckdns.org)도 같은 IP로 들어오므로, 이름이 달라야 Traefik이 Host 헤더로 요청을 나눈다.
+  # DuckDNS에 등록한 이름 그대로다. dev(dev.dev-ops-study.duckdns.org)도 같은 IP로 들어오므로, 이름이 달라야 Traefik이 Host 헤더(HTTPS에서는 SNI도)로 요청을 나눈다.
   host: dev-ops-study.duckdns.org
+  # HTTPS(6단계): 인증서는 Secret shortener-prod-tls에 들어간다. dev처럼 letsencrypt-staging으로 시작하고, 발급을 확인한 뒤 letsencrypt-prod로 바꾸는 PR을 올린다(README의 HTTPS 절).
+  # prod 발급자는 같은 이름으로 7일에 5장까지라서, 인스턴스를 없애고 다시 만들 때마다(Secret이 사라진다) 한 장씩 쓴다.
+  tls:
+    enabled: true
+    clusterIssuer: letsencrypt-staging
 # HPA를 켠다(파드 2~3개). autoscaling.enabled가 true이면 차트가 HPA를 만들고 워크로드(Rollout, Argo Rollouts가 없으면 Deployment)에는 replicas를 적지 않으므로 파드 수는 HPA가 정한다.
 # 그래서 replicaCount는 이 파일에 적지 않는다(쓰이지 않는다). 최소 2개는 파드 하나가 죽어도(5단계 장애 훈련) 다른 파드가 요청을 받고,
 # 카나리(setWeight 50)가 파드를 더 띄워 두지 않고도 카나리 1개·stable 1개로 나뉘게 하려는 것이다.
@@ -31,14 +36,15 @@ ingress:
 #   - ArgoCD: 요청 합 560, 한도 합 1792 (README의 ArgoCD 표. 4단계에서 repo-server 한도를 256에서 512로, application-controller를 요청 128에서 384로·한도 256에서 1024로 올렸다).
 #   - 모니터링(4단계): kube-prometheus-stack 요청 합 1056·한도 합 2432(추정), Loki·Alloy 요청 합 368·한도 합 832 (README의 모니터링 표).
 #   - 점진 배포(5단계): Argo Rollouts 컨트롤러·대시보드 요청 합 96·한도 합 320(추정) (README의 Argo Rollouts 표).
+#   - 인증서(6단계): cert-manager 컨트롤러·웹훅·cainjector 요청 합 160·한도 합 480(추정) (README의 HTTPS 표). 발급·갱신 때 앱 네임스페이스마다 수십 초 뜨는 검증 파드(64/64)는 넣지 않았다.
 #   - 앱 파드 하나는 요청 384·한도 512, Redis는 32/128이다. PostgreSQL은 dev가 차트 기본값 128/256이고, prod는 아래 postgresql에서 키운 256/512다.
 #   - dev(앱 2개 + PostgreSQL 128/256 + Redis 32/128): 요청 928, 한도 1408. prod(앱 3개 + PostgreSQL 256/512 + Redis 32/128): 요청 1440, 한도 2176.
 #   - 새 버전을 배포하는 동안(Rollout의 카나리. Argo Rollouts가 없으면 Deployment의 롤링 업데이트)에는 환경마다 앱 파드가 하나 더 뜬다(maxSurge 1): 요청 +384, 한도 +512.
 #     카나리는 그 하나를 잠깐이 아니라 대기와 분석(약 2분 30초) 동안 띄워 둘 수 있다(prod가 3개면 카나리 2개·stable 2개). 차트의 파드 템플릿을 고치면 두 환경이 같은 main의 차트를 읽으므로 동시에 배포된다.
-#   최악(prod가 3개인 채 두 환경이 동시에 배포하는 경우)의 요청 합은 800 + 560 + 1056 + 368 + 96 + 928 + 1440 + 384 + 384 = 6016으로 노드 안에 든다(요청은 스케줄러가 자리를 계산하는 값이다).
+#   최악(prod가 3개인 채 두 환경이 동시에 배포하는 경우)의 요청 합은 800 + 560 + 1056 + 368 + 96 + 160 + 928 + 1440 + 384 + 384 = 6176으로 노드 안에 든다(요청은 스케줄러가 자리를 계산하는 값이다).
 #   4단계에서 새로 더하는 요청은 약 1.6GiB까지로 잡았고(ArgoCD 컨트롤러 요청을 올린 256은 위 ArgoCD 몫에 따로 들어 있다) 그중 kube-prometheus-stack이 1056, Loki·Alloy가 368을 쓴다(합 1424).
 #   5단계에서 dev 앱을 2개로 늘린 요청 384도 위 dev 몫에 들어 있다.
-#   같은 경우의 한도 합은 800 + 1792 + 2432 + 832 + 320 + 1408 + 2176 + 512 + 512 = 10784로 노드(8192)를 넘는다(오버커밋). 3단계까지는 이 최악(5664)도 노드 안에 들었지만
+#   같은 경우의 한도 합은 800 + 1792 + 2432 + 832 + 320 + 480 + 1408 + 2176 + 512 + 512 = 11264로 노드(8192)를 넘는다(오버커밋). 3단계까지는 이 최악(5664)도 노드 안에 들었지만
 #   4단계에서 모니터링과 ArgoCD의 한도를 더해 넘었다. 모든 컨테이너가 한꺼번에 한도까지 쓰는 일은 드물다고 보고 받아들인다: 한도는 폭주하는 컨테이너 하나만 멈추게 하는 상한이고,
 #   한도보다 노드가 먼저 모자라면 kubelet이 요청을 넘게 쓰는 파드부터 내쫓는다(README의 메모리 메모).
 # 한도는 상한일 뿐 평소 사용량은 훨씬 작다: 2단계에서 한도 512Mi로 띄웠을 때 유휴 상태의 앱 파드는 약 320Mi였다. 실제 값은 띄운 뒤 kubectl top pods -A --sort-by=memory로 잰다.

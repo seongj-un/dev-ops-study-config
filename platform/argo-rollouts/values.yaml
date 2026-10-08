@@ -7,8 +7,8 @@
 # 이미지는 차트 버전이 정하는 태그를 그대로 쓴다(컨트롤러 quay.io/argoproj/argo-rollouts:v1.10.0, 대시보드 quay.io/argoproj/kubectl-argo-rollouts:v1.10.0. 둘 다 arm64·amd64 지원).
 # CRD가 차트에 들어 있어서 이미지 태그만 따로 고정하면 차트를 올릴 때 컨트롤러와 CRD가 어긋날 수 있다. 고정의 단위가 차트 버전인 것은 kube-prometheus-stack 값 파일 맨 위와 같은 이유다.
 #
-# 접속: 대시보드에 Ingress도 HTTPRoute도 만들지 않고 Service도 ClusterIP다. 대시보드에는 인증이 없고(차트 README: 관리 콘솔로 노출하려고 만든 것이 아니라 네트워크 접근이나 OAuth 프록시로 막아야 한다),
-# 80 포트는 인터넷에 열린 평문 HTTP라서 그대로 내놓게 된다. 사람은 kubectl port-forward로만 본다(README의 Argo Rollouts 절).
+# 접속: 대시보드에 Ingress도 HTTPRoute도 만들지 않고 Service도 ClusterIP다. 대시보드에는 인증이 없어서(차트 README: 관리 콘솔로 노출하려고 만든 것이 아니라 네트워크 접근이나 OAuth 프록시로 막아야 한다)
+# Ingress로 열면 80이든 443(HTTPS)이든 누구나 닿는다. 사람은 kubectl port-forward로만 본다(README의 Argo Rollouts 절).
 # 리소스: 모든 컨테이너에 요청과 메모리 한도를 두고 CPU 한도는 두지 않는다(앱 차트와 같은 이유: CPU 한도는 CFS 쿼터 스로틀링을 부른다).
 # 값은 클러스터에서 잰 것이 아니라 이 규모(Rollout 2개)를 가정한 추정이다. 띄운 뒤 kubectl top pods -n argo-rollouts로 보고 고친다. 합계는 README에 있다.
 #

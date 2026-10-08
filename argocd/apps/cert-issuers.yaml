@@ -1,0 +1,41 @@
+# 인증서 발급자 Application: 이 저장소의 platform/cert-issuers에 있는 ClusterIssuer(letsencrypt-staging, letsencrypt-prod)를 클러스터에 만든다.
+# 루트 Application(argocd/root.yaml)이 이 파일을 읽어 클러스터에 Application을 만든다.
+#
+# 외부 차트가 없어서 소스가 하나다(monitoring-dashboards처럼 이 저장소의 경로를 직접 가리킨다). kustomization.yaml이 없는 디렉터리라 ArgoCD가 안의 YAML을 그대로 읽는다.
+# cert-manager Application과 나눈 이유: 발급자는 이 저장소가 정하는 설정이고 차트가 아니다. 차트의 extraObjects에 문자열로 끼워 넣는 것보다 평범한 매니페스트로 두는 편이
+# 읽기 쉽고 CI가 CRD 스키마로 바로 검사할 수 있다. 대가는 두 Application 사이에 동기화 순서가 없다는 것이고, 아래 retry가 그것을 맡는다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-issuers
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/seongj-un/dev-ops-study-config.git
+    targetRevision: main
+    path: platform/cert-issuers
+  # destination.namespace를 적지 않는다: ClusterIssuer는 클러스터 범위라 네임스페이스가 없고, 이 디렉터리에는 네임스페이스 범위 리소스가 없다.
+  # (ClusterIssuer가 쓰는 ACME 계정 키 Secret은 ArgoCD가 아니라 cert-manager 컨트롤러가 cert-manager 네임스페이스에 만든다.)
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    # 자동 동기화와 prune·selfHeal은 다른 Application과 같다(argocd/apps/shortener-dev.yaml 참고). ClusterIssuer를 지워도 이미 받은 인증서 Secret은 남고, 갱신만 멈춘다.
+    automated:
+      prune: true
+      selfHeal: true
+    # 동기화 순서: ClusterIssuer의 CRD와 그것을 검사하는 웹훅은 cert-manager Application이 만든다. 웨이브(sync-wave)는 한 Application 안의 순서라서 두 Application 사이에는 쓰지 못한다
+    # (루트 Application에서 자식 Application에 웨이브를 붙여도, ArgoCD v3.5.3은 Application 리소스의 건강 상태를 따로 설정하지 않으면 보지 않아 cert-manager가 준비되기를 기다리지 않는다).
+    # 그래서 새 클러스터에서 이쪽이 먼저 동기화되면 이렇게 풀린다:
+    #   1) CRD가 아직 없다: ClusterIssuer의 SkipDryRunOnMissingResource=true(platform/cert-issuers/letsencrypt.yaml)로 동기화 전 검증을 건너뛰고, 적용이 "kind를 모른다"로 실패한다.
+    #   2) CRD는 있는데 웹훅 파드가 아직 뜨지 않았거나 cainjector가 웹훅 설정에 CA를 아직 넣지 않았다: 웹훅 호출이 실패해(failurePolicy: Fail) 적용이 거부된다.
+    #   두 경우 모두 아래 retry가 다시 시도하고, cert-manager가 준비되면 적용된다. ArgoCD의 기본 재시도(합쳐 약 2분 반)는 새 노드에서 이미지를 받고 웹훅이 뜨기까지보다 짧을 수 있어서
+    #   argo-rollouts와 같은 값으로 늘린다: 10초에서 시작해 2배씩, 3분을 넘지 않게 6번(합쳐 약 8분). 대가도 같다(argocd/apps/argo-rollouts.yaml의 retry 주석): 기다리는 동안 동기화 작업이
+    #   Running으로 남아 새 커밋을 적용하지 않고, 다시 시도를 모두 쓰면 사람이 Sync를 눌러야 한다(README의 막혔을 때).
+    # 이 Application에는 ClusterIssuer만 있어서 Application 전체(syncOptions)에 SkipDryRunOnMissingResource를 걸어도 결과는 같지만, 리소스에 붙여 두면 나중에 다른 kind를 더해도 그 오타는 검증에서 걸린다.
+    retry:
+      limit: 6
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
