@@ -48,10 +48,12 @@ argocd/apps/cert-manager.yaml       인증서 Application (cert-manager: 외부 
 platform/cert-manager/values.yaml   그 값 (컨트롤러·웹훅·cainjector·CRD. 아래 "HTTPS")
 argocd/apps/cert-issuers.yaml       인증서 발급자 Application (이 저장소의 디렉터리를 그대로 적용)
 platform/cert-issuers/              Let's Encrypt ClusterIssuer 두 개(letsencrypt-staging, letsencrypt-prod)
-tests/slo/                       앱 SLO 규칙(차트의 PrometheusRule)의 promtool 단위 테스트. validate가 차트를 렌더링해 꺼낸 규칙으로 돌린다
+argocd/apps/traefik-config.yaml     k3s Traefik 설정 Application (이 저장소의 디렉터리를 그대로 kube-system에 적용)
+platform/traefik-config/            Traefik의 HelmChartConfig(라우터 지표 켜기)와 Traefik 지표를 수집하는 PodMonitor (아래 "엣지 SLI")
+tests/slo/                       앱 SLO 규칙과 앱 파드·쓰기 경로·엣지 경보(차트의 PrometheusRule)의 promtool 단위 테스트. validate가 차트를 렌더링해 꺼낸 규칙으로 돌린다
 tests/canary/                    카나리 분석 쿼리(차트의 AnalysisTemplate)의 promtool 단위 테스트. validate가 렌더링 결과에서 쿼리를 꺼내 돌린다
 tests/certificates/              인증서 경보(kube-prometheus-stack 값 파일의 additionalPrometheusRulesMap)의 promtool 단위 테스트
-.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링(Rollout·Deployment 두 갈래), 스키마 검사, Ingress HTTPS 확인, SLO 규칙·카나리 분석 쿼리 검사, 플랫폼 차트 렌더링, 인증서 발급자·경보·대시보드 검사)
+.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링(Rollout·Deployment 두 갈래), 스키마 검사, Ingress HTTPS 확인, SLO 규칙·카나리 분석 쿼리 검사, 플랫폼 차트 렌더링, 인증서 발급자·Traefik 설정·인증서 경보·대시보드 검사)
 infra/aws/up.sh, down.sh           명령 한 번으로 EC2/k3s 환경을 만들고(up.sh) 지운다(down.sh). 사용법은 infra/aws/README.md
 .github/workflows/terraform-plan.yml  infra/aws를 바꾸는 PR의 terraform plan 요약 (GitHub OIDC로 읽기 전용 역할을 맡는다. 필수 검사 아님. infra/aws/README.md)
 .github/dependabot.yml           GitHub Actions 주간 갱신
@@ -270,6 +272,7 @@ Application `kube-prometheus-stack`이 Helm 차트 `prometheus-community/kube-pr
 값을 바꾸는 방법은 앱과 같다: 값 파일을 고치는 PR을 머지하면 ArgoCD가 다음 폴링에서 반영한다. Grafana에는 Loki 데이터 소스(`uid: loki`)가 미리 들어 있다.
 로그는 Application `loki`(`grafana/loki` **7.3.0**)와 `alloy`(`grafana/alloy` **1.13.0**)가 같은 모양(multi-source)으로, 대시보드는 `monitoring-dashboards`가
 이 저장소의 `platform/dashboards`(kustomize)에서 같은 네임스페이스에 배포한다(아래 "로그", "대시보드").
+k3s의 Traefik 지표는 Application `traefik-config`가 kube-system에 두는 PodMonitor로 수집한다(아래 "엣지 SLI").
 
 | 파드 | 하는 일 | CPU 요청 | 메모리 요청 / 한도 |
 |---|---|---|---|
@@ -319,7 +322,7 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 | 경보 | 가는 곳 |
 |---|---|
 | `Watchdog`(경보 파이프라인이 살아 있음을 보이려고 늘 울리는 경보), `InfoInhibitor`(info 경보를 누르는 데만 쓰는 경보. 같은 네임스페이스에 info 경보가 있고 warning·critical 경보는 울리지 않을 때만 울린다) | 보내지 않는다(`null`) |
-| `service="shortener"` (앱의 SLO 경보, 앱 파드 경보, 쓰기 경로 경보. 쓰기 경로 경보는 warning이지만 이 경로라 간다) | Discord |
+| `service="shortener"` (앱의 SLO 경보, 앱 파드 경보, 쓰기 경로 경보, 엣지 경보. 쓰기 경로 경보는 warning이지만 이 경로라 간다) | Discord |
 | `severity="critical"` (그 밖의 critical 경보. 인증서 경보 `CertificateExpiringSoon`·`CertificateNotReady`도 여기로 간다. 아래 "HTTPS"의 인증서 경보) | Discord |
 | 나머지(warning·info) | 보내지 않는다. Alertmanager UI에서 본다 |
 
@@ -331,7 +334,8 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 ### SLO 경보가 울리지 않는 장애
 
 앱의 SLO 경보(가용성·지연 번 레이트, `charts/shortener/templates/prometheusrule.yaml`)는 짧거나 일부만 실패하는 장애에는 일부러 울리지 않는다.
-그리고 요청이 앱까지 오지 않는 장애는 길어도 보지 못한다. 두 번째 빈자리는 앱 파드 경보가, 첫 번째 가운데 생성(쓰기)만 망가진 장애는 쓰기 경로 경보가 맡는다.
+그리고 요청이 앱까지 오지 않는 장애는 길어도 보지 못한다. 두 번째 빈자리는 앱 파드 경보(원인: Ready인 파드 0개)와 엣지 경보(증상: Traefik에서 잰 5xx, 아래 "엣지 SLI")가,
+첫 번째 가운데 생성(쓰기)만 망가진 장애는 쓰기 경로 경보가 맡는다.
 
 **짧은 장애·부분 장애는 페이지하지 않는다(예산 계산).** 가용성의 30일 오류 예산은 요청의 0.5%다. 요청이 고르게 온다면 "모든 요청이 실패하는 시간"으로
 30일 × 24시간 × 60분 × 0.5% = 216분이다. 빠른 소진 경보는 1시간 비율과 5분 비율이 모두 7.2%(예산의 14.4배)를 넘고 그것이 2분 이어져야 울린다.
@@ -361,6 +365,7 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 available 0이 1분을 넘기 쉬운데, 그때마다 critical이 Discord로 가면 평소의 시작이 장애처럼 보이기 때문이다.
 처음 배포한 뒤 Prometheus에서 `count by (exported_namespace, name) (rollout_info_replicas_available)`가 `shortener-dev`·`shortener-prod`를 하나씩 내는지 본다.
 경보는 이 레이블 이름(`exported_namespace`, `name`)으로 Rollout을 고르므로, 이름이 다르면 아무 경고 없이 영영 울리지 않는다.
+같은 장애를 사용자 쪽에서 본 엣지 경보 `ShortenerEdgeFailing`도 요청이 오고 있으면 장애 4~5분째에 울린다(아래 "엣지 SLI").
 
 **생성만 실패하는 장애는 쓰기 경로 경보가 맡는다.** v5 연습(prod, DB 차단 약 5분 20초)에서 리다이렉트(GET)는 Redis 캐시로 계속 302를 돌려주고 생성(POST)만 모두 500이었다.
 전체 요청의 5xx는 약 12%라 5분 비율(최고 11.8%)은 7.2%를 넘었지만, 1시간 비율(2.9%)이 7.2%에, 30분 비율(최고 2.89%)이 3%에 못 미쳐 가용성 경보는 pending조차 되지 않았다.
@@ -373,12 +378,69 @@ v5 모양이면 장애 4~5분째, 곧 v5 길이(약 5분 20초)의 장애가 끝
 (`/actuator`만 거르는 카나리 분석과 SLO 경보는 그대로 센다). 이 경보를 연습하려면 v5처럼 DB를 끊는다.
 
 **아직 덮지 못하는 것.**
-- 앱 파드는 Ready인데 그 앞(Traefik, Ingress 설정, 노드의 네트워크)에서 실패하는 요청: 앱 지표에도 파드 수에도 보이지 않는다. 클러스터 밖에서 요청을 보내 보는 검사나
-  Traefik의 지표로 재는 SLI가 있어야 잡힌다.
+- Traefik까지 오지 못하거나 Traefik이 라우터를 만들지 않는 요청: Traefik이나 노드의 네트워크가 죽은 것, Ingress가 가리키는 Service·Middleware가 없어 Traefik이 라우터를 버린 것(404).
+  엣지 경보는 Traefik이 이 환경의 라우터로 받은 요청만 센다(아래 "엣지 SLI"). 클러스터 밖에서 요청을 보내 보는 검사가 있어야 잡힌다.
+  Traefik과 파드 사이의 실패(502·504)는 엣지 경보가 센다.
 - 노드가 통째로 멈추는 장애: Prometheus와 Alertmanager도 그 노드에 있어서 아무 경보도 나가지 않는다. Watchdog을 보내지 않으므로(위 표) "경보가 끊겼다"를 알려 줄 쪽도 없다.
 - 앱 파드 경보는 지표가 없으면 울리지 않는다. Argo Rollouts 컨트롤러가 내려가 있는 동안 앱도 내려가면 조용하다(수집 대상이 내려간 것은 기본 규칙 `TargetDown`이 알리지만 warning이다).
 - 위 표의 기준 아래인 부분 장애: 일부러 페이지하지 않는다. 쓰기 경로 경보가 보는 것은 생성(`POST /api/v1/urls`) 하나뿐이다(일부 코드의 리다이렉트만 실패하는 것 등은 보지 않는다).
 - 노드가 부팅되고 5분 안의 전체 장애: 앱 파드 경보의 부팅 가드가 누른다. 5분이 지나도 앱 파드가 0개면 그때부터 1분 뒤에 울린다.
+
+### 엣지 SLI (Traefik)
+
+앱의 SLI(`http_server_requests`)는 요청이 앱에 닿아야 잰다. 엣지 SLI는 그 앞, 클러스터의 입구인 k3s의 Traefik이 이 환경의 Ingress로 받은 요청을
+응답 코드별로 센다(`traefik_router_requests_total`). 사용자가 실제로 받은 응답이라서 Traefik이 직접 돌려준 503도 들어 있다.
+
+| | 앱 SLI (`http_server_requests`) | 엣지 SLI (`traefik_router_requests_total`) |
+|---|---|---|
+| 재는 곳 | 앱(Micrometer). 앱 차트의 ServiceMonitor가 수집 | Traefik(kube-system). `platform/traefik-config`의 PodMonitor가 수집 |
+| 앱 파드가 모두 NotReady일 때 Traefik이 돌려준 503 | 보이지 않는다(분모가 0이라 비율이 NaN) | 센다(`code="503"`) |
+| Traefik과 파드 사이의 실패(502·504) | 보이지 않는다 | 센다 |
+| 앱이 돌려준 5xx·4xx | 센다 | 센다 |
+| 80 포트에서 https로 돌려보낸 응답(301·308) | 없다(앱에 닿지 않는다) | 들어 있다(분모가 조금 커진다) |
+| Ingress가 가리키는 Service·Middleware가 없어 라우터가 없는 404 | 보이지 않는다 | 보이지 않는다(엔트리포인트 지표에 호스트 없이 남는다) |
+| 나누는 단위 | `uri`·`method`·`status` | `method`·`code`(경로는 없다) |
+| 지연 | 0.3초 버킷으로 지연 SLO를 잰다 | 재지 않는다(라우터의 지연 히스토그램은 수집할 때 버린다) |
+| 경보 | 가용성·지연 번 레이트, 쓰기 경로 | `ShortenerEdgeFailing` |
+
+**경보.** `ShortenerEdgeFailing`(앱 차트 PrometheusRule의 `<릴리스>-edge` 그룹)은 Traefik이 이 환경으로 받은 요청의 5분 5xx 비율이 20%를 넘고 그 요청이
+초당 0.05건(5분에 15건)보다 많은 상태가 3분 이어지면 울린다. `severity="critical"`, `service="shortener"`라 Discord로 간다. 전체 장애면 장애 4~5분째에 울리고(`tests/slo`의 (p)),
+요청이 그보다 드물면 모두 실패해도 울리지 않는다((r)). 예산 경보가 아니라 쓰기 경로 경보와 같은 증상 경보다. 고른 값과 한계의 이유는 그 파일 머리말의 [엣지 경보]에 있다.
+v4 모양(파드가 모두 NotReady)이면 앱 파드 경보(원인)와 이 경보(증상)가 함께 울린다. 파드가 Ready인데 이 경보만 울리면 Traefik과 파드 사이나 앱의 5xx를 본다.
+
+**왜 라우터 지표인가.** Traefik v3.7의 기본 지표는 엔트리포인트(`traefik_entrypoint_*`, 레이블 `entrypoint`)와 서비스(`traefik_service_*`, 레이블 `service`)다.
+엔트리포인트 지표에는 호스트가 없어 dev와 prod를 가릴 수 없다. 서비스 지표는 Traefik이 파드 주소마다의 프록시에 붙여서, 파드가 하나도 없을 때 로드 밸런서가
+직접 돌려주는 `503 no available server`를 세지 않는다(Traefik v3.7.8 소스 `pkg/server/service/service.go`). 라우터 지표는 라우터의 미들웨어와 서비스를 통째로 감싸서
+그 503도 센다(`pkg/server/router/router.go`). 그래서 라우터 지표를 켠다(Traefik의 기본값은 끔).
+
+**Traefik 설정.** Traefik은 이 저장소가 아니라 k3s가 설치한다(k3s v1.35.8+k3s1의 HelmChart `kube-system/traefik`, 차트 `traefik-40.1.4+up40.1.0`, Traefik v3.7.8).
+Application `traefik-config`가 `platform/traefik-config/`를 kube-system에 그대로 적용한다:
+- **HelmChartConfig `traefik`**: k3s의 helm-controller가 그 값을 k3s의 값 위에 얹어 Traefik을 다시 설치한다. 라우터 지표를 켜고(`metrics.prometheus.addRoutersLabels: true`),
+  엔드포인트가 없는 Service에도 라우터를 두게 한다(`providers.kubernetesIngress.allowEmptyServices: true`. 차트 40.1.0의 기본값이 이미 true지만 경보가 이 동작에 기대므로 적어 둔다.
+  false면 파드가 모두 NotReady일 때 503이 아니라 404가 되고 라우터의 계열이 사라져 경보가 울리지 않는다).
+  `failurePolicy: retry`도 적는다: 적지 않으면 CRD의 기본값 reinstall이 k3s의 retry를 덮어써서, 업그레이드가 실패한 뒤 Traefik을 지웠다가 다시 설치한다.
+- **이 파일을 바꾸거나 지우면 Traefik 파드가 한 번 바뀐다**(helm-controller의 helm upgrade, 롤링 업데이트). 잠깐 연결이 끊기거나 새 파드가 Ingress를 다 읽기 전의 요청이 404일 수 있다.
+  새 클러스터에서는 ArgoCD의 첫 동기화 때 한 번 일어난다. k3s의 매니페스트 파일(`/var/lib/rancher/k3s/server/manifests/traefik.yaml`)은 k3s가 시작할 때마다 다시 쓰므로 고치지 않는다.
+- **PodMonitor `traefik`**: Traefik 파드의 `metrics` 포트(9100)의 `/metrics`를 30초마다 수집한다. 그 전에는 아무도 수집하지 않았다(차트가 지표 포트를 Service에 열지 않는다).
+  ServiceMonitor가 아닌 이유는 ServiceMonitor가 붙이는 `service` 레이블(대상 Service 이름)이 Traefik 지표의 `service`와 겹쳐 지표의 것이 `exported_service`로 바뀌기 때문이다.
+  라우터 지표 가운데 요청 수만 남기고 지연 히스토그램·바이트 수·TLS 요청 수는 버린다(같은 요청을 서비스 지표로 본다). 엔트리포인트·서비스 지표는 그대로 수집한다.
+- 리소스는 바꾸지 않았다. 늘어나는 것은 Prometheus의 시계열(라우터·코드·메서드 조합마다 하나, 엔트리포인트·서비스 지표)뿐이다.
+
+**조회.** Prometheus(위 port-forward)의 Query에서:
+
+```
+namespace_job:traefik_router_requests:rate5m                                                         # 환경별 초당 요청 수(기록 규칙, 5분 창)
+namespace_job:traefik_router_requests_errors:rate5m / namespace_job:traefik_router_requests:rate5m    # 환경별 5xx 비율(경보가 보는 값)
+sum by (service, code) (rate(traefik_router_requests_total[5m]))                                     # Traefik의 서비스·응답 코드별 초당 요청 수
+sum by (router) (rate(traefik_router_requests_total{service="shortener-prod-shortener-prod-80@kubernetes"}[5m]))   # prod의 443(websecure-…)·80 라우터 나누기
+sum by (entrypoint, code) (rate(traefik_entrypoint_requests_total[5m]))                              # 엔트리포인트(web=80, websecure=443)별. 호스트가 없다
+```
+
+- `service` 레이블은 `<네임스페이스>-<Service 이름>-<포트>@kubernetes`(Traefik이 Ingress의 백엔드마다 만드는 서비스 이름)다. 경보는 이 레이블로 환경을 고른다.
+  라우터 이름(`router`)은 같은 Ingress라도 443의 것이 `websecure-<이름>`, 80의 것이 `<이름>`이라 쓰지 않는다. cert-manager의 검증용 Ingress는 서비스 이름이 달라 빠진다.
+- 처음 배포한 뒤(그리고 k3s를 올린 뒤) `count by (service) (traefik_router_requests_total)`에 `shortener-dev-shortener-dev-80@kubernetes`·`shortener-prod-shortener-prod-80@kubernetes`가
+  나오는지 본다(요청이 한 번은 와야 계열이 생긴다). 없으면 경보가 아무 경고 없이 울리지 않는다. Status → Target health에서 `podMonitor/kube-system/traefik/0`이 UP인지도 본다.
+- Grafana의 Shortener 대시보드에 "엣지(Traefik)와 앱: 초당 요청·5xx" 패널이 있다(아래 "대시보드").
 
 ### 로그 (Loki, Alloy)
 
@@ -424,8 +486,10 @@ Grafana의 **Shortener** 대시보드(http://localhost:3000/d/shortener)는 `pla
 | 트래픽 | 초당 요청 수(상태 코드 계열별), 5xx 비율(5분·1시간 창), 응답 시간 p50·p95·p99(SLO 기준 0.3초는 점선) |
 | 앱 지표 | 단축 URL 생성·리다이렉트(초당), 캐시 적중률(Redis 오류 비율도 함께) |
 | 로그 | 앱 로그 줄 수(레벨별, Loki), ERROR 로그(Loki) |
+| 쓰기·엣지 | 클릭 수 기록(비동기 쓰기), 엣지(Traefik)와 앱의 초당 요청·5xx(앱은 점선. 앱 파드가 모두 NotReady면 엣지 5xx만 남고 앱의 선이 떨어진다) |
 
 - SLO 패널은 앱 차트의 SLO 기록 규칙(`namespace_job:http_server_requests_errors:ratio_rate<창>`, `namespace_job:http_server_requests_slow:ratio_rate<창>`)을 그대로 읽는다. 경보가 보는 값과 같다.
+  엣지 패널의 엣지 쪽도 엣지 경보가 읽는 기록 규칙(`namespace_job:traefik_router_requests:rate5m`, `…_errors:rate5m`)이고, 앱 쪽은 같은 5분 창으로 원래 지표를 계산한다.
 - 30일 오류 예산의 남은 양은 보여 주지 않는다. Prometheus는 3일만 보존하고 클러스터는 공부할 때만 띄우므로 소진 속도(번 레이트)와 1시간·6시간·1일 가용성으로 본다.
   1일 창은 기록 규칙이 없어서 원래 지표(`http_server_requests_seconds_count`)로 같은 식을 계산한다.
 - 대시보드를 고치려면 Grafana에서 고친 뒤(Git에서 온 대시보드라 저장은 되지 않는다) Export → Export as JSON으로 받아 `platform/dashboards/`의 파일을 바꾸고 PR로 머지한다.
@@ -671,6 +735,7 @@ Grafana·Prometheus·Alertmanager·ArgoCD·Argo Rollouts 대시보드에는 Ingr
 - **Traefik**은 k3s v1.35.8+k3s1이 노드가 뜰 때 설치하는 차트 `traefik-40.1.4+up40.1.0`(Traefik v3.7.8, k3s 저장소의 `manifests/traefik.yaml`)을 그대로 쓴다. 이 저장소가 기대는 그 차트의 기본값은 셋이다:
   websecure(443) entrypoint에 TLS가 켜져 있다(그래서 Ingress의 라우터가 443에서 TLS로 받는다), kubernetesCRD 공급자가 켜져 있고 `crossProviderNamespaces`가 없다(Ingress가 Middleware를 가리킬 수 있다),
   인증서 resolver가 없다(Traefik 자신의 ACME 라우터가 `/.well-known/acme-challenge/`를 가로채지 않는다). k3s를 올릴 때 셋이 그대로인지 본다.
+  엣지 SLI를 위해 바꾼 값(라우터 지표, 빈 서비스 허용)은 `platform/traefik-config`의 HelmChartConfig가 k3s의 값 위에 얹는다(위 "엣지 SLI").
 - ArgoCD 컨트롤러의 메모리에 주는 영향은 작다. 이 차트가 더하는 매니페스트는 객체 47개, JSON으로 약 0.48MiB(그중 CRD 6개가 약 0.45MiB)로 kube-prometheus-stack(약 3.0MiB)의 6분의 1 정도다.
 
 ### 아직 하지 않은 것
@@ -791,6 +856,16 @@ docker run --rm -v "$PWD/tests/certificates:/certificates:ro" --entrypoint /bin/
   test rules /certificates/certificate-alerts.test.yaml
 ```
 
+Traefik 설정(`platform/traefik-config`)은 CI 단계의 스크립트를 그대로 꺼내 돌린다. 그 단계의 env(차트·k3s 매니페스트 주소와 SHA-256)도 함께 읽고,
+GitHub가 넣어 주는 `GITHUB_WORKSPACE`·`RUNNER_TEMP`는 대신 준다(`sha256sum`이 필요하다):
+
+```bash
+export KUBERNETES_VERSION KUBECONFORM_IMAGE K8S_SCHEMA_LOCATION CRD_SCHEMA_LOCATION
+step='.jobs.validate.steps[] | select(.name == "Traefik 설정 검사 (platform/traefik-config)")'
+eval "$(yq "$step | .env | to_entries | .[] | \"export \" + .key + \"=\" + .value" .github/workflows/validate.yml)"
+GITHUB_WORKSPACE=$PWD RUNNER_TEMP=$(mktemp -d) bash -c "$(yq "$step | .run" .github/workflows/validate.yml)"
+```
+
 `helm template`은 ArgoCD가 하는 것과 같이 릴리스 이름(`shortener-dev`)과 네임스페이스를 주고 환경 값 파일을 얹어 렌더링한다. `image.tag`가 커밋 SHA 40자가 아니거나 DB Secret 이름이 없으면
 차트가 안내 메시지와 함께 실패한다. `helm lint`에는 `--api-versions` 옵션이 없어서 ServiceMonitor·PrometheusRule은 lint에서 렌더링되지 않는다(내용은 렌더링·kubeconform·promtool이 검사한다).
 SLO 규칙 테스트의 시나리오와 읽는 법은 `tests/slo/shortener-slo.test.yaml`의 머리말에 있다. 워크플로 파일은 `docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.12`로 검사한다.
@@ -876,7 +951,8 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | Alloy 차트 | `grafana/alloy` 1.13.0 (Alloy v1.20.0, config-reloader v0.94.0) | `argocd/apps/alloy.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
 | Argo Rollouts 차트 | `argo/argo-rollouts` 2.43.2 (Argo Rollouts v1.10.0. 이미지 태그도 이 차트 버전이 정한다) | `argocd/apps/argo-rollouts.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
 | cert-manager 차트 | `jetstack/cert-manager` v1.21.2 (cert-manager v1.21.2. 이미지 태그도 이 차트 버전이 정한다) | `argocd/apps/cert-manager.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
-| Traefik (고정하지 않는다) | k3s v1.35.8+k3s1에 들어 있는 차트 `traefik-40.1.4+up40.1.0`(Traefik v3.7.8). k3s 버전을 따라간다 | k3s의 `manifests/traefik.yaml`. 기대는 기본값은 위 "HTTPS" |
+| Traefik (고정하지 않는다) | k3s v1.35.8+k3s1에 들어 있는 차트 `traefik-40.1.4+up40.1.0`(Traefik v3.7.8). k3s 버전을 따라간다 | k3s의 `manifests/traefik.yaml`. 기대는 기본값은 위 "HTTPS", 바꾼 값은 `platform/traefik-config`(위 "엣지 SLI") |
+| Traefik 설정 검사에 쓰는 차트·k3s 매니페스트 | 위와 같은 차트 파일과 k3s v1.35.8+k3s1의 `manifests/traefik.yaml` (SHA-256으로 확인한다) | `validate.yml` Traefik 단계의 `TRAEFIK_CHART_*`·`K3S_TRAEFIK_MANIFEST_*`. k3s를 올리면 함께 바꾼다 |
 | kustomize (CI) | v5.8.1 (릴리스 파일을 받아 SHA-256으로 확인한다. ArgoCD v3.5.3에 들어 있는 kustomize와 같다) | `validate.yml` 대시보드 단계의 `KUSTOMIZE_VERSION`·`KUSTOMIZE_SHA256` |
 | CustomResourceDefinition 객체의 스키마 | yannh/kubernetes-json-schema 커밋 `8df8a88`의 `-local` 디렉터리 (`-standalone`에는 없다) | `validate.yml` 플랫폼 차트 단계의 `K8S_LOCAL_SCHEMA_LOCATION` |
 
@@ -907,6 +983,8 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 - Alloy 설정(`platform/alloy/values.yaml`의 `alloy.configMap.content`)은 차트가 Helm의 tpl로 한 번 더 렌더링한다. 여는 중괄호 두 개를 연달아 쓰면 Helm 템플릿으로 읽히므로 쓰지 않는다.
   파이프라인을 고친 뒤에는 위 "로컬에서 검증하기"의 `alloy validate`로 확인한다.
 - Loki 레이블은 다섯 개(`namespace`, `pod`, `container`, `app`, `level`)로 둔다. 값이 많은 필드(요청 ID, URL 등)는 레이블로 올리지 않고 쿼리에서 `| json`으로 꺼낸다.
+- k3s의 Traefik은 `platform/traefik-config/helmchartconfig.yaml`로만 바꾼다(k3s의 매니페스트 파일은 k3s가 다시 쓴다). 그 파일을 바꾸면 Traefik 파드가 한 번 바뀌므로 몰아서 바꾸고,
+  `failurePolicy: retry`는 지우지 않는다. 앱 Ingress의 백엔드(Service 이름·포트)를 바꾸면 차트의 `shortener.traefikServiceName`도 바꾼다(validate의 SLO 단계가 어긋남을 잡는다).
 
 ## 막혔을 때
 
@@ -927,6 +1005,8 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | Grafana의 로그 패널이 비어 있거나 Loki 데이터 소스가 오류 | `kubectl -n monitoring get pods`로 `loki-0`이 Ready인지(뜬 뒤 준비까지 1분 안쪽), `alloy-*` 파드가 Running인지 본다. Alloy UI(위 "로그")에서 컴포넌트가 healthy인지와 읽고 있는 대상을, `kubectl -n monitoring logs ds/alloy -c alloy`에서 `loki.write`의 전송 오류를 본다. 단, Alloy 파드가 새로 뜬 직후 나오는 `final error sending batch, no retries left, dropping data` ... `status=400` ... `entry too far behind`는 문제가 아니다: 각 컨테이너의 로그 파일을 처음부터 다시 보내다가 그 스트림의 가장 새 줄보다 1시간 넘게 오래된 줄(이미 저장된 줄)을 Loki가 거절한 것이고, 같은 묶음의 다른 줄은 저장된다(`platform/alloy/values.yaml`의 mounts 주석) |
 | Alloy 로그에 `forbidden` | Alloy의 ClusterRole(`platform/alloy/values.yaml`의 `rbac`)에 그 컴포넌트가 쓰는 권한이 없다. 컴포넌트를 더했다면 필요한 권한도 더한다(차트 values.yaml의 rbac 주석에 컴포넌트별 권한이 있다) |
 | `kubectl get certificate -A`의 READY가 오래 False이다 | `kubectl -n <네임스페이스> describe certificate <이름>`의 Events와 `kubectl get challenge -A`를 본다. challenge가 `pending`이고 Reason이 self-check(`Waiting for HTTP-01 challenge propagation`)면 클러스터 안에서도 검증 주소가 열리지 않는 것이다: DuckDNS가 지금 IP를 가리키는지(`dig +short dev.dev-ops-study.duckdns.org`), 80이 보안 그룹에 열려 있는지, 검증용 Ingress(`cm-acme-http-solver-*`)가 생겼는지 본다. Let's Encrypt가 검증에 실패했으면 Order·Challenge에 그 오류가 남고, 다음 시도는 1시간 뒤부터다(위 "HTTPS"의 발급 한도) |
+| traefik-config 동기화가 `Running`이고 `Retrying attempt #N`, 메시지에 `no matches for kind "PodMonitor"` | 새 클러스터에서 kube-prometheus-stack보다 먼저 동기화됐다. 그 차트가 PodMonitor CRD를 만들면 다시 시도(6번, 약 8분)로 풀린다. 다 쓰고 멈춰 있으면 UI에서 Sync한다 |
+| 엣지 패널이 비어 있거나 `count by (service) (traefik_router_requests_total)`가 비었다 | Prometheus의 Status → Target health에서 `podMonitor/kube-system/traefik/0`이 UP인지 본다(없으면 PodMonitor가 Traefik 파드를 고르지 못한다). UP인데 `traefik_router_` 계열이 없으면 라우터 지표가 꺼져 있다: `kubectl -n kube-system get deploy traefik -o yaml`의 인자에 `--metrics.prometheus.addRoutersLabels=true`가 있는지, Helm 작업(`kubectl -n kube-system logs job/helm-install-traefik`)이 실패하지 않았는지 본다. 요청이 한 번도 오지 않았으면 계열이 아직 없다 |
 | `kubectl get clusterissuer`의 READY가 False이다 | ACME 계정 등록이 실패했다. `kubectl describe clusterissuer <이름>`의 Status 메시지를 본다(서버 주소 오타, Let's Encrypt에 닿지 않음) |
 | cert-issuers 동기화가 `Running`이고 `Retrying attempt #N`, 메시지에 `no matches for kind "ClusterIssuer"`나 `failed calling webhook "webhook.cert-manager.io"` | 새 클러스터에서 cert-manager보다 먼저 동기화됐다. cert-manager의 CRD와 웹훅이 준비되면 다시 시도(6번, 약 8분)로 풀린다. 다시 시도를 모두 쓰고 멈춰 있으면 `kubectl -n cert-manager get pods`로 웹훅이 Ready인지 보고 UI에서 Sync한다 |
 | https 주소가 `TRAEFIK DEFAULT CERT`로 응답한다 | 인증서가 아직 Secret에 없다(첫 발급 중이거나 실패). 위 READY False 행을 본다. Secret이 있는데도 그렇다면 Ingress의 `spec.tls[].hosts`가 접속한 이름과 같은지 본다 |
