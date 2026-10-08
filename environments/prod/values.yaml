@@ -4,7 +4,7 @@
 # 클러스터는 EC2 m7i-flex.large(2 vCPU, 메모리 8GiB) 한 대의 k3s이고(ap-northeast-2), dev·prod 두 환경과 ArgoCD가 이 노드 하나를 나눠 쓴다.
 # 로컬 k3d 클러스터(Docker VM 2.84GiB)는 dev 롤링 업데이트 중에 메모리가 모자라서 프로젝트를 EC2로 옮겼고 멈춰 두었다. 그래서 prod의 HPA를 다시 켜고 앱 메모리를 차트 기본값(요청 384Mi·한도 512Mi)으로 되돌렸다.
 # 로컬 k3d로 다시 띄우려면 baseUrl·ingress.host를 *.localhost 이름으로, HPA와 앱 메모리를 예전 크기로 덮어써야 한다(README의 메모리 메모).
-# dev와 다른 점은 이미지 태그를 올리는 방법(prod는 PR로 승격), 호스트 이름·공개 주소, prod만 HPA가 켜져 있다는 것, 그리고 prod의 PostgreSQL이 더 크다는 것(맨 아래 postgresql)이다. 앞의 셋의 비교는 environments/dev/values.yaml의 머리말에 있다.
+# dev와 다른 점은 이미지 태그를 올리는 방법(prod는 PR로 승격), 호스트 이름·공개 주소, 인증서 발급자, prod만 HPA가 켜져 있다는 것, 그리고 prod의 PostgreSQL이 더 크다는 것(맨 아래 postgresql)이다. 앞의 넷의 비교는 environments/dev/values.yaml의 머리말에 있다.
 #
 # 이 파일에도 dev 파일처럼 빈 줄이 하나도 없다. yq는 값을 고쳐 다시 쓸 때 키 사이의 빈 줄을 지우므로(dev 파일 머리말 참고),
 # 처음부터 그 모양으로 커밋해 두어야 yq로 승격할 때도 바뀌는 줄이 태그 하나뿐이다.
@@ -22,11 +22,19 @@ baseUrl: https://dev-ops-study.duckdns.org
 ingress:
   # DuckDNS에 등록한 이름 그대로다. dev(dev.dev-ops-study.duckdns.org)도 같은 IP로 들어오므로, 이름이 달라야 Traefik이 Host 헤더(HTTPS에서는 SNI도)로 요청을 나눈다.
   host: dev-ops-study.duckdns.org
-  # HTTPS(6단계): 인증서는 Secret shortener-prod-tls에 들어간다. dev처럼 letsencrypt-staging으로 시작하고, 발급을 확인한 뒤 letsencrypt-prod로 바꾸는 PR을 올린다(README의 HTTPS 절).
-  # prod 발급자는 같은 이름으로 7일에 5장까지라서, 인스턴스를 없애고 다시 만들 때마다(Secret이 사라진다) 한 장씩 쓴다.
+  # HTTPS(6단계): 인증서는 Secret shortener-prod-tls에 들어간다. 발급자는 브라우저가 믿는 인증서를 주는 letsencrypt-prod다.
+  # dev처럼 letsencrypt-staging으로 시작해 발급 흐름을 확인한 뒤 이 한 줄을 바꿨다(README의 HTTPS 절). dev는 staging에 남는다(이유는 environments/dev/values.yaml의 ingress 주석).
+  # prod 발급자는 같은 이름 묶음으로 7일에 5장까지라서, 인스턴스를 없애고 다시 만들 때마다(Secret과 ACME 계정 키가 사라진다) 한 장씩 쓴다. 한 주에 다시 만들기를 4번 넘게 하지 않는다.
   tls:
     enabled: true
-    clusterIssuer: letsencrypt-staging
+    clusterIssuer: letsencrypt-prod
+  # HSTS: 브라우저가 이 호스트를 max-age 동안 https로만 열게 하는 응답 헤더(차트 templates/hsts.yaml). 브라우저가 믿는 인증서(letsencrypt-prod)를 쓰는 prod만 켠다.
+  # max-age는 1일(86400)로 시작한다. 인증서를 믿지 못하게 되면(destroy → apply 직후 첫 발급 전, 발급 한도) 헤더를 기억한 브라우저가 그 기간 동안 prod를 열지 못하기 때문이다.
+  # 문제없이 지나면 1주(604800) → 1달(2592000) → 1년(31536000)으로 이 값을 올린다. includeSubDomains는 켜지 않는다: dev 호스트가 이 호스트의 하위 도메인이라 dev(staging 인증서)까지 막힌다.
+  # 발급자를 staging으로 되돌릴 때는 이것을 먼저 끈다(validate가 letsencrypt-prod가 아닌 발급자와 HSTS를 함께 켠 값을 거부한다).
+  hsts:
+    enabled: true
+    maxAgeSeconds: 86400
 # HPA를 켠다(파드 2~3개). autoscaling.enabled가 true이면 차트가 HPA를 만들고 워크로드(Rollout, Argo Rollouts가 없으면 Deployment)에는 replicas를 적지 않으므로 파드 수는 HPA가 정한다.
 # 그래서 replicaCount는 이 파일에 적지 않는다(쓰이지 않는다). 최소 2개는 파드 하나가 죽어도(5단계 장애 훈련) 다른 파드가 요청을 받고,
 # 카나리(setWeight 50)가 파드를 더 띄워 두지 않고도 카나리 1개·stable 1개로 나뉘게 하려는 것이다.

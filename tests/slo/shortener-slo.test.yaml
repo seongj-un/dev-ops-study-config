@@ -22,7 +22,7 @@
 # 버킷도 규칙이 쓰는 le="0.3"만 넣었다(앱은 le="0.1", "0.3", "1.0"과 퍼센타일 히스토그램 버킷을 함께 내보낸다).
 # 값 표기: 'a+bxn'은 a에서 시작해 b씩 n번 늘린 n+1개의 표본, 'axn'은 a를 n+1번 되풀이한 것이다. 표본 간격(interval)과 평가 주기는 1분이다
 # (클러스터는 둘 다 30초다. 1분이면 시각을 분 단위로 읽기 쉽고, 창과 for(2m, 1m)의 의미는 같다).
-# (a)~(g)는 SLO 경보, (h)~(k)는 앱 파드 경보(ShortenerNoAvailablePods)의 테스트다. 앱 파드 경보의 지표는 Argo Rollouts 컨트롤러의 rollout_info_replicas_available이고,
+# (a)~(g)는 SLO 경보, (h)~(k)는 앱 파드 경보(ShortenerNoAvailablePods), (l)~(o)는 쓰기 경로 경보(ShortenerWritePathFailing)의 테스트다. 앱 파드 경보의 지표는 Argo Rollouts 컨트롤러의 rollout_info_replicas_available이고,
 # 계열의 레이블은 클러스터에 저장되는 모양 그대로다: 지표의 namespace는 exported_namespace로 바뀌고 namespace·job·pod는 컨트롤러의 것이다(prometheusrule.yaml의 [앱 파드 경보]).
 # 앱 파드 경보는 노드가 부팅되고 300초가 지나야 울리므로(부팅 가드) node-exporter의 node_boot_time_seconds도 넣는다. promtool의 시각은 유닉스 시각 0에서 시작하므로
 # 부팅 시각 -86400은 "시험 시작 하루 전에 부팅했다", 0은 "시험 시작과 함께 부팅했다"는 뜻이다.
@@ -503,3 +503,187 @@ tests:
                 요청이 앱까지 가지 않아서 앱의 지표로 계산하는 SLO 경보는 이 장애를 보지 못한다.
                 흔한 원인은 모든 파드의 시작 실패와 노드 장애다(DB 장애는 readiness에 들어 있지 않아 파드를 NotReady로 만들지 않는다). kubectl -n shortener-dev get pods로 파드의 상태와 이벤트를 본다.
                 근거 지표는 Argo Rollouts 컨트롤러의 rollout_info_replicas_available(Rollout shortener-dev)이다.
+
+  - name: (l) v5 모양(prod DB 장애, 생성만 모두 5xx, 전체 5xx 약 12%)이면 쓰기 경로 경보가 장애 4분째(장애 중)에 울리고, 가용성·지연 경보는 내내 조용하다
+    interval: 1m
+    input_series:
+      # v5 연습의 비율을 분 단위로 옮겼다(그때 프로브는 초당 약 2.7건, 8건 중 1건이 POST였다). prod: 리다이렉트 GET 분당 140건(302, 캐시로 응답해 빠르다),
+      # 생성 POST 분당 20건. 360분에 DB가 끊겨 361~366분의 6분 동안 POST가 모두 500이고(v5는 약 5분 20초), 367분부터 다시 201이다.
+      # 500 계열은 처음부터 0으로 있다고 두었다. 첫 500 때 계열이 생기는 실제 앱의 모양은 (o)다.
+      # 실패한 POST는 DB 커넥션을 1초 기다리다 실패해서(Hikari) 0.3초를 넘긴다(le="0.3" 버킷이 늘지 않는다).
+      - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
+        values: '0+140x372'
+      - series: 'http_server_requests_seconds_bucket{namespace="shortener-prod", job="shortener-prod", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302", le="0.3"}'
+        values: '0+140x372'
+      - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", method="POST", uri="/api/v1/urls", status="201"}'
+        values: '0+20x360 7200x5 7220+20x5'
+      - series: 'http_server_requests_seconds_bucket{namespace="shortener-prod", job="shortener-prod", method="POST", uri="/api/v1/urls", status="201", le="0.3"}'
+        values: '0+20x360 7200x5 7220+20x5'
+      - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", method="POST", uri="/api/v1/urls", status="500"}'
+        values: '0x360 20+20x5 120x5'
+      - series: 'http_server_requests_seconds_bucket{namespace="shortener-prod", job="shortener-prod", method="POST", uri="/api/v1/urls", status="500", le="0.3"}'
+        values: '0x372'
+      # dev: 내내 정상
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", method="POST", uri="/api/v1/urls", status="201"}'
+        values: '0+20x372'
+      - series: 'http_server_requests_seconds_bucket{namespace="shortener-dev", job="shortener-dev", method="POST", uri="/api/v1/urls", status="201", le="0.3"}'
+        values: '0+20x372'
+    promql_expr_test:
+      # 366분: 전체 요청의 5xx 비율은 5분 창에서 12.5%(분당 160건 중 20건)로 7.2%를 넘지만, 1시간 창은 1.25%로 7.2%에 못 미친다.
+      # 느린 요청 비율도 5분 창은 12.5%지만 1시간 창은 14.4%에 한참 못 미친다.
+      - expr: round(namespace_job:http_server_requests_errors:ratio_rate5m{namespace="shortener-prod"}, 0.0001)
+        eval_time: 366m
+        exp_samples:
+          - labels: '{namespace="shortener-prod", job="shortener-prod"}'
+            value: 0.125
+      - expr: round(namespace_job:http_server_requests_errors:ratio_rate1h{namespace="shortener-prod"}, 0.0001)
+        eval_time: 366m
+        exp_samples:
+          - labels: '{namespace="shortener-prod", job="shortener-prod"}'
+            value: 0.0125
+      # 장애가 끝난 367분에 30분 창이 가장 높다: 2.5%(6분 × 분당 20건 ÷ 30분 × 분당 160건)로 3%에 못 미친다. v5에서는 2.89%였다.
+      - expr: round(namespace_job:http_server_requests_errors:ratio_rate30m{namespace="shortener-prod"}, 0.0001)
+        eval_time: 367m
+        exp_samples:
+          - labels: '{namespace="shortener-prod", job="shortener-prod"}'
+            value: 0.025
+      # 쓰기 경로 경보는 361분에 pending이 되었다(5분 창에서 생성의 5xx 비율이 처음으로 20%를 넘었다).
+      - expr: ALERTS{alertname="ShortenerWritePathFailing"}
+        eval_time: 361m
+        exp_samples:
+          - labels: 'ALERTS{alertname="ShortenerWritePathFailing", alertstate="pending", namespace="shortener-prod", job="shortener-prod", severity="warning", service="shortener"}'
+            value: 1
+      # 372분까지 가용성·지연 경보는 한 번도 pending조차 되지 않았다. 생성이 6분 동안 하나도 되지 않았는데 예산 경보로는 보이지 않는다.
+      - expr: count_over_time(ALERTS{alertname=~"ShortenerAvailabilityBudgetBurn|ShortenerLatencyBudgetBurn"}[372m])
+        eval_time: 372m
+        exp_samples: []
+    alert_rule_test:
+      - eval_time: 363m
+        alertname: ShortenerWritePathFailing
+        exp_alerts: []
+      # 364분(장애 4분째, 아직 장애 중): 361분부터 3분 동안 계속 기준 위라 울린다. 5분 창의 POST가 모두 500이라 값은 100%다. prod 하나뿐이다.
+      - eval_time: 364m
+        alertname: ShortenerWritePathFailing
+        exp_alerts:
+          - exp_labels:
+              namespace: shortener-prod
+              job: shortener-prod
+              severity: warning
+              service: shortener
+            exp_annotations:
+              summary: 'shortener-prod: 단축 URL 생성(POST /api/v1/urls)의 5xx 비율이 3분 넘게 20%를 넘고 있다'
+              description: >-
+                최근 5분 동안 POST /api/v1/urls 요청의 100%가 5xx다(기준은 5분 창에서 20%, 그 요청이 5분에 15건보다 많을 때).
+                예산 경보가 아니라 증상 경보다. 리다이렉트(GET)가 캐시로 계속 응답하면 전체 5xx 비율이 묽어져 가용성 SLO 경보는 울리지 않을 수 있다.
+                흔한 원인은 PostgreSQL 장애다(생성은 DB에 바로 쓴다). Grafana의 Shortener 대시보드와 Loki의 앱 ERROR 로그로 원인을 본다.
+      # 장애가 끝나도 5분 창 안의 실패가 20% 아래로 빠질 때까지는 울린다. 370분에는 창에 실패가 없어 풀린다(Alertmanager가 RESOLVED를 보낸다).
+      - eval_time: 369m
+        alertname: ShortenerWritePathFailing
+        exp_alerts:
+          - exp_labels:
+              namespace: shortener-prod
+              job: shortener-prod
+              severity: warning
+              service: shortener
+            exp_annotations:
+              summary: 'shortener-prod: 단축 URL 생성(POST /api/v1/urls)의 5xx 비율이 3분 넘게 20%를 넘고 있다'
+              description: >-
+                최근 5분 동안 POST /api/v1/urls 요청의 25%가 5xx다(기준은 5분 창에서 20%, 그 요청이 5분에 15건보다 많을 때).
+                예산 경보가 아니라 증상 경보다. 리다이렉트(GET)가 캐시로 계속 응답하면 전체 5xx 비율이 묽어져 가용성 SLO 경보는 울리지 않을 수 있다.
+                흔한 원인은 PostgreSQL 장애다(생성은 DB에 바로 쓴다). Grafana의 Shortener 대시보드와 Loki의 앱 ERROR 로그로 원인을 본다.
+      - eval_time: 370m
+        alertname: ShortenerWritePathFailing
+        exp_alerts: []
+
+  - name: (m) 생성의 5xx가 10%면 울리지 않는다. 리다이렉트만 모두 실패해도 쓰기 경로 경보는 조용하다(그 장애는 가용성 경보가 맡는다)
+    interval: 1m
+    input_series:
+      # dev: 360분부터 생성 분당 20건 중 2건(10%)이 500이다.
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", method="POST", uri="/api/v1/urls", status="201"}'
+        values: '0+20x360 7218+18x29'
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", method="POST", uri="/api/v1/urls", status="500"}'
+        values: '0x360 2+2x29'
+      # prod: 360분부터 리다이렉트 GET 분당 140건이 모두 500이고, 생성 POST 분당 20건은 정상이다.
+      - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
+        values: '0+140x360 50400x29'
+      - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="500"}'
+        values: '0x360 140+140x29'
+      - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", method="POST", uri="/api/v1/urls", status="201"}'
+        values: '0+20x390'
+    promql_expr_test:
+      # 390분까지 쓰기 경로 경보는 두 환경 모두 한 번도 pending조차 되지 않았다.
+      - expr: count_over_time(ALERTS{alertname="ShortenerWritePathFailing"}[390m])
+        eval_time: 390m
+        exp_samples: []
+      # prod의 리다이렉트 장애는 가용성 경보가 울린다(1시간 비율 약 44%).
+      - expr: ALERTS{alertname="ShortenerAvailabilityBudgetBurn", alertstate="firing"}
+        eval_time: 390m
+        exp_samples:
+          - labels: 'ALERTS{alertname="ShortenerAvailabilityBudgetBurn", alertstate="firing", namespace="shortener-prod", job="shortener-prod", severity="critical", service="shortener", slo="availability"}'
+            value: 1
+
+  - name: (n) 생성이 드물면(5분에 15건 이하) 모두 실패해도 울리지 않는다. 실패 1건으로도 울리지 않는다
+    interval: 1m
+    input_series:
+      # dev: 360분부터 생성이 분당 2건(5분에 10건)뿐이고 모두 500이다. 비율은 100%지만 최소 요청 수(초당 0.05건)에 못 미친다. 최소 요청 수의 대가다.
+      - series: 'http_server_requests_seconds_count{namespace="shortener-dev", job="shortener-dev", method="POST", uri="/api/v1/urls", status="500"}'
+        values: '0x360 2+2x29'
+      # prod: 다른 요청 없이 생성 1건이 10분에 실패한다(5xx 계열은 그 전부터 0으로 있었다고 둔다).
+      - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", method="POST", uri="/api/v1/urls", status="500"}'
+        values: '0x9 1x380'
+    promql_expr_test:
+      # 390분: dev의 생성 5xx 비율은 100%다(식의 왼쪽은 참이다).
+      - expr: sum by (namespace, job) (rate(http_server_requests_seconds_count{namespace="shortener-dev", method="POST", uri="/api/v1/urls", status=~"5.."}[5m])) / sum by (namespace, job) (rate(http_server_requests_seconds_count{namespace="shortener-dev", method="POST", uri="/api/v1/urls"}[5m]))
+        eval_time: 390m
+        exp_samples:
+          - labels: '{namespace="shortener-dev", job="shortener-dev"}'
+            value: 1
+      - expr: count_over_time(ALERTS{alertname="ShortenerWritePathFailing"}[390m])
+        eval_time: 390m
+        exp_samples: []
+
+  - name: (o) (l)과 같은 장애에서 500 계열이 첫 실패 때 생기면(실제 앱) 한 번 늦게 기준을 넘어 장애 5분째(장애 중)에 울린다
+    interval: 1m
+    input_series:
+      # (l)의 prod와 같다. 다만 앱(Micrometer)은 status="500" 계열을 첫 500 응답 때 만들므로 그 전에는 표본이 없다('_x361'은 표본이 없는 시각 361개, 0~360분).
+      # 다른 모양이 같아도 1시간 안에 500이 한 번도 없었던 서비스에서는 이렇게 된다.
+      - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
+        values: '0+140x372'
+      - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", method="POST", uri="/api/v1/urls", status="201"}'
+        values: '0+20x360 7200x5 7220+20x5'
+      - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", method="POST", uri="/api/v1/urls", status="500"}'
+        values: '_x361 20+20x5 120x5'
+    promql_expr_test:
+      # 361분: 500 계열의 표본이 하나뿐이라 rate가 값을 내지 못해 분자가 비고, 경보는 pending도 아니다.
+      - expr: ALERTS{alertname="ShortenerWritePathFailing"}
+        eval_time: 361m
+        exp_samples: []
+      # 362분: 표본이 둘이 되어 5분 창의 생성 5xx 비율이 20%를 넘었다(pending).
+      - expr: ALERTS{alertname="ShortenerWritePathFailing"}
+        eval_time: 362m
+        exp_samples:
+          - labels: 'ALERTS{alertname="ShortenerWritePathFailing", alertstate="pending", namespace="shortener-prod", job="shortener-prod", severity="warning", service="shortener"}'
+            value: 1
+    alert_rule_test:
+      - eval_time: 364m
+        alertname: ShortenerWritePathFailing
+        exp_alerts: []
+      # 365분(장애 5분째, 아직 장애 중): 362분부터 3분 동안 계속 기준 위라 울린다.
+      - eval_time: 365m
+        alertname: ShortenerWritePathFailing
+        exp_alerts:
+          - exp_labels:
+              namespace: shortener-prod
+              job: shortener-prod
+              severity: warning
+              service: shortener
+            exp_annotations:
+              summary: 'shortener-prod: 단축 URL 생성(POST /api/v1/urls)의 5xx 비율이 3분 넘게 20%를 넘고 있다'
+              description: >-
+                최근 5분 동안 POST /api/v1/urls 요청의 100%가 5xx다(기준은 5분 창에서 20%, 그 요청이 5분에 15건보다 많을 때).
+                예산 경보가 아니라 증상 경보다. 리다이렉트(GET)가 캐시로 계속 응답하면 전체 5xx 비율이 묽어져 가용성 SLO 경보는 울리지 않을 수 있다.
+                흔한 원인은 PostgreSQL 장애다(생성은 DB에 바로 쓴다). Grafana의 Shortener 대시보드와 Loki의 앱 ERROR 로그로 원인을 본다.
+      # (l)과 같이 370분에 풀린다.
+      - eval_time: 370m
+        alertname: ShortenerWritePathFailing
+        exp_alerts: []

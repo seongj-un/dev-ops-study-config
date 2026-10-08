@@ -1,0 +1,39 @@
+{{- /*
+HSTS(HTTP Strict Transport Security) 헤더를 붙이는 Traefik의 Middleware(traefik.io/v1alpha1, headers). Ingress(ingress.yaml)가 어노테이션 router.middlewares로
+리다이렉트 미들웨어(https-redirect.yaml)와 함께 이것을 가리킨다. 값은 values.yaml의 ingress.hsts다.
+
+[하는 일] 응답에 Strict-Transport-Security: max-age=<ingress.hsts.maxAgeSeconds> 헤더를 붙인다. 이 헤더를 받은 브라우저는 max-age 동안 이 호스트를 https로만 연다:
+  http:// 주소를 치거나 http 링크를 눌러도 요청을 보내기 전에 https로 바꾼다. 리다이렉트만 있으면 첫 요청은 평문으로 한 번 나가고 그 사이를 가로챈 쪽이 https로 가는 길을
+  막을 수 있는데, HSTS는 헤더를 한 번 받은 뒤부터 그 평문 요청을 없앤다. 그리고 인증서 오류가 나면 경고를 넘어가는 길(계속 진행)을 주지 않는다(RFC 6797 12.1).
+  그래서 브라우저가 믿는 인증서를 쓰는 동안에만 켠다.
+[HTTPS로만 통한다] 브라우저는 평문 HTTP 응답에 든 이 헤더를 무시한다(RFC 6797 8.1. 평문 응답은 가로챈 쪽이 헤더를 넣거나 지울 수 있다).
+  Traefik도 TLS로 받은 요청의 응답에만 붙인다(forceSTSHeader를 켜지 않았을 때. Traefik v3.7.8이 쓰는 unrolled/secure v1.0.9의 secure.go).
+  80(web)의 라우터에서는 리다이렉트 미들웨어가 먼저 301·308로 돌려보내므로 이 헤더는 443(websecure)의 응답에만 붙는다.
+[prod만, 1일부터] dev는 staging 인증서라서 켜면 브라우저가 경고를 넘어가지 못해 dev를 열 수 없다. 그래서 prod만 켠다(environments/prod/values.yaml).
+  max-age는 브라우저가 마지막으로 받은 헤더의 값을 기억하는 기간이다. prod의 인증서를 브라우저가 믿지 못하게 되면(destroy → apply 직후 첫 발급 전의 Traefik 기본 인증서,
+  발급 한도에 걸려 인증서가 없을 때, 발급자를 staging으로 되돌렸을 때) 헤더를 기억한 브라우저는 그 기간 동안 prod를 열지 못한다. 그래서 1일(86400)로 시작한다.
+  문제없이 지나면 1주(604800), 1달(2592000), 1년(31536000)으로 올린다. 새 값은 브라우저가 다음에 방문해 헤더를 받을 때부터 쓰이므로, 내리거나 끌(max-age=0) 때도
+  그 헤더를 https로 다시 받기 전까지는 예전 값이 남는다.
+[includeSubDomains를 켜지 않는다] dev의 호스트(dev.dev-ops-study.duckdns.org)는 prod 호스트(dev-ops-study.duckdns.org)의 하위 도메인이다. 켜면 prod를 연 브라우저가
+  dev에도 HSTS를 걸어서, staging 인증서인 dev에서 경고를 넘어가지 못한다.
+[preload를 켜지 않는다] preload는 브라우저에 미리 넣어 두는 HSTS 목록(hstspreload.org)에 올려 달라는 표시다. 목록에 오르려면 includeSubDomains와 max-age 1년 이상이
+  필요하고(위처럼 dev를 막는다), 한 번 오른 이름은 목록에서 빼도 사용자의 브라우저에서 빠지기까지 몇 달이 걸린다.
+[조건부 생성, sync-wave -1] 리다이렉트 Middleware(https-redirect.yaml 머리말)와 같다. _helpers.tpl의 shortener.hstsEnabled(리다이렉트의 조건 + ingress.hsts.enabled)일 때만
+  만들고, 없는 미들웨어를 가리키는 Ingress는 Traefik이 라우터를 버려 그 호스트가 404가 되므로 Ingress보다 한 웨이브 먼저 만든다.
+*/ -}}
+{{- if include "shortener.hstsEnabled" . }}
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ include "shortener.hstsName" . }}
+  labels:
+    {{- include "shortener.labels" (dict "ctx" . "component" "app") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  headers:
+    stsSeconds: {{ include "shortener.hstsMaxAgeSeconds" . }}
+    {{- /* 기본값도 false지만 적어 둔다: 위 머리말의 이유로 일부러 끈 것이고, 켜는 변경이 diff에 드러난다. */}}
+    stsIncludeSubdomains: false
+    stsPreload: false
+{{- end }}

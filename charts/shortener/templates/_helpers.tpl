@@ -185,6 +185,35 @@ true
 {{- end }}
 
 {{- /*
+HSTS 헤더 Middleware를 만들지. 참이면 "true", 아니면 빈 문자열을 돌려준다(shortener.httpsRedirectEnabled와 같은 방식).
+리다이렉트의 조건(Ingress와 TLS가 켜져 있고 클러스터가 Traefik의 Middleware kind를 안다)에 ingress.hsts.enabled를 더한 것이다. TLS가 꺼져 있으면 켜 두어도 만들지 않는다.
+hsts.yaml(Middleware)과 ingress.yaml(그것을 가리키는 어노테이션)이 이 한 곳을 함께 써서 둘이 함께 나오거나 함께 빠진다(어노테이션만 남으면 리다이렉트와 같은 404다).
+*/}}
+{{- define "shortener.hstsEnabled" -}}
+{{- if and (include "shortener.httpsRedirectEnabled" .) .Values.ingress.hsts.enabled -}}
+true
+{{- end -}}
+{{- end }}
+
+{{- /* HSTS Middleware의 이름. 41자로 자른 접두사에 5자를 붙인다. */}}
+{{- define "shortener.hstsName" -}}
+{{- printf "%s-hsts" (include "shortener.fullname" .) -}}
+{{- end }}
+
+{{- /*
+HSTS의 max-age(ingress.hsts.maxAgeSeconds)를 정수로 돌려준다. 1보다 작으면(0, 음수, 숫자가 아닌 글자) 여기서 템플릿이 실패한다.
+int64로 바꾸는 이유: Helm은 값 파일의 숫자를 실수로 읽어서, 그대로 출력하면 큰 수가 지수 표기(31536000 → 3.1536e+07)가 되어 Middleware의 stsSeconds(정수)에 맞지 않는다.
+0을 받지 않는 이유: Traefik은 stsSeconds가 0이면 헤더를 내지 않아서, 켰는데 아무 일도 하지 않는 설정이 된다. HSTS를 끄려면 enabled를 false로 둔다.
+*/}}
+{{- define "shortener.hstsMaxAgeSeconds" -}}
+{{- $age := int64 (required "ingress.hsts.enabled가 true이면 max-age(ingress.hsts.maxAgeSeconds, 초)를 넣어야 한다" .Values.ingress.hsts.maxAgeSeconds) -}}
+{{- if lt $age 1 -}}
+{{- fail (printf "ingress.hsts.maxAgeSeconds는 1 이상의 정수(초)여야 한다. 받은 값: %v. HSTS를 끄려면 ingress.hsts.enabled를 false로 둔다" .Values.ingress.hsts.maxAgeSeconds) -}}
+{{- end -}}
+{{- $age -}}
+{{- end }}
+
+{{- /*
 장애 주입 비율(fault.errorRate)을 환경 변수 값으로 돌려준다. 0 이상 1 이하의 소수(예: "0", "0.05", "1")만 받고, 비어 있거나 그 밖의 값이면 여기서 템플릿이 실패한다.
 앱은 빈 값이나 범위 밖의 값을 받으면 시작할 때 설정 검증에서 실패해서, 그 값으로 배포하면 파드가 재시작을 되풀이한다(50%를 뜻하고 50을 적는 실수 같은 것).
 그 전에 렌더링(validate, ArgoCD)에서 걸리게 하려는 것이다. toString은 따옴표 없이 적은 숫자(0.5)도 받으려는 것이다.

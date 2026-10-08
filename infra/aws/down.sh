@@ -82,5 +82,5 @@ fi
 print_timing
 say ""
 say "남아 있는 것(의도한 것): 상태 버킷, 예산 알림, GitHub OIDC 역할(infra/bootstrap), SSM 파라미터(DuckDNS 토큰, Discord 웹훅 URL), DuckDNS 서브도메인."
-say "Let's Encrypt 주의: 같은 이름 조합의 인증서는 주당 5번까지만 중복 발급된다. 지우고 다시 만들기를 반복하면 한도에 걸릴 수 있다."
-say "  연습 중에는 staging 발급자를 쓰고, 운영 발급자 인증서는 꼭 필요할 때만 새로 받는다."
+say "Let's Encrypt 주의: prod는 letsencrypt-prod라 다시 만들 때마다 같은 이름의 인증서 7일 5장 중 1장을 쓴다. 한 주에 다시 만들기는 4번까지만 한다."
+say "  더 자주 연습하려면 prod의 HSTS(ingress.hsts.enabled)를 먼저 끈 뒤 발급자를 letsencrypt-staging으로 바꾼다(infra/aws/README.md)."

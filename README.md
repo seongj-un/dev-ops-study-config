@@ -50,7 +50,8 @@ argocd/apps/cert-issuers.yaml       인증서 발급자 Application (이 저장�
 platform/cert-issuers/              Let's Encrypt ClusterIssuer 두 개(letsencrypt-staging, letsencrypt-prod)
 tests/slo/                       앱 SLO 규칙(차트의 PrometheusRule)의 promtool 단위 테스트. validate가 차트를 렌더링해 꺼낸 규칙으로 돌린다
 tests/canary/                    카나리 분석 쿼리(차트의 AnalysisTemplate)의 promtool 단위 테스트. validate가 렌더링 결과에서 쿼리를 꺼내 돌린다
-.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링(Rollout·Deployment 두 갈래), 스키마 검사, Ingress HTTPS 확인, SLO 규칙·카나리 분석 쿼리 검사, 플랫폼 차트 렌더링, 인증서 발급자·대시보드 검사)
+tests/certificates/              인증서 경보(kube-prometheus-stack 값 파일의 additionalPrometheusRulesMap)의 promtool 단위 테스트
+.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링(Rollout·Deployment 두 갈래), 스키마 검사, Ingress HTTPS 확인, SLO 규칙·카나리 분석 쿼리 검사, 플랫폼 차트 렌더링, 인증서 발급자·경보·대시보드 검사)
 infra/aws/up.sh, down.sh           명령 한 번으로 EC2/k3s 환경을 만들고(up.sh) 지운다(down.sh). 사용법은 infra/aws/README.md
 .github/workflows/terraform-plan.yml  infra/aws를 바꾸는 PR의 terraform plan 요약 (GitHub OIDC로 읽기 전용 역할을 맡는다. 필수 검사 아님. infra/aws/README.md)
 .github/dependabot.yml           GitHub Actions 주간 갱신
@@ -60,7 +61,7 @@ infra/aws/up.sh, down.sh           명령 한 번으로 EC2/k3s 환경을 만들
 |---|---|---|
 | 네임스페이스 | `shortener-dev` | `shortener-prod` |
 | 주소 | https://dev.dev-ops-study.duckdns.org | https://dev-ops-study.duckdns.org |
-| 인증서 발급자 (`ingress.tls.clusterIssuer`) | `letsencrypt-staging` | `letsencrypt-staging` (확인한 뒤 둘 다 `letsencrypt-prod`로. 아래 "HTTPS") |
+| 인증서 발급자 (`ingress.tls.clusterIssuer`) | `letsencrypt-staging` (연습 환경이라 그대로 둔다. 아래 "HTTPS") | `letsencrypt-prod` |
 | 이미지 태그를 바꾸는 방법 | 앱 저장소 CI가 자동으로 커밋 | 사람이 PR로 승격 |
 | 파드 | 2개 고정 | HPA가 2~3개로 조절 (아래 메모리 메모) |
 | 앱 메모리 요청 / 한도 | 384Mi / 512Mi | 384Mi / 512Mi |
@@ -186,9 +187,9 @@ kubectl -n argo-rollouts get pods           # 아래 "Argo Rollouts"의 파드 2
 kubectl -n cert-manager get pods            # 아래 "HTTPS"의 파드 3개
 kubectl get clusterissuer                   # letsencrypt-staging·prod의 READY가 True(ACME 계정 등록)
 kubectl get certificate -A                  # shortener-dev-tls·shortener-prod-tls의 READY가 True(인증서 발급. 몇 분 걸린다)
-# -k: 발급자가 letsencrypt-staging인 동안은 인증서를 믿을 수 없어 검사를 건너뛴다. prod 발급자로 바꾼 뒤에는 뺀다
+# -k: dev는 발급자가 letsencrypt-staging이라 인증서를 믿을 수 없어 검사를 건너뛴다. prod는 letsencrypt-prod라 -k 없이 검사한다(인증서가 나오기 전에는 실패한다)
 curl -ik -X POST https://dev.dev-ops-study.duckdns.org/api/v1/urls -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
-curl -ik -X POST https://dev-ops-study.duckdns.org/api/v1/urls     -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
+curl -i  -X POST https://dev-ops-study.duckdns.org/api/v1/urls     -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
 ```
 
 첫 배포에서 앱이 DB보다 먼저 뜨면 몇 번 재시작한 뒤 자리를 잡는다(정상).
@@ -297,6 +298,11 @@ kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:909
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-alertmanager 9093:9093   # http://localhost:9093
 ```
 
+Discord 메시지에서 경보마다 끝에 붙는 `Source:` 링크(Prometheus가 경보에 붙이는 generatorURL)는 `http://localhost:9090/graph?...`로 시작한다. Prometheus의 `externalUrl`을
+위 port-forward 주소로 두었기 때문이다(`platform/kube-prometheus-stack/values.yaml`. 차트 기본값은 클러스터 안의 Service 주소라 맥에서 열리지 않는다).
+Prometheus의 port-forward를 켜 둔 동안에는 링크를 누르면 그 경보의 식이 열리고, 켜지 않았으면 열리지 않는다. Alertmanager의 `externalUrl`도 같은 이유로 http://localhost:9093 이다
+(지금의 Discord 메시지는 이 값을 쓰지 않는다. 알림 템플릿의 `.ExternalURL`과 Alertmanager UI의 링크가 쓴다).
+
 Grafana 관리자 비밀번호는 부트스트랩이 무작위로 만들어 Secret `grafana-admin`에 넣어 둔다. 이렇게 읽는다(화면에 찍히므로 화면 공유·녹화 중에는 쓰지 않는다):
 
 ```bash
@@ -313,8 +319,8 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 | 경보 | 가는 곳 |
 |---|---|
 | `Watchdog`(경보 파이프라인이 살아 있음을 보이려고 늘 울리는 경보), `InfoInhibitor`(info 경보를 누르는 데만 쓰는 경보. 같은 네임스페이스에 info 경보가 있고 warning·critical 경보는 울리지 않을 때만 울린다) | 보내지 않는다(`null`) |
-| `service="shortener"` (앱의 SLO 경보와 앱 파드 경보) | Discord |
-| `severity="critical"` (그 밖의 critical 경보) | Discord |
+| `service="shortener"` (앱의 SLO 경보, 앱 파드 경보, 쓰기 경로 경보. 쓰기 경로 경보는 warning이지만 이 경로라 간다) | Discord |
+| `severity="critical"` (그 밖의 critical 경보. 인증서 경보 `CertificateExpiringSoon`·`CertificateNotReady`도 여기로 간다. 아래 "HTTPS"의 인증서 경보) | Discord |
 | 나머지(warning·info) | 보내지 않는다. Alertmanager UI에서 본다 |
 
 - 같은 `alertname`·`namespace`의 경보를 한 알림으로 묶는다. 첫 알림은 30초 모았다 보내고, 묶음이 바뀌면 5분 간격으로, 그대로 울리면 4시간마다 다시 보낸다. 풀리면(RESOLVED)도 알린다.
@@ -325,7 +331,7 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 ### SLO 경보가 울리지 않는 장애
 
 앱의 SLO 경보(가용성·지연 번 레이트, `charts/shortener/templates/prometheusrule.yaml`)는 짧거나 일부만 실패하는 장애에는 일부러 울리지 않는다.
-그리고 요청이 앱까지 오지 않는 장애는 길어도 보지 못한다. 두 번째 빈자리는 앱 파드 경보가 맡는다.
+그리고 요청이 앱까지 오지 않는 장애는 길어도 보지 못한다. 두 번째 빈자리는 앱 파드 경보가, 첫 번째 가운데 생성(쓰기)만 망가진 장애는 쓰기 경로 경보가 맡는다.
 
 **짧은 장애·부분 장애는 페이지하지 않는다(예산 계산).** 가용성의 30일 오류 예산은 요청의 0.5%다. 요청이 고르게 온다면 "모든 요청이 실패하는 시간"으로
 30일 × 24시간 × 60분 × 0.5% = 216분이다. 빠른 소진 경보는 1시간 비율과 5분 비율이 모두 7.2%(예산의 14.4배)를 넘고 그것이 2분 이어져야 울린다.
@@ -356,12 +362,22 @@ available 0이 1분을 넘기 쉬운데, 그때마다 critical이 Discord로 가
 처음 배포한 뒤 Prometheus에서 `count by (exported_namespace, name) (rollout_info_replicas_available)`가 `shortener-dev`·`shortener-prod`를 하나씩 내는지 본다.
 경보는 이 레이블 이름(`exported_namespace`, `name`)으로 Rollout을 고르므로, 이름이 다르면 아무 경고 없이 영영 울리지 않는다.
 
+**생성만 실패하는 장애는 쓰기 경로 경보가 맡는다.** v5 연습(prod, DB 차단 약 5분 20초)에서 리다이렉트(GET)는 Redis 캐시로 계속 302를 돌려주고 생성(POST)만 모두 500이었다.
+전체 요청의 5xx는 약 12%라 5분 비율(최고 11.8%)은 7.2%를 넘었지만, 1시간 비율(2.9%)이 7.2%에, 30분 비율(최고 2.89%)이 3%에 못 미쳐 가용성 경보는 pending조차 되지 않았다.
+장애가 짧고 실패하지 않은 GET이 비율을 묽혀서 예산으로는 "아직 괜찮다"였지만, 그동안 단축 URL은 하나도 만들어지지 않았다.
+`ShortenerWritePathFailing`(같은 PrometheusRule의 `<릴리스>-write-path` 그룹)은 예산이 아니라 증상을 본다: `POST /api/v1/urls`의 5분 5xx 비율이 20%를 넘고
+그 요청이 초당 0.05건(5분에 15건)보다 많은 상태가 3분 이어지면 울린다. `severity="warning"`이지만 `service="shortener"`라 Discord로 간다.
+v5 모양이면 장애 4~5분째, 곧 v5 길이(약 5분 20초)의 장애가 끝나기 전에 울린다(`tests/slo`의 (l), 500 계열이 첫 실패 때 생기는 경우는 (o)).
+최소 요청 수는 실패 한두 건으로 비율이 100%가 되는 것을 막는 대신, 그보다 드물게 오는 생성은 모두 실패해도 이 경보가 보지 못한다(`tests/slo`의 (n)).
+앱의 장애 주입(`fault.errorRate`)이 만든 500은 이 경보가 일부러 보지 않는다. 장애 주입은 요청을 컨트롤러에 닿기 전에 필터에서 끊어서 그 요청의 `uri`가 `UNKNOWN`이다
+(`/actuator`만 거르는 카나리 분석과 SLO 경보는 그대로 센다). 이 경보를 연습하려면 v5처럼 DB를 끊는다.
+
 **아직 덮지 못하는 것.**
 - 앱 파드는 Ready인데 그 앞(Traefik, Ingress 설정, 노드의 네트워크)에서 실패하는 요청: 앱 지표에도 파드 수에도 보이지 않는다. 클러스터 밖에서 요청을 보내 보는 검사나
   Traefik의 지표로 재는 SLI가 있어야 잡힌다.
 - 노드가 통째로 멈추는 장애: Prometheus와 Alertmanager도 그 노드에 있어서 아무 경보도 나가지 않는다. Watchdog을 보내지 않으므로(위 표) "경보가 끊겼다"를 알려 줄 쪽도 없다.
 - 앱 파드 경보는 지표가 없으면 울리지 않는다. Argo Rollouts 컨트롤러가 내려가 있는 동안 앱도 내려가면 조용하다(수집 대상이 내려간 것은 기본 규칙 `TargetDown`이 알리지만 warning이다).
-- 위 표의 기준 아래인 부분 장애: 일부러 페이지하지 않는다.
+- 위 표의 기준 아래인 부분 장애: 일부러 페이지하지 않는다. 쓰기 경로 경보가 보는 것은 생성(`POST /api/v1/urls`) 하나뿐이다(일부 코드의 리다이렉트만 실패하는 것 등은 보지 않는다).
 - 노드가 부팅되고 5분 안의 전체 장애: 앱 파드 경보의 부팅 가드가 누른다. 5분이 지나도 앱 파드가 0개면 그때부터 1분 뒤에 울린다.
 
 ### 로그 (Loki, Alloy)
@@ -530,15 +546,23 @@ environments/<환경>/values.yaml의 ingress.tls(enabled, clusterIssuer)
 | 인증서 | 브라우저가 믿지 않는 시험용 CA(이름이 `(STAGING)`으로 시작한다). 브라우저는 경고를 내고 curl에는 `-k`가 필요하다 | 브라우저가 믿는다 |
 | 발급 한도 | 훨씬 크다(같은 이름 묶음으로 주당 30000장, 검증 실패는 시간당 200번) | 아래 "발급 한도" |
 
-두 환경 모두 staging으로 시작한다. 발급 흐름(검증, Secret, Traefik의 인증서 선택, 리다이렉트)을 한도 걱정 없이 먼저 확인하려는 것이다.
-staging에서 `kubectl get certificate -A`의 READY가 True이고 아래 `curl -vk`의 issuer에 `(STAGING)`이 보이면 prod로 바꾼다. 바꾸는 것은 환경마다 한 줄짜리 PR이다(dev를 먼저 바꿔 확인한 뒤 prod):
+prod는 `letsencrypt-prod`, dev는 `letsencrypt-staging`이다. 두 환경 모두 staging으로 시작해 발급 흐름(검증, Secret, Traefik의 인증서 선택, 리다이렉트)을 한도 걱정 없이 먼저 확인했고
+(`kubectl get certificate -A`의 READY가 True, 아래 `curl -vk`의 issuer에 `(STAGING)`), 그 뒤 prod만 한 줄짜리 PR로 바꿨다. dev는 staging에 남긴다:
+
+- 연습 환경이다. 브라우저가 믿을 필요가 없고, curl에는 `-k`를 붙인다.
+- destroy → apply로 클러스터를 새로 만들 때마다 인증서를 다시 받는다(Secret과 ACME 계정 키가 함께 사라진다).
+- production의 "같은 이름 묶음 7일 5장"은 이름 묶음마다 따로 센다(아래 발급 한도). dev가 production을 쓰면 dev 이름도 제 몫 5장에 묶여, 다시 만들기를 자주 하는 주에는 dev 발급이 막힌다.
+  staging은 같은 한도가 7일 3만 장이라 막히지 않는다.
+
+발급자를 바꾸는 것은 환경마다 한 줄짜리 PR이다. prod를 staging으로 되돌릴 때(발급 흐름을 바꾸는 시험 등)도 같은 한 줄이지만, 그 전에 prod의 HSTS를 끈다(아래 "HSTS").
+`validate`가 HSTS를 켠 환경의 발급자가 `letsencrypt-prod`인지 확인한다:
 
 ```bash
 git switch main && git pull
-git switch -c https/dev-prod-issuer
-yq -i '.ingress.tls.clusterIssuer = "letsencrypt-prod"' environments/dev/values.yaml     # prod 환경은 environments/prod/values.yaml
+git switch -c https/prod-issuer
+yq -i '.ingress.tls.clusterIssuer = "letsencrypt-prod"' environments/prod/values.yaml     # 되돌릴 때는 "letsencrypt-staging"
 git diff                                   # 한 줄만 바뀌어야 한다
-git commit -am "feat(dev): HTTPS 인증서 발급자를 letsencrypt-prod로 바꾼다"
+git commit -am "feat(prod): HTTPS 인증서 발급자를 letsencrypt-prod로 바꾼다"
 git push -u origin HEAD
 gh pr create --fill
 ```
@@ -547,6 +571,27 @@ gh pr create --fill
 새 발급자에게서 다시 받아 같은 Secret을 고친다. Traefik은 Secret이 바뀌면 다시 읽으므로 재시작할 것이 없다. 되돌릴 때도 같은 한 줄을 staging으로 바꾼다.
 `validate`가 이 값이 `platform/cert-issuers`에 있는 ClusterIssuer의 이름인지 확인한다(오타면 Certificate가 발급자를 찾지 못해 인증서가 영영 나오지 않는다).
 
+### HSTS (prod만)
+
+prod의 응답에는 `Strict-Transport-Security: max-age=86400` 헤더가 붙는다. 앱 차트의 `ingress.hsts`(`enabled`, `maxAgeSeconds`)가 Traefik의 headers Middleware(`templates/hsts.yaml`)를 만들고,
+Ingress의 `router.middlewares`에 리다이렉트 다음으로 이어 붙인다(`<리다이렉트>,<HSTS>`). 리다이렉트와 같은 조건(TLS가 켜져 있고 클러스터가 Traefik의 Middleware kind를 안다)일 때만 만든다.
+
+- **하는 일**: 이 헤더를 받은 브라우저는 max-age 동안 이 호스트를 https로만 연다(http 주소도 요청을 보내기 전에 https로 바꾼다). 리다이렉트만 있으면 첫 요청이 평문으로 한 번 나간다.
+  그리고 인증서 오류가 나면 경고를 넘어가는 길을 주지 않는다.
+- **HTTPS로만 통한다**: 브라우저는 평문 HTTP 응답의 이 헤더를 무시하고(RFC 6797 8.1), Traefik도 TLS로 받은 요청의 응답에만 붙인다. 80에서는 리다이렉트가 먼저 돌려보낸다.
+- **prod만**: dev는 staging 인증서라서 HSTS를 걸면 브라우저가 경고를 넘어가지 못해 dev를 열 수 없다.
+- **includeSubDomains·preload는 끈다**: dev 호스트(`dev.dev-ops-study.duckdns.org`)가 prod 호스트의 하위 도메인이라, includeSubDomains를 켜면 prod를 연 브라우저가 dev까지 막는다.
+  preload(브라우저에 미리 넣는 목록)는 includeSubDomains와 1년 이상의 max-age가 필요하고, 한 번 오르면 빠지는 데 몇 달이 걸린다.
+- **1일에서 시작해 올린다**: max-age는 브라우저가 마지막으로 받은 값을 기억하는 기간이다. prod 인증서를 브라우저가 믿지 못하게 되면(destroy → apply 직후 첫 발급 전의 Traefik 기본 인증서,
+  발급 한도, 발급자를 staging으로 되돌림) 헤더를 기억한 브라우저는 그 기간 동안 prod를 열지 못한다(그동안은 `curl -k`로 본다). 문제없이 지나면
+  `environments/prod/values.yaml`의 `maxAgeSeconds`를 1주(604800) → 1달(2592000) → 1년(31536000)으로 올린다. 내리거나 끌 때도 브라우저가 새 헤더를 https로 받기 전까지는 예전 값이 남는다.
+
+```bash
+curl -sI https://dev-ops-study.duckdns.org/ | grep -i strict-transport-security      # strict-transport-security: max-age=86400
+curl -sI http://dev-ops-study.duckdns.org/  | grep -i strict-transport-security      # 없다(평문 응답에는 붙지 않는다. 308 리다이렉트만)
+curl -skI https://dev.dev-ops-study.duckdns.org/ | grep -i strict-transport-security # 없다(dev는 끔)
+```
+
 ### 발급 한도 (Let's Encrypt production)
 
 `duckdns.org`는 Public Suffix List에 있어서 Let's Encrypt는 `dev-ops-study.duckdns.org`를 "등록 도메인"으로 본다. 그래서 다른 DuckDNS 사용자와 한도를 나눠 쓰지 않고,
@@ -554,8 +599,8 @@ dev(`dev.dev-ops-study.duckdns.org`)와 prod가 이 등록 도메인의 한도�
 
 | 한도 | 값 | 여기서 |
 |---|---|---|
-| 같은 이름 묶음(Exact Set of Identifiers)의 새 인증서 | 7일에 5장(34시간마다 1장씩 다시 찬다) | 환경마다 이름이 하나라 환경마다 따로 센다. destroy → apply마다 환경마다 1장을 쓰고, 갱신도 1장으로 센다(cert-manager v1.21.2의 ARI는 알파라 꺼져 있어 ARI 갱신 면제를 받지 않는다). 한 주에 다시 만들기를 4번 넘게 하지 않는다 |
-| 등록 도메인의 새 인증서 | 7일에 50장 | dev와 prod를 합쳐 센다. 같은 이름 묶음의 재발급은 갱신으로 보아 이 한도에서 빠진다 |
+| 같은 이름 묶음(Exact Set of Identifiers)의 새 인증서 | 7일에 5장(34시간마다 1장씩 다시 찬다) | 환경마다 이름이 하나라 환경마다 따로 센다. production을 쓰는 것은 prod뿐이라 destroy → apply마다 prod가 1장을 쓰고, 갱신도 1장으로 센다(cert-manager v1.21.2의 ARI는 알파라 꺼져 있어 ARI 갱신 면제를 받지 않는다). 한 주에 다시 만들기를 4번 넘게 하지 않는다 |
+| 등록 도메인의 새 인증서 | 7일에 50장 | dev와 prod를 합쳐 세지만 지금은 prod만 production을 쓴다. 같은 이름 묶음의 재발급은 갱신으로 보아 이 한도에서 빠진다 |
 | 검증 실패 | 계정·이름마다 1시간에 5번 | 80 포트나 DNS가 틀린 채 발급을 되풀이하면 걸린다. 그런 문제는 staging으로 고친다 |
 | 새 계정 | IP마다 3시간에 10개 | destroy → apply마다 발급자마다 계정이 하나씩 새로 생긴다(계정 키 Secret이 사라진다) |
 
@@ -574,13 +619,33 @@ kubectl -n shortener-dev describe certificate shortener-dev-tls    # Status의 N
 kubectl get certificaterequest,order,challenge -A                  # 발급 중인 것. 끝나면 challenge는 사라진다
 kubectl -n shortener-dev describe challenge                        # 멈춰 있으면 Reason: self-check 실패, Let's Encrypt의 검증 오류 등
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' http://dev.dev-ops-study.duckdns.org/   # 301 https://dev.dev-ops-study.duckdns.org/
-curl -vk https://dev.dev-ops-study.duckdns.org/ -o /dev/null 2>&1 | grep -E 'subject:|issuer:|expire date:'   # staging이면 issuer에 (STAGING)
+curl -vk https://dev.dev-ops-study.duckdns.org/ -o /dev/null 2>&1 | grep -E 'subject:|issuer:|expire date:'   # dev는 staging이라 issuer에 (STAGING)
+curl -v https://dev-ops-study.duckdns.org/ -o /dev/null 2>&1 | grep -E 'subject:|issuer:|expire date:'       # prod는 -k 없이 성공하고 issuer에 (STAGING)이 없다
 ```
 
 - `curl -I`(HEAD)는 GET이 아니라서 301이 아니라 308이 나온다(Traefik이 GET만 301로 돌려보낸다).
 - Prometheus(위 "열어 보기")에서 `certmanager_certificate_ready_status{condition="True"}`가 1인지, `(certmanager_certificate_expiration_timestamp_seconds - time()) / 86400`이 남은 날 수인지 본다.
-  ServiceMonitor는 값 파일이 켠다(job `cert-manager`, `webhook`, `cainjector`). 만료·발급 실패 경보 규칙은 아직 없다(아래 "아직 하지 않은 것").
+  ServiceMonitor는 값 파일이 켠다(job `cert-manager`, `webhook`, `cainjector`). 인증서의 네임스페이스는 `exported_namespace` 레이블에 있다(아래 "인증서 경보").
 - ArgoCD UI에서는 Certificate·CertificateRequest·Order·Challenge와 검증용 파드·Ingress가 앱 Ingress 아래에 자식으로 보인다(소유자 참조). ArgoCD가 만든 것이 아니라 prune하지 않는다.
+
+### 인증서 경보
+
+`platform/kube-prometheus-stack/values.yaml`의 `additionalPrometheusRulesMap.certificates`에 있다. kube-prometheus-stack 차트가 그것으로 PrometheusRule `kube-prometheus-stack-certificates`(`monitoring` 네임스페이스)를 만든다.
+PrometheusRule CRD를 설치하는 Application이 규칙도 함께 만들어서, 새 클러스터에서 다른 Application이 CRD를 기다리다 다시 시도를 다 써 규칙 없이 남는 일이 없다. 둘 다 `severity="critical"`이라 Discord로 간다.
+
+| 경보 | 조건 | 무엇을 뜻하나 |
+|---|---|---|
+| `CertificateExpiringSoon` | 남은 기간이 14일보다 짧은 것이 15분 이어진다 | cert-manager는 수명의 2/3이 지나면(남은 기간이 수명의 1/3이 되면) 갱신하므로, 그 뒤로도 인증서가 그대로라 갱신이 실패하고 있다. 갱신이 실패해도 인증서가 아직 유효하면 Ready는 True라서 이 경보만 보인다 |
+| `CertificateNotReady` | Ready가 True가 아닌(False, 또는 조건이 아직 없는 Unknown) 것이 15분 이어진다 | 첫 발급이나 다시 받기(만료, 발급자 변경)가 끝나지 않는다. 평소의 발급은 1~2분이다 |
+
+- 지표는 cert-manager 컨트롤러의 `certmanager_certificate_expiration_timestamp_seconds`(받기 전에는 0이라 `> 0`으로 뺀다)와 `certmanager_certificate_ready_status`(condition이 True·False·Unknown인 계열 중 지금 상태만 1)다.
+  인증서마다 계열이 있어서 dev의 staging 인증서도 같은 기준으로 본다.
+- cert-manager의 ServiceMonitor는 honorLabels가 false라 인증서의 네임스페이스가 `exported_namespace`로 저장된다. 식이 `label_replace`로 그 값을 `namespace`에 되돌리고
+  `max by (namespace, name, issuer_name)`로 묶어서, 경보는 환경(`shortener-dev`·`shortener-prod`)마다 따로 묶이고 컨트롤러 파드가 바뀌어도 이어진다.
+- `for: 15m`은 몇 분이면 끝나는 평소의 발급·갱신(새 클러스터의 첫 발급, 발급자 변경, 오래 멈췄다 켠 뒤 지난 갱신)으로 울리지 않게 하려는 것이다.
+- 14일 기준은 갱신 시점(남은 기간이 수명의 1/3)보다 뒤에 와야 뜻이 있어서 수명이 42일보다 길어야 한다. Let's Encrypt는 기본 수명을 90일에서 45일까지 줄인다고 알렸는데,
+  45일이어도 갱신은 15일 남았을 때라 아직 맞는다. 수명이 42일 이하가 되면 기준을 줄인다.
+- 시나리오별 기대는 `tests/certificates/certificate-alerts.test.yaml`이고, `validate`의 "인증서 경보 검사" 단계가 promtool로 돌린다.
 
 ### 관리 UI는 HTTPS를 붙여도 port-forward로만 본다
 
@@ -602,7 +667,7 @@ Grafana·Prometheus·Alertmanager·ArgoCD·Argo Rollouts 대시보드에는 Ingr
 - **첫 동기화의 순서**: cert-manager의 ServiceMonitor는 kube-prometheus-stack의 CRD를, `cert-issuers`의 ClusterIssuer는 cert-manager의 CRD와 웹훅을 기다린다. 웨이브는 한 Application 안의 순서라
   두 경우 모두 Argo Rollouts와 같은 방법을 쓴다: 그 리소스에만 `SkipDryRunOnMissingResource=true`를 붙여 동기화 전 검증을 건너뛰고, Application의 `retry`(6번, 합쳐 약 8분)가 다시 시도한다.
   ClusterIssuer는 CRD가 있어도 웹훅 파드가 뜨고 cainjector가 CA를 넣기 전에는 웹훅 호출이 실패해 거부되는데, 이것도 같은 다시 시도로 풀린다.
-- **리다이렉트 Middleware는 sync-wave -1**이다. 없는 미들웨어를 가리키는 Ingress는 Traefik이 라우터를 버려 404가 되므로, 처음 켜는 동기화에서 Middleware를 Ingress보다 먼저 만든다.
+- **리다이렉트·HSTS Middleware는 sync-wave -1**이다. 없는 미들웨어를 가리키는 Ingress는 Traefik이 라우터를 버려 404가 되므로, 처음 켜는 동기화에서 Middleware를 Ingress보다 먼저 만든다.
 - **Traefik**은 k3s v1.35.8+k3s1이 노드가 뜰 때 설치하는 차트 `traefik-40.1.4+up40.1.0`(Traefik v3.7.8, k3s 저장소의 `manifests/traefik.yaml`)을 그대로 쓴다. 이 저장소가 기대는 그 차트의 기본값은 셋이다:
   websecure(443) entrypoint에 TLS가 켜져 있다(그래서 Ingress의 라우터가 443에서 TLS로 받는다), kubernetesCRD 공급자가 켜져 있고 `crossProviderNamespaces`가 없다(Ingress가 Middleware를 가리킬 수 있다),
   인증서 resolver가 없다(Traefik 자신의 ACME 라우터가 `/.well-known/acme-challenge/`를 가로채지 않는다). k3s를 올릴 때 셋이 그대로인지 본다.
@@ -610,20 +675,18 @@ Grafana·Prometheus·Alertmanager·ArgoCD·Argo Rollouts 대시보드에는 Ingr
 
 ### 아직 하지 않은 것
 
-- 인증서 만료·발급 실패 경보 규칙(`certmanager_certificate_ready_status`, `certmanager_certificate_expiration_timestamp_seconds`). 지표는 수집하고 있다.
-- HSTS(브라우저에게 앞으로 https로만 오라고 알리는 헤더). staging 인증서인 동안 붙이면 브라우저가 경고를 넘어가는 길까지 막아서 두지 않았다. prod 발급자로 바꾼 뒤에 다시 본다.
 - 앱 저장소의 부하 테스트(`loadtest/`)는 `BASE_URL`을 https 주소로 바꿔야 한다. http로 두면 리다이렉트 검사(`redirects: 0`)가 앱의 302 대신 Traefik의 301을 받는다.
-  staging 인증서인 동안에는 k6에 `--insecure-skip-tls-verify`가 필요하다.
+  dev는 staging 인증서라 k6에 `--insecure-skip-tls-verify`가 필요하다(prod는 필요 없다).
 
 ### 로컬에서 확인하기
 
 CI 단계의 스크립트를 그대로 꺼내 돌린다. 위 "로컬에서 검증하기"에서 읽은 변수를 쓰고, GitHub가 넣어 주는 `RUNNER_TEMP`·`GITHUB_WORKSPACE`는 대신 준다:
 
 ```bash
-export KUBERNETES_VERSION KUBECONFORM_IMAGE K8S_SCHEMA_LOCATION CRD_SCHEMA_LOCATION
+export KUBERNETES_VERSION KUBECONFORM_IMAGE K8S_SCHEMA_LOCATION CRD_SCHEMA_LOCATION PROMETHEUS_IMAGE
 export RUNNER_TEMP=$(mktemp -d) GITHUB_WORKSPACE=$PWD
-for step in "렌더링 + 쿠버네티스 스키마 검사 (dev, prod × Rollout, Deployment)" "앱 Ingress HTTPS 확인 (TLS, 리다이렉트, 발급자 이름)" \
-            "인증서 발급자 검사 (platform/cert-issuers)"; do
+for step in "렌더링 + 쿠버네티스 스키마 검사 (dev, prod × Rollout, Deployment)" "앱 Ingress HTTPS 확인 (TLS, 리다이렉트, HSTS, 발급자 이름)" \
+            "인증서 발급자 검사 (platform/cert-issuers)" "인증서 경보 검사 (promtool check + test)"; do
   bash -e -c "$(yq ".jobs.validate.steps[] | select(.name == \"$step\") | .run" .github/workflows/validate.yml)" || break
 done
 ```
@@ -718,6 +781,14 @@ docker run --rm -v "$PWD/tests/slo:/slo:ro" --entrypoint /bin/promtool "$PROMETH
 
 docker run --rm -v "$PWD":/work:ro -w /work $KUBECONFORM_IMAGE -strict -summary \
   -schema-location "$K8S_SCHEMA_LOCATION" -schema-location "$CRD_SCHEMA_LOCATION" -kubernetes-version $KUBERNETES_VERSION argocd/ platform/cert-issuers/
+
+# 인증서 경보: kube-prometheus-stack 값 파일의 additionalPrometheusRulesMap.certificates를 꺼내 promtool로 검사하고 tests/certificates의 테스트를 돌린다
+mkdir -p tests/certificates/rendered
+yq '.additionalPrometheusRulesMap.certificates' platform/kube-prometheus-stack/values.yaml > tests/certificates/rendered/certificate-alerts.yaml
+docker run --rm -v "$PWD/tests/certificates:/certificates:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
+  check rules --lint-fatal /certificates/rendered/certificate-alerts.yaml
+docker run --rm -v "$PWD/tests/certificates:/certificates:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
+  test rules /certificates/certificate-alerts.test.yaml
 ```
 
 `helm template`은 ArgoCD가 하는 것과 같이 릴리스 이름(`shortener-dev`)과 네임스페이스를 주고 환경 값 파일을 얹어 렌더링한다. `image.tag`가 커밋 SHA 40자가 아니거나 DB Secret 이름이 없으면
@@ -748,6 +819,7 @@ amtool() { docker run --rm -v $am:/c.yaml:ro --entrypoint amtool quay.io/prometh
 amtool check-config /c.yaml
 amtool config routes show --config.file=/c.yaml
 amtool config routes test --config.file=/c.yaml alertname=X service=shortener severity=critical   # discord
+amtool config routes test --config.file=/c.yaml alertname=CertificateNotReady namespace=shortener-prod severity=critical   # discord(인증서 경보)
 amtool config routes test --config.file=/c.yaml alertname=Watchdog severity=none                  # null
 ```
 

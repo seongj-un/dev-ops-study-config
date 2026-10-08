@@ -12,6 +12,8 @@ management 포트(8081)는 라우팅하지 않으므로 actuator 엔드포인트
 [HTTP→HTTPS] shortener.httpsRedirectEnabled이면 Traefik 어노테이션 router.middlewares로 리다이렉트 미들웨어(https-redirect.yaml)를 이 Ingress의 라우터에 붙인다.
   값의 형식은 <미들웨어의 네임스페이스>-<이름>@kubernetescrd다(Traefik의 kubernetescrd 공급자가 Middleware를 그 이름으로 등록한다). 네임스페이스는 이 릴리스의 것(.Release.Namespace.
   ArgoCD에서는 Application의 destination.namespace)이고 Middleware도 같은 네임스페이스에 만들어지므로 다른 네임스페이스를 가리키지 않는다.
+[HSTS] shortener.hstsEnabled(리다이렉트의 조건 + ingress.hsts.enabled)이면 HSTS 헤더 미들웨어(hsts.yaml)를 같은 어노테이션에 쉼표로 이어 붙인다: <리다이렉트>,<HSTS>.
+  Traefik은 적힌 순서대로 미들웨어를 거친다. 80에서는 리다이렉트가 먼저 돌려보내 HSTS까지 가지 않고, 443에서는 리다이렉트가 그대로 넘긴 요청의 응답에 HSTS가 헤더를 붙인다.
 [ACME HTTP-01 검증은 리다이렉트되지 않는다] 검증하는 동안 cert-manager는 같은 호스트에 경로 /.well-known/acme-challenge/<토큰>(pathType Exact)만 가진 Ingress를 따로 만든다.
   그 Ingress에는 이 어노테이션이 없어서 리다이렉트가 붙지 않는다. Traefik은 같은 요청에 맞는 라우터가 여럿이면 규칙 문자열이 긴 쪽(우선순위의 기본값이 규칙의 길이)을 고르는데,
   검증 Ingress의 규칙(Host + 긴 Path)이 이 Ingress의 규칙(Host + PathPrefix("/"))보다 길어서 검증 요청은 80 포트에서 그대로 검증용 파드로 간다.
@@ -27,7 +29,11 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: {{ required "ingress.tls.enabled가 true이면 인증서를 받을 ClusterIssuer 이름(ingress.tls.clusterIssuer)을 넣어야 한다: letsencrypt-staging 또는 letsencrypt-prod" .Values.ingress.tls.clusterIssuer | quote }}
     {{- if include "shortener.httpsRedirectEnabled" . }}
-    traefik.ingress.kubernetes.io/router.middlewares: {{ printf "%s-%s@kubernetescrd" .Release.Namespace (include "shortener.httpsRedirectName" .) | quote }}
+    {{- $middlewares := list (printf "%s-%s@kubernetescrd" .Release.Namespace (include "shortener.httpsRedirectName" .)) }}
+    {{- if include "shortener.hstsEnabled" . }}
+    {{- $middlewares = append $middlewares (printf "%s-%s@kubernetescrd" .Release.Namespace (include "shortener.hstsName" .)) }}
+    {{- end }}
+    traefik.ingress.kubernetes.io/router.middlewares: {{ join "," $middlewares | quote }}
     {{- end }}
   {{- end }}
 spec:
