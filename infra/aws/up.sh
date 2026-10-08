@@ -159,13 +159,21 @@ wait_for "부트스트랩 완료" "$T_BOOTSTRAP" 20 check_bootstrap || die "부�
 phase_done "부트스트랩 완료" "$phase_start"
 
 resolve_ip() {
-  local name=$1 ip=""
-  if command -v dig >/dev/null 2>&1; then
-    # 로컬 DNS 캐시에 남은 옛 답이나 음성 캐시를 피하려고 공개 리졸버에 직접 묻는다.
-    ip=$(dig +short +time=3 +tries=1 A "$name" @1.1.1.1 2>/dev/null | grep -E '^[0-9.]+$' | head -n 1) || ip=""
-  elif command -v host >/dev/null 2>&1; then
-    ip=$(host -t A "$name" 1.1.1.1 2>/dev/null | awk '/has address/ {print $NF; exit}') || ip=""
-  fi
+  local name=$1 ip="" server
+  # 로컬 DNS 캐시에 남은 옛 답이나 음성 캐시를 피하려고 공개 리졸버에 직접 묻는다.
+  # 네트워크에 따라 특정 리졸버로 가는 UDP 53이 막혀 있다(이 프로젝트의 맥에서는 1.1.1.1이 시간 초과, 8.8.8.8은 됨).
+  # 그래서 1) HTTPS로 묻는 DoH(443은 거의 열려 있다) 2) 공개 리졸버 두 곳 순서로 시도하고, 처음 얻은 답을 쓴다.
+  ip=$(curl -fsS --max-time 5 -H 'accept: application/dns-json' \
+        "https://cloudflare-dns.com/dns-query?name=${name}&type=A" 2>/dev/null |
+       jq -r '[.Answer[]? | select(.type == 1) | .data] | first // empty' 2>/dev/null) || ip=""
+  for server in 8.8.8.8 1.1.1.1; do
+    [ -n "$ip" ] && break
+    if command -v dig >/dev/null 2>&1; then
+      ip=$(dig +short +time=3 +tries=1 A "$name" "@$server" 2>/dev/null | grep -E '^[0-9.]+$' | head -n 1) || ip=""
+    elif command -v host >/dev/null 2>&1; then
+      ip=$(host -t A "$name" "$server" 2>/dev/null | awk '/has address/ {print $NF; exit}') || ip=""
+    fi
+  done
   printf '%s' "$ip"
 }
 DNS_NAME="$DUCKDNS_SUBDOMAIN.duckdns.org"
