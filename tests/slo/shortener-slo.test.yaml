@@ -700,18 +700,18 @@ tests:
       # 10분과 11분 사이에 앱 파드가 모두 NotReady가 되어 11~20분의 10분 동안 Traefik이 모든 요청에 503(no available server)을 직접 돌려주고, 21분부터 다시 302·201이다.
       # Traefik은 code="503" 계열을 첫 503 때 만들므로 그 전에는 표본이 없다('_x11'은 표본이 없는 시각 11개, 0~10분).
       - series: 'traefik_router_requests_total{code="302", method="GET", protocol="http", router="websecure-shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
-        values: '0+210x10 2100x10 2310+210x10'
+        values: '0+210x10 2100x9 2310+210x10'
       - series: 'traefik_router_requests_total{code="201", method="POST", protocol="http", router="websecure-shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
-        values: '0+30x10 300x10 330+30x10'
+        values: '0+30x10 300x9 330+30x10'
       - series: 'traefik_router_requests_total{code="503", method="GET", protocol="http", router="websecure-shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
-        values: '_x11 210+210x9 2100x11'
+        values: '_x11 210+210x9 2100x10'
       - series: 'traefik_router_requests_total{code="503", method="POST", protocol="http", router="websecure-shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
-        values: '_x11 30+30x9 300x11'
+        values: '_x11 30+30x9 300x10'
       # prod 앱의 요청 수: 503은 앱까지 가지 않으므로 장애 동안 그대로다(위 Traefik의 302·201과 같은 모양).
       - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
-        values: '0+210x10 2100x10 2310+210x10'
+        values: '0+210x10 2100x9 2310+210x10'
       - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", method="POST", uri="/api/v1/urls", status="201"}'
-        values: '0+30x10 300x10 330+30x10'
+        values: '0+30x10 300x9 330+30x10'
       # dev: 내내 정상. 80 포트로 온 요청을 https로 돌려보낸 301은 같은 Ingress의 80 라우터(이름에 websecure-가 없다)에 남는다.
       - series: 'traefik_router_requests_total{code="302", method="GET", protocol="http", router="websecure-shortener-dev-shortener-dev-dev-dev-ops-study-duckdns-org@kubernetes", service="shortener-dev-shortener-dev-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
         values: '0+60x31'
@@ -778,7 +778,7 @@ tests:
                 그 요청은 앱의 지표에 남지 않아 SLO 경보가 보지 못한다. ShortenerNoAvailablePods가 함께 울리면 그것이 원인이다.
                 파드가 Ready인데 울리면 Traefik과 파드 사이의 실패(502·504)나 앱의 5xx다. kubectl -n shortener-prod get pods,endpointslices와
                 Traefik 로그(kubectl -n kube-system logs deploy/traefik), Grafana의 Shortener 대시보드(엣지와 앱 비교 패널)로 원인을 본다.
-      # 장애가 끝나도(21분부터 다시 성공) 5분 창 안의 503이 20% 아래로 빠질 때까지는 울린다. 23분에는 33.33%다.
+      # 장애가 끝나도(21분부터 다시 302·201) 5분 창 안의 503이 20% 아래로 빠질 때까지는 울린다. 5분 창의 503 비율은 21분 75%, 22분 50%, 23분 25%다.
       - eval_time: 23m
         alertname: ShortenerEdgeFailing
         exp_alerts:
@@ -790,7 +790,7 @@ tests:
             exp_annotations:
               summary: 'shortener-prod: Traefik(엣지)에서 잰 5xx 비율이 3분 넘게 20%를 넘고 있다'
               description: >-
-                최근 5분 동안 Traefik이 이 환경의 Ingress로 받은 요청의 33.33%가 5xx다(기준은 5분 창에서 20%, 그 요청이 5분에 15건보다 많을 때).
+                최근 5분 동안 Traefik이 이 환경의 Ingress로 받은 요청의 25%가 5xx다(기준은 5분 창에서 20%, 그 요청이 5분에 15건보다 많을 때).
                 사용자가 받은 응답을 클러스터의 입구에서 잰 증상 경보다. 앱 파드가 모두 NotReady면 Traefik이 503(no available server)을 직접 돌려주고,
                 그 요청은 앱의 지표에 남지 않아 SLO 경보가 보지 못한다. ShortenerNoAvailablePods가 함께 울리면 그것이 원인이다.
                 파드가 Ready인데 울리면 Traefik과 파드 사이의 실패(502·504)나 앱의 5xx다. kubectl -n shortener-prod get pods,endpointslices와

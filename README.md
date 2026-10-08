@@ -856,13 +856,13 @@ docker run --rm -v "$PWD/tests/certificates:/certificates:ro" --entrypoint /bin/
   test rules /certificates/certificate-alerts.test.yaml
 ```
 
-Traefik 설정(`platform/traefik-config`)은 CI 단계의 스크립트를 그대로 꺼내 돌린다. 그 단계의 env(차트·k3s 매니페스트 주소와 SHA-256)도 함께 읽고,
-GitHub가 넣어 주는 `GITHUB_WORKSPACE`·`RUNNER_TEMP`는 대신 준다(`sha256sum`이 필요하다):
+Traefik 설정(`platform/traefik-config`)은 CI 단계의 스크립트를 그대로 꺼내 돌린다. 잡 env의 차트·k3s 매니페스트 주소와 SHA-256(`K3S_TRAEFIK_MANIFEST_*`, `TRAEFIK_CHART_*`)도 함께 읽고,
+GitHub가 넣어 주는 `GITHUB_WORKSPACE`·`RUNNER_TEMP`는 대신 준다(`sha256sum`이 필요하다). 로컬에서는 CI의 캐시 단계를 돌리지 않으므로 두 파일을 매번 내려받는다:
 
 ```bash
 export KUBERNETES_VERSION KUBECONFORM_IMAGE K8S_SCHEMA_LOCATION CRD_SCHEMA_LOCATION
 step='.jobs.validate.steps[] | select(.name == "Traefik 설정 검사 (platform/traefik-config)")'
-eval "$(yq "$step | .env | to_entries | .[] | \"export \" + .key + \"=\" + .value" .github/workflows/validate.yml)"
+eval "$(yq '.jobs.validate.env | with_entries(select(.key | test("TRAEFIK"))) | to_entries | .[] | "export " + .key + "=" + .value' .github/workflows/validate.yml)"
 GITHUB_WORKSPACE=$PWD RUNNER_TEMP=$(mktemp -d) bash -c "$(yq "$step | .run" .github/workflows/validate.yml)"
 ```
 
@@ -952,7 +952,7 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | Argo Rollouts 차트 | `argo/argo-rollouts` 2.43.2 (Argo Rollouts v1.10.0. 이미지 태그도 이 차트 버전이 정한다) | `argocd/apps/argo-rollouts.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
 | cert-manager 차트 | `jetstack/cert-manager` v1.21.2 (cert-manager v1.21.2. 이미지 태그도 이 차트 버전이 정한다) | `argocd/apps/cert-manager.yaml`의 `targetRevision`, 값 파일 맨 위 주석, 이 README |
 | Traefik (고정하지 않는다) | k3s v1.35.8+k3s1에 들어 있는 차트 `traefik-40.1.4+up40.1.0`(Traefik v3.7.8). k3s 버전을 따라간다 | k3s의 `manifests/traefik.yaml`. 기대는 기본값은 위 "HTTPS", 바꾼 값은 `platform/traefik-config`(위 "엣지 SLI") |
-| Traefik 설정 검사에 쓰는 차트·k3s 매니페스트 | 위와 같은 차트 파일과 k3s v1.35.8+k3s1의 `manifests/traefik.yaml` (SHA-256으로 확인한다) | `validate.yml` Traefik 단계의 `TRAEFIK_CHART_*`·`K3S_TRAEFIK_MANIFEST_*`. k3s를 올리면 함께 바꾼다 |
+| Traefik 설정 검사에 쓰는 차트·k3s 매니페스트 | 위와 같은 차트 파일과 k3s v1.35.8+k3s1의 `manifests/traefik.yaml` (SHA-256으로 확인한다) | `validate.yml` 잡 env의 `TRAEFIK_CHART_*`·`K3S_TRAEFIK_MANIFEST_*`(캐시 단계의 키도 된다). k3s를 올리면 함께 바꾼다 |
 | kustomize (CI) | v5.8.1 (릴리스 파일을 받아 SHA-256으로 확인한다. ArgoCD v3.5.3에 들어 있는 kustomize와 같다) | `validate.yml` 대시보드 단계의 `KUSTOMIZE_VERSION`·`KUSTOMIZE_SHA256` |
 | CustomResourceDefinition 객체의 스키마 | yannh/kubernetes-json-schema 커밋 `8df8a88`의 `-local` 디렉터리 (`-standalone`에는 없다) | `validate.yml` 플랫폼 차트 단계의 `K8S_LOCAL_SCHEMA_LOCATION` |
 

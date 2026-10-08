@@ -60,6 +60,13 @@ jobs:
       # 규칙 문법과 PromQL 함수는 Prometheus 버전마다 다를 수 있어서다. kube-prometheus-stack을 올리면 그 차트의 Prometheus 이미지 태그에 맞춰 이 값도 올린다.
       # 태그@다이제스트(멀티 아키텍처 인덱스)로 고정하는 방식과 이유는 KUBECONFORM_IMAGE와 같고(docker.io와 quay.io의 다이제스트가 같다), 같은 이유로 Dependabot이 갱신해 주지 않는다.
       PROMETHEUS_IMAGE: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+      # "Traefik 설정 검사" 단계가 렌더링하는 k3s의 Traefik: k3s v1.35.8+k3s1의 manifests/traefik.yaml과 그것이 가리키는 차트 파일(k3s의 scripts/download가 받는 곳).
+      # 내려받은 파일을 이 SHA-256으로 확인한다. 그 앞의 캐시 단계도 두 SHA-256을 키로 쓰므로 단계의 env가 아니라 잡의 env에 둔다.
+      # Dependabot이 갱신해 주지 않으니 k3s를 올리면 네 값을 함께 바꾼다(차트 이름은 새 매니페스트의 spec.chart에서 읽는다).
+      K3S_TRAEFIK_MANIFEST_URL: https://raw.githubusercontent.com/k3s-io/k3s/v1.35.8%2Bk3s1/manifests/traefik.yaml
+      K3S_TRAEFIK_MANIFEST_SHA256: e398aa7f8f6686c480ea666984b55cda9ca7b561dbd5b4308455262533edda17
+      TRAEFIK_CHART_URL: https://k3s.io/k3s-charts/assets/traefik/traefik-40.1.4+up40.1.0.tgz
+      TRAEFIK_CHART_SHA256: a9ebcfeecdd5b9f1ffea1167a7ffee69e346cd10864998ce8e44b51c204b7767
     steps:
       # 이 파일의 액션은 태그(v5 등)가 아니라 전체 커밋 SHA로 고정하고, 뒤에 버전을 주석으로 남긴다.
       # 태그는 저장소 소유자(또는 계정을 탈취한 공격자)가 다른 커밋으로 옮길 수 있는 이름이라, 태그로 참조하면 그 시점의 코드가 그대로 실행된다.
@@ -407,6 +414,17 @@ jobs:
           done
           exit "$status"
 
+      # 다음 단계가 쓰는 k3s의 Traefik 차트 파일과 매니페스트를 캐시에서 꺼낸다. 이 두 파일 때문에 모든 PR의 validate가 k3s.io와 raw.githubusercontent.com에 기대게 되어서,
+      # 한 번 받은 것을 GitHub Actions 캐시에 두고 다시 쓴다. 키는 두 파일의 SHA-256(잡 env)이라 k3s를 올려 값을 바꾸면 새 키가 되고, 같은 키의 내용은 바뀌지 않는다.
+      # 캐시에 없으면(cache-hit이 아니면) 다음 단계가 내려받고, 잡이 성공하면 이 액션의 post 단계가 그 디렉터리를 저장한다(post-if: success()라 실패한 잡의 파일은 저장하지 않는다).
+      # 캐시에서 꺼낸 파일도 다음 단계가 쓰기 전에 SHA-256으로 확인한다(캐시는 같은 저장소의 다른 워크플로도 쓸 수 있는 저장소라 내용을 믿지 않는다).
+      # PR 실행은 기본 브랜치(main)가 만든 캐시를 읽을 수 있고, PR에서 만든 캐시는 그 PR 안에서만 보인다.
+      - name: k3s Traefik 차트·매니페스트 캐시
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/k3s-traefik
+          key: k3s-traefik-${{ env.K3S_TRAEFIK_MANIFEST_SHA256 }}-${{ env.TRAEFIK_CHART_SHA256 }}
+
       # platform/traefik-config(traefik-config Application)의 HelmChartConfig와 PodMonitor를 검사한다. ArgoCD가 이 디렉터리의 YAML을 렌더링 없이 그대로 적용한다.
       #   1) kubeconform: PodMonitor의 스키마는 CRD_SCHEMA_LOCATION의 커밋에 있다(monitoring.coreos.com/podmonitor_v1.json). -strict가 필드 이름의 오타를 잡는다.
       #      HelmChartConfig는 건너뛴다(-skip). 그 커밋(과 2026-10의 main)의 helm.cattle.io 스키마는 failurePolicy로 abort·reinstall만 받는데, 이 파일은 k3s v1.35.8의
@@ -416,15 +434,11 @@ jobs:
       #      helm template으로 렌더링하고, Traefik의 인자에 라우터 지표·빈 서비스 허용이 들어 있는지, PodMonitor의 셀렉터 레이블과 포트 이름이 렌더링된 파드와 맞는지 본다.
       #      값의 이름이 틀리면(addRouterLabels 등) 차트가 조용히 무시해서 라우터 지표가 생기지 않고, PodMonitor가 파드를 고르지 못하면 아무것도 수집하지 않는다.
       #      어느 쪽이든 엣지 경보가 아무 경고 없이 영영 울리지 않는다. k3s의 HelmChart가 --set으로 넘기는 global.systemDefaultRegistry는 k3s가 채우는 자리표시자라 빈 값으로 준다.
-      #      차트 파일과 k3s 매니페스트는 k3s v1.35.8+k3s1이 쓰는 것이다(k3s 저장소의 manifests/traefik.yaml과 scripts/download가 받는 차트). 내려받은 파일을 SHA-256으로 확인한다.
-      #      Dependabot이 갱신해 주지 않으니 k3s를 올리면 네 값을 함께 바꾼다(차트 이름은 새 매니페스트의 spec.chart에서 읽는다).
+      #      차트 파일과 k3s 매니페스트는 k3s v1.35.8+k3s1이 쓰는 것이다(잡 env의 K3S_TRAEFIK_MANIFEST_*·TRAEFIK_CHART_*).
+      #      바로 앞 단계의 캐시에 있으면 그것을 쓰고, 없으면 내려받는다. 어느 쪽이든 쓰기 전에 SHA-256으로 확인한다.
+      #      curl은 --retry 3에 --retry-all-errors(HTTP 오류 등 모든 실패)와 --retry-connrefused(연결 거부)를 더해 다시 시도한다(--retry만으로는 연결 거부를 다시 시도하지 않는다).
       # 기대와 다른 것이 있어도 바로 멈추지 않고 모두 오류로 남긴 뒤 실패한다.
       - name: Traefik 설정 검사 (platform/traefik-config)
-        env:
-          K3S_TRAEFIK_MANIFEST_URL: https://raw.githubusercontent.com/k3s-io/k3s/v1.35.8%2Bk3s1/manifests/traefik.yaml
-          K3S_TRAEFIK_MANIFEST_SHA256: e398aa7f8f6686c480ea666984b55cda9ca7b561dbd5b4308455262533edda17
-          TRAEFIK_CHART_URL: https://k3s.io/k3s-charts/assets/traefik/traefik-40.1.4+up40.1.0.tgz
-          TRAEFIK_CHART_SHA256: a9ebcfeecdd5b9f1ffea1167a7ffee69e346cd10864998ce8e44b51c204b7767
         run: |
           set -euo pipefail
           dir=platform/traefik-config
@@ -449,13 +463,19 @@ jobs:
           expect "HelmChartConfig의 네임스페이스/이름" kube-system/traefik "$hcc | .metadata.namespace + \"/\" + .metadata.name" "$dir"/*.yaml
           expect "HelmChartConfig의 failurePolicy" retry "$hcc | .spec.failurePolicy" "$dir"/*.yaml
           expect "PodMonitor 수" 1 "[$pm] | length" "$dir"/*.yaml
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/k3s-traefik.yaml" "$K3S_TRAEFIK_MANIFEST_URL"
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/traefik.tgz" "$TRAEFIK_CHART_URL"
-          # 체크섬이 다르면 sha256sum이 실패하고(set -e) 내려받은 파일은 쓰지 않는다.
-          printf '%s  %s\n' "$K3S_TRAEFIK_MANIFEST_SHA256" "$RUNNER_TEMP/k3s-traefik.yaml" "$TRAEFIK_CHART_SHA256" "$RUNNER_TEMP/traefik.tgz" | sha256sum -c -
-          yq 'select(.kind == "HelmChart" and .metadata.name == "traefik") | .spec.valuesContent' "$RUNNER_TEMP/k3s-traefik.yaml" > "$RUNNER_TEMP/traefik-values-k3s.yaml"
+          # 앞 단계(캐시)와 같은 디렉터리다. 캐시에서 꺼낸 파일이 있으면 그대로 쓰고, 없는 파일만 내려받는다.
+          downloads="$RUNNER_TEMP/k3s-traefik"
+          mkdir -p "$downloads"
+          manifest="$downloads/k3s-traefik.yaml"
+          chart="$downloads/traefik.tgz"
+          [ -f "$manifest" ] || curl -fsSL --retry 3 --retry-all-errors --retry-connrefused -o "$manifest" "$K3S_TRAEFIK_MANIFEST_URL"
+          [ -f "$chart" ] || curl -fsSL --retry 3 --retry-all-errors --retry-connrefused -o "$chart" "$TRAEFIK_CHART_URL"
+          # 캐시에서 꺼냈든 내려받았든 체크섬이 다르면 sha256sum이 실패하고(set -e) 그 파일은 쓰지 않는다. 내려받은 파일이 다르면 잡이 실패해 캐시에 저장되지 않고,
+          # 캐시의 파일이 다르면 그 캐시를 지울 때까지(gh cache delete <키>) 실패한다(다른 내용을 믿고 쓰는 것보다 멈추는 쪽을 고른다).
+          printf '%s  %s\n' "$K3S_TRAEFIK_MANIFEST_SHA256" "$manifest" "$TRAEFIK_CHART_SHA256" "$chart" | sha256sum -c -
+          yq 'select(.kind == "HelmChart" and .metadata.name == "traefik") | .spec.valuesContent' "$manifest" > "$RUNNER_TEMP/traefik-values-k3s.yaml"
           yq ea "$hcc | .spec.valuesContent" "$dir"/*.yaml > "$RUNNER_TEMP/traefik-values-config.yaml"
-          helm template traefik "$RUNNER_TEMP/traefik.tgz" --namespace kube-system --kube-version "$KUBERNETES_VERSION" \
+          helm template traefik "$chart" --namespace kube-system --kube-version "$KUBERNETES_VERSION" \
             -f "$RUNNER_TEMP/traefik-values-k3s.yaml" -f "$RUNNER_TEMP/traefik-values-config.yaml" \
             --set global.systemDefaultRegistry= > "$RUNNER_TEMP/traefik.yaml"
           deploy='select(.kind == "Deployment" and .metadata.name == "traefik")'
