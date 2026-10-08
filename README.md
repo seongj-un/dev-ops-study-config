@@ -60,7 +60,7 @@ infra/aws/up.sh, down.sh           명령 한 번으로 EC2/k3s 환경을 만들
 |---|---|---|
 | 네임스페이스 | `shortener-dev` | `shortener-prod` |
 | 주소 | https://dev.dev-ops-study.duckdns.org | https://dev-ops-study.duckdns.org |
-| 인증서 발급자 (`ingress.tls.clusterIssuer`) | `letsencrypt-staging` | `letsencrypt-staging` (확인한 뒤 둘 다 `letsencrypt-prod`로. 아래 "HTTPS") |
+| 인증서 발급자 (`ingress.tls.clusterIssuer`) | `letsencrypt-staging` (연습 환경이라 그대로 둔다. 아래 "HTTPS") | `letsencrypt-prod` |
 | 이미지 태그를 바꾸는 방법 | 앱 저장소 CI가 자동으로 커밋 | 사람이 PR로 승격 |
 | 파드 | 2개 고정 | HPA가 2~3개로 조절 (아래 메모리 메모) |
 | 앱 메모리 요청 / 한도 | 384Mi / 512Mi | 384Mi / 512Mi |
@@ -186,9 +186,9 @@ kubectl -n argo-rollouts get pods           # 아래 "Argo Rollouts"의 파드 2
 kubectl -n cert-manager get pods            # 아래 "HTTPS"의 파드 3개
 kubectl get clusterissuer                   # letsencrypt-staging·prod의 READY가 True(ACME 계정 등록)
 kubectl get certificate -A                  # shortener-dev-tls·shortener-prod-tls의 READY가 True(인증서 발급. 몇 분 걸린다)
-# -k: 발급자가 letsencrypt-staging인 동안은 인증서를 믿을 수 없어 검사를 건너뛴다. prod 발급자로 바꾼 뒤에는 뺀다
+# -k: dev는 발급자가 letsencrypt-staging이라 인증서를 믿을 수 없어 검사를 건너뛴다. prod는 letsencrypt-prod라 -k 없이 검사한다(인증서가 나오기 전에는 실패한다)
 curl -ik -X POST https://dev.dev-ops-study.duckdns.org/api/v1/urls -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
-curl -ik -X POST https://dev-ops-study.duckdns.org/api/v1/urls     -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
+curl -i  -X POST https://dev-ops-study.duckdns.org/api/v1/urls     -H 'Content-Type: application/json' -d '{"url": "https://example.com"}'
 ```
 
 첫 배포에서 앱이 DB보다 먼저 뜨면 몇 번 재시작한 뒤 자리를 잡는다(정상).
@@ -530,15 +530,22 @@ environments/<환경>/values.yaml의 ingress.tls(enabled, clusterIssuer)
 | 인증서 | 브라우저가 믿지 않는 시험용 CA(이름이 `(STAGING)`으로 시작한다). 브라우저는 경고를 내고 curl에는 `-k`가 필요하다 | 브라우저가 믿는다 |
 | 발급 한도 | 훨씬 크다(같은 이름 묶음으로 주당 30000장, 검증 실패는 시간당 200번) | 아래 "발급 한도" |
 
-두 환경 모두 staging으로 시작한다. 발급 흐름(검증, Secret, Traefik의 인증서 선택, 리다이렉트)을 한도 걱정 없이 먼저 확인하려는 것이다.
-staging에서 `kubectl get certificate -A`의 READY가 True이고 아래 `curl -vk`의 issuer에 `(STAGING)`이 보이면 prod로 바꾼다. 바꾸는 것은 환경마다 한 줄짜리 PR이다(dev를 먼저 바꿔 확인한 뒤 prod):
+prod는 `letsencrypt-prod`, dev는 `letsencrypt-staging`이다. 두 환경 모두 staging으로 시작해 발급 흐름(검증, Secret, Traefik의 인증서 선택, 리다이렉트)을 한도 걱정 없이 먼저 확인했고
+(`kubectl get certificate -A`의 READY가 True, 아래 `curl -vk`의 issuer에 `(STAGING)`), 그 뒤 prod만 한 줄짜리 PR로 바꿨다. dev는 staging에 남긴다:
+
+- 연습 환경이다. 브라우저가 믿을 필요가 없고, curl에는 `-k`를 붙인다.
+- destroy → apply로 클러스터를 새로 만들 때마다 인증서를 다시 받는다(Secret과 ACME 계정 키가 함께 사라진다).
+- production의 "같은 이름 묶음 7일 5장"은 이름 묶음마다 따로 센다(아래 발급 한도). dev가 production을 쓰면 dev 이름도 제 몫 5장에 묶여, 다시 만들기를 자주 하는 주에는 dev 발급이 막힌다.
+  staging은 같은 한도가 7일 3만 장이라 막히지 않는다.
+
+발급자를 바꾸는 것은 환경마다 한 줄짜리 PR이다. prod를 staging으로 되돌릴 때(발급 흐름을 바꾸는 시험 등)도 같은 한 줄이다:
 
 ```bash
 git switch main && git pull
-git switch -c https/dev-prod-issuer
-yq -i '.ingress.tls.clusterIssuer = "letsencrypt-prod"' environments/dev/values.yaml     # prod 환경은 environments/prod/values.yaml
+git switch -c https/prod-issuer
+yq -i '.ingress.tls.clusterIssuer = "letsencrypt-prod"' environments/prod/values.yaml     # 되돌릴 때는 "letsencrypt-staging"
 git diff                                   # 한 줄만 바뀌어야 한다
-git commit -am "feat(dev): HTTPS 인증서 발급자를 letsencrypt-prod로 바꾼다"
+git commit -am "feat(prod): HTTPS 인증서 발급자를 letsencrypt-prod로 바꾼다"
 git push -u origin HEAD
 gh pr create --fill
 ```
@@ -554,8 +561,8 @@ dev(`dev.dev-ops-study.duckdns.org`)와 prod가 이 등록 도메인의 한도�
 
 | 한도 | 값 | 여기서 |
 |---|---|---|
-| 같은 이름 묶음(Exact Set of Identifiers)의 새 인증서 | 7일에 5장(34시간마다 1장씩 다시 찬다) | 환경마다 이름이 하나라 환경마다 따로 센다. destroy → apply마다 환경마다 1장을 쓰고, 갱신도 1장으로 센다(cert-manager v1.21.2의 ARI는 알파라 꺼져 있어 ARI 갱신 면제를 받지 않는다). 한 주에 다시 만들기를 4번 넘게 하지 않는다 |
-| 등록 도메인의 새 인증서 | 7일에 50장 | dev와 prod를 합쳐 센다. 같은 이름 묶음의 재발급은 갱신으로 보아 이 한도에서 빠진다 |
+| 같은 이름 묶음(Exact Set of Identifiers)의 새 인증서 | 7일에 5장(34시간마다 1장씩 다시 찬다) | 환경마다 이름이 하나라 환경마다 따로 센다. production을 쓰는 것은 prod뿐이라 destroy → apply마다 prod가 1장을 쓰고, 갱신도 1장으로 센다(cert-manager v1.21.2의 ARI는 알파라 꺼져 있어 ARI 갱신 면제를 받지 않는다). 한 주에 다시 만들기를 4번 넘게 하지 않는다 |
+| 등록 도메인의 새 인증서 | 7일에 50장 | dev와 prod를 합쳐 세지만 지금은 prod만 production을 쓴다. 같은 이름 묶음의 재발급은 갱신으로 보아 이 한도에서 빠진다 |
 | 검증 실패 | 계정·이름마다 1시간에 5번 | 80 포트나 DNS가 틀린 채 발급을 되풀이하면 걸린다. 그런 문제는 staging으로 고친다 |
 | 새 계정 | IP마다 3시간에 10개 | destroy → apply마다 발급자마다 계정이 하나씩 새로 생긴다(계정 키 Secret이 사라진다) |
 
@@ -574,7 +581,8 @@ kubectl -n shortener-dev describe certificate shortener-dev-tls    # Status의 N
 kubectl get certificaterequest,order,challenge -A                  # 발급 중인 것. 끝나면 challenge는 사라진다
 kubectl -n shortener-dev describe challenge                        # 멈춰 있으면 Reason: self-check 실패, Let's Encrypt의 검증 오류 등
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' http://dev.dev-ops-study.duckdns.org/   # 301 https://dev.dev-ops-study.duckdns.org/
-curl -vk https://dev.dev-ops-study.duckdns.org/ -o /dev/null 2>&1 | grep -E 'subject:|issuer:|expire date:'   # staging이면 issuer에 (STAGING)
+curl -vk https://dev.dev-ops-study.duckdns.org/ -o /dev/null 2>&1 | grep -E 'subject:|issuer:|expire date:'   # dev는 staging이라 issuer에 (STAGING)
+curl -v https://dev-ops-study.duckdns.org/ -o /dev/null 2>&1 | grep -E 'subject:|issuer:|expire date:'       # prod는 -k 없이 성공하고 issuer에 (STAGING)이 없다
 ```
 
 - `curl -I`(HEAD)는 GET이 아니라서 301이 아니라 308이 나온다(Traefik이 GET만 301로 돌려보낸다).
@@ -613,7 +621,7 @@ Grafana·Prometheus·Alertmanager·ArgoCD·Argo Rollouts 대시보드에는 Ingr
 - 인증서 만료·발급 실패 경보 규칙(`certmanager_certificate_ready_status`, `certmanager_certificate_expiration_timestamp_seconds`). 지표는 수집하고 있다.
 - HSTS(브라우저에게 앞으로 https로만 오라고 알리는 헤더). staging 인증서인 동안 붙이면 브라우저가 경고를 넘어가는 길까지 막아서 두지 않았다. prod 발급자로 바꾼 뒤에 다시 본다.
 - 앱 저장소의 부하 테스트(`loadtest/`)는 `BASE_URL`을 https 주소로 바꿔야 한다. http로 두면 리다이렉트 검사(`redirects: 0`)가 앱의 302 대신 Traefik의 301을 받는다.
-  staging 인증서인 동안에는 k6에 `--insecure-skip-tls-verify`가 필요하다.
+  dev는 staging 인증서라 k6에 `--insecure-skip-tls-verify`가 필요하다(prod는 필요 없다).
 
 ### 로컬에서 확인하기
 

@@ -19,7 +19,8 @@ apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
   # staging: 신뢰되지 않는 가짜 루트("(STAGING) ..." 이름의 CA)로 서명한 인증서를 준다. 브라우저와 curl은 경고를 내거나 연결을 거부한다(curl -k로 본다).
-  # 대신 발급 한도가 production보다 훨씬 크다. 발급 흐름(검증, Secret 생성, Traefik이 인증서를 고르는 것)을 이것으로 먼저 확인한 뒤 prod로 바꾼다(README의 HTTPS 절).
+  # 대신 발급 한도가 production보다 훨씬 크다. 발급 흐름(검증, Secret 생성, Traefik이 인증서를 고르는 것)을 이것으로 먼저 확인한 뒤 prod 환경만 letsencrypt-prod로 바꿨다.
+  # dev 환경은 이것을 그대로 쓴다(이유는 environments/dev/values.yaml의 ingress 주석, README의 HTTPS 절).
   name: letsencrypt-staging
   annotations:
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
