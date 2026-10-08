@@ -29,7 +29,7 @@ flowchart LR
 
 - **들어오는 길은 셋이다.** 80·443(누구나), 6443(k3s API, 내 IP 하나만), 그리고 SSM(Run Command와 Session Manager). SSM은 인스턴스의 SSM 에이전트가 밖으로 먼저 연결을 걸어 두는 방식이라 인바운드 포트가 필요 없다. 22번(SSH)은 열지 않고 키 페어도 없다.
 - **나가는 길은 IGW 하나다.** NAT Gateway가 없어서 인스턴스가 공인 IPv4를 직접 받는다(공개 서브넷). 공인 IP는 Elastic IP가 아니라 자동 할당이라 인스턴스를 멈췄다 시작하면 바뀌고, DuckDNS 업데이터가 이름을 새 IP로 갱신한다.
-- **ArgoCD UI는 공개 주소가 없다.** 지금은 HTTPS가 없어서 공개하면 admin 비밀번호가 평문으로 인터넷을 지난다. `kubectl port-forward`로만 접속한다([접속하기](#접속하기)). HTTPS(cert-manager)가 붙은 뒤에 공개 Ingress를 다시 만든다.
+- **ArgoCD UI는 공개 주소가 없다.** 앱에는 HTTPS를 붙였지만 관리 UI는 그대로 공개하지 않는다: HTTPS는 내용을 숨길 뿐 누가 들어오는지는 막지 않는다(저장소 README의 HTTPS 절). `kubectl port-forward`로만 접속한다([접속하기](#접속하기)).
 
 ## 파일별로 만드는 것
 
@@ -134,7 +134,10 @@ infra/aws/down.sh
 
 **`down.sh`가 하는 일**: 같은 사전 점검, `init`, `plan -destroy` 요약, 확인, 저장한 계획으로 destroy(`terraform destroy`와 결과가 같고, 화면에서 확인한 것과 지워지는 것이 같다), 남은 인스턴스·볼륨 조회, `up.sh`가 만든 kubeconfig 삭제, 걸린 시간.
 `infra/bootstrap`은 건드리지 않는다. 남는 것: 상태 버킷, 예산 알림, GitHub OIDC 역할, SSM 파라미터, DuckDNS 서브도메인.
-**Let's Encrypt 한도**: 같은 이름 조합의 인증서는 주당 5번까지만 중복 발급된다. 지우고 다시 만들기를 연습할 때는 staging 발급자를 쓴다.
+**Let's Encrypt 한도**: 같은 이름 조합의 인증서는 production에서 7일에 5장까지만 새로 발급된다. prod는 `letsencrypt-prod`를 쓰므로 `down.sh` → `up.sh` 한 번마다 prod 몫 5장 중 1장을 쓴다
+(갱신도 1장으로 센다). 한 주에 다시 만들기를 4번 넘게 하지 않는다. dev는 `letsencrypt-staging`이라 이 한도에 걸리지 않는다.
+그보다 자주 다시 만들며 연습할 때는 prod를 잠시 staging으로 돌린다: 먼저 `environments/prod/values.yaml`의 `ingress.hsts.enabled`를 `false`로 바꾸고(staging 인증서에 HSTS가 걸리면 브라우저가 prod를 열지 못한다),
+그다음 `ingress.tls.clusterIssuer`를 `letsencrypt-staging`으로 바꾼다. 연습이 끝나면 반대 순서로 되돌린다(저장소 README의 HTTPS 절).
 
 스크립트가 출력하지 않는 것: 관리자 IP(`현재 IP/32`라고만 쓴다. `TF_VAR_admin_cidr` 환경 변수로만 Terraform에 넘긴다), plan 본문, kubeconfig, SSM 파라미터 값.
 
@@ -246,7 +249,7 @@ aws ssm send-command --region ap-northeast-2 --instance-ids "$INSTANCE_ID" \
 
 ## 접속하기
 
-`infra/aws`에서 아래 출력을 보고, 출력된 명령을 그대로 붙여 넣는다. 차례대로 앱 주소(지금은 평문 HTTP), kubeconfig를 받는 명령, ArgoCD UI 접속 명령, 인스턴스 셸을 여는 명령(Session Manager 플러그인 필요)이다.
+`infra/aws`에서 아래 출력을 보고, 출력된 명령을 그대로 붙여 넣는다. 차례대로 앱 주소(http 주소지만 열면 Traefik이 https로 돌려보낸다), kubeconfig를 받는 명령, ArgoCD UI 접속 명령, 인스턴스 셸을 여는 명령(Session Manager 플러그인 필요)이다.
 
 ```bash
 terraform output urls
@@ -398,7 +401,9 @@ terraform destroy \
 - **k3s API(6443)는 내 IP 하나(`admin_cidr`, `/32`)에만 열린다.** 변수 검증이 `/32`가 아닌 값(특히 `0.0.0.0/0`)을 막는다. 공인 IP가 바뀌면 `admin_cidr`를 새 값으로 `apply`한다(보안 그룹 규칙만 바뀌고 인스턴스는 그대로다).
 - **kubeconfig는 cluster-admin이다.** 받은 파일이 새면 `admin_cidr` 안의 누구나 클러스터를 지배한다. 나만 읽게 두고, 저장소에 올리지 않고, 실습이 끝나면 지운다(`destroy`하면 그 자격 증명이 가리키던 클러스터도 사라진다). 같은 내용이 SSM 명령 기록에 약 30일 남는다는 점도 기억한다([접속하기](#접속하기)).
 - **ArgoCD UI는 인터넷에 공개하지 않는다.** 위 [접속하기](#접속하기)의 port-forward만 쓴다.
-- **80·443은 전 세계에 열려 있다.** 지금은 평문 HTTP라서 앱에 실제 개인 정보나 중요한 비밀번호를 넣지 않는다. k3s의 Traefik은 443에서도 이미 듣는다. 신뢰할 수 있는 인증서를 붙이기 전인 지금은 Traefik이 만든 자체 서명 기본 인증서로 응답하므로 `https://`로 열면 브라우저가 경고를 띄운다. HTTPS(cert-manager + Let's Encrypt)는 나중에 붙인다.
+- **80·443은 전 세계에 열려 있다.** 앱은 HTTPS다: cert-manager가 Let's Encrypt에서 받은 인증서로 Traefik이 443에서 응답하고, 80으로 온 요청은 https로 돌려보낸다(저장소 README의 HTTPS 절).
+  prod는 브라우저가 믿는 인증서(`letsencrypt-prod`)와 HSTS를 쓰고, dev는 시험용 인증서(`letsencrypt-staging`)라 브라우저가 경고를 띄운다(curl에는 `-k`).
+  인증서가 처음 나오기 전(새로 만든 직후 몇 분)에는 Traefik의 자체 서명 기본 인증서로 응답한다. HTTPS는 내용을 숨길 뿐 누가 들어오는지는 막지 않으므로, 앱에는 여전히 실제 개인 정보나 중요한 비밀번호를 넣지 않는다.
 - **CI는 읽기 전용 역할로만 AWS에 들어온다.** PR의 `terraform plan`은 GitHub OIDC로 역할 `dev-ops-study-github-plan`을 잠깐 맡는다. 저장소에 AWS 키는 없고, 그 역할은 쓰기와 이 프로젝트의 비밀 읽기가 막혀 있다([GitHub Actions에서 plan (OIDC)](#github-actions에서-plan-oidc)).
 - **IMDSv2 필수, 홉 제한 1.** 파드 안에서는 인스턴스 메타데이터에 닿지 못해서, 파드가 침해되어도 인스턴스 역할을 가져갈 수 없다(호스트 네트워크를 쓰는 `hostNetwork: true` 파드는 예외이므로 띄우지 않는다).
 - **인스턴스 역할은 파라미터 둘(DuckDNS 토큰, Discord 웹훅 URL)만 읽는다.** SSM 에이전트용 관리형 정책 `AmazonSSMManagedInstanceCore`는 `ssm:GetParameter`·`ssm:GetParameters`를 모든 파라미터(`Resource "*"`)에 허용하고, `aws/ssm` 키의 키 정책은 같은 계정의 모든 주체에게 SSM을 거친 복호화를 허용한다. 그대로 두면 이 역할이 계정의 다른 파라미터와 SecureString까지 읽는다.
