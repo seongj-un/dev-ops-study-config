@@ -222,7 +222,7 @@ check_argo() {
   ARGO_LAST=$out
   total=$(grep -c . <<<"$out" || true)
   bad=$(awk 'NF && !($2 == "Synced" && $3 == "Healthy")' <<<"$out" | wc -l | tr -d ' ')
-  WAIT_MSG="Application $total개(예상 ${EXPECTED_APPS}개 이상) 중 준비 안 된 것 ${bad}개"
+  WAIT_MSG="Application ${total}개(예상 ${EXPECTED_APPS}개 이상) 중 준비 안 된 것 ${bad}개"
   [ "$total" -ge "${EXPECTED_APPS:-1}" ] && [ "$bad" = 0 ]
 }
 phase_start=$SECONDS
