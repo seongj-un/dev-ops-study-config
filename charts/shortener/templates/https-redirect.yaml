@@ -5,7 +5,8 @@ HTTP→HTTPS 리다이렉트(Traefik의 Middleware, traefik.io/v1alpha1). Ingres
   permanent: true이면 GET은 301, 그 밖의 메서드는 308이다(Traefik v3.7.8의 pkg/middlewares/redirect/redirect.go). 308은 메서드와 본문을 그대로 다시 보내라는 뜻이라
   http로 보낸 POST /api/v1/urls도 https로 같은 POST가 된다(301·302는 클라이언트가 GET으로 바꿀 수 있다).
   영구 리다이렉트라 브라우저가 301을 기억한다. 이 주소를 다시 평문 HTTP로만 쓰게 될 일은 없다고 보고 받아들인다.
-  HSTS(브라우저에게 이 호스트는 앞으로 https로만 오라고 알리는 헤더)는 붙이지 않는다. staging 인증서인 동안 붙이면 브라우저가 경고를 넘어가는 길까지 막는다.
+  HSTS(브라우저에게 이 호스트는 앞으로 https로만 오라고 알리는 헤더)는 이 미들웨어가 아니라 hsts.yaml이 따로 붙이고, 브라우저가 믿는 인증서를 쓰는 prod에서만 켠다.
+  staging 인증서(dev)에 붙이면 브라우저가 경고를 넘어가는 길까지 막는다.
 
 [어디에 걸리나] k3s의 Traefik은 Ingress 하나로 라우터를 entrypoint마다 만든다: web(80)과 websecure(443. 이 entrypoint에 TLS가 켜져 있어 그 라우터는 TLS로 받는다).
   미들웨어는 두 라우터에 모두 붙는다. https로 온 요청은 바꿀 URL이 지금 URL과 같아서 리다이렉트하지 않고 그대로 앱으로 넘긴다(같은 redirect.go). 그래서 80만 돌려보낸다.

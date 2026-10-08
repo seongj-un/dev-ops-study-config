@@ -538,7 +538,8 @@ prod는 `letsencrypt-prod`, dev는 `letsencrypt-staging`이다. 두 환경 모�
 - production의 "같은 이름 묶음 7일 5장"은 이름 묶음마다 따로 센다(아래 발급 한도). dev가 production을 쓰면 dev 이름도 제 몫 5장에 묶여, 다시 만들기를 자주 하는 주에는 dev 발급이 막힌다.
   staging은 같은 한도가 7일 3만 장이라 막히지 않는다.
 
-발급자를 바꾸는 것은 환경마다 한 줄짜리 PR이다. prod를 staging으로 되돌릴 때(발급 흐름을 바꾸는 시험 등)도 같은 한 줄이다:
+발급자를 바꾸는 것은 환경마다 한 줄짜리 PR이다. prod를 staging으로 되돌릴 때(발급 흐름을 바꾸는 시험 등)도 같은 한 줄이지만, 그 전에 prod의 HSTS를 끈다(아래 "HSTS").
+`validate`가 HSTS를 켠 환경의 발급자가 `letsencrypt-prod`인지 확인한다:
 
 ```bash
 git switch main && git pull
@@ -553,6 +554,27 @@ gh pr create --fill
 머지되면 ArgoCD가 Ingress의 어노테이션을 바꾸고, ingress-shim이 Certificate의 발급자를 바꾼다. cert-manager는 Secret에 적힌 발급자(어노테이션 `cert-manager.io/issuer-name`)와 Certificate의 발급자가 다른 것을 보고
 새 발급자에게서 다시 받아 같은 Secret을 고친다. Traefik은 Secret이 바뀌면 다시 읽으므로 재시작할 것이 없다. 되돌릴 때도 같은 한 줄을 staging으로 바꾼다.
 `validate`가 이 값이 `platform/cert-issuers`에 있는 ClusterIssuer의 이름인지 확인한다(오타면 Certificate가 발급자를 찾지 못해 인증서가 영영 나오지 않는다).
+
+### HSTS (prod만)
+
+prod의 응답에는 `Strict-Transport-Security: max-age=86400` 헤더가 붙는다. 앱 차트의 `ingress.hsts`(`enabled`, `maxAgeSeconds`)가 Traefik의 headers Middleware(`templates/hsts.yaml`)를 만들고,
+Ingress의 `router.middlewares`에 리다이렉트 다음으로 이어 붙인다(`<리다이렉트>,<HSTS>`). 리다이렉트와 같은 조건(TLS가 켜져 있고 클러스터가 Traefik의 Middleware kind를 안다)일 때만 만든다.
+
+- **하는 일**: 이 헤더를 받은 브라우저는 max-age 동안 이 호스트를 https로만 연다(http 주소도 요청을 보내기 전에 https로 바꾼다). 리다이렉트만 있으면 첫 요청이 평문으로 한 번 나간다.
+  그리고 인증서 오류가 나면 경고를 넘어가는 길을 주지 않는다.
+- **HTTPS로만 통한다**: 브라우저는 평문 HTTP 응답의 이 헤더를 무시하고(RFC 6797 8.1), Traefik도 TLS로 받은 요청의 응답에만 붙인다. 80에서는 리다이렉트가 먼저 돌려보낸다.
+- **prod만**: dev는 staging 인증서라서 HSTS를 걸면 브라우저가 경고를 넘어가지 못해 dev를 열 수 없다.
+- **includeSubDomains·preload는 끈다**: dev 호스트(`dev.dev-ops-study.duckdns.org`)가 prod 호스트의 하위 도메인이라, includeSubDomains를 켜면 prod를 연 브라우저가 dev까지 막는다.
+  preload(브라우저에 미리 넣는 목록)는 includeSubDomains와 1년 이상의 max-age가 필요하고, 한 번 오르면 빠지는 데 몇 달이 걸린다.
+- **1일에서 시작해 올린다**: max-age는 브라우저가 마지막으로 받은 값을 기억하는 기간이다. prod 인증서를 브라우저가 믿지 못하게 되면(destroy → apply 직후 첫 발급 전의 Traefik 기본 인증서,
+  발급 한도, 발급자를 staging으로 되돌림) 헤더를 기억한 브라우저는 그 기간 동안 prod를 열지 못한다(그동안은 `curl -k`로 본다). 문제없이 지나면
+  `environments/prod/values.yaml`의 `maxAgeSeconds`를 1주(604800) → 1달(2592000) → 1년(31536000)으로 올린다. 내리거나 끌 때도 브라우저가 새 헤더를 https로 받기 전까지는 예전 값이 남는다.
+
+```bash
+curl -sI https://dev-ops-study.duckdns.org/ | grep -i strict-transport-security      # strict-transport-security: max-age=86400
+curl -sI http://dev-ops-study.duckdns.org/  | grep -i strict-transport-security      # 없다(평문 응답에는 붙지 않는다. 308 리다이렉트만)
+curl -skI https://dev.dev-ops-study.duckdns.org/ | grep -i strict-transport-security # 없다(dev는 끔)
+```
 
 ### 발급 한도 (Let's Encrypt production)
 
@@ -610,7 +632,7 @@ Grafana·Prometheus·Alertmanager·ArgoCD·Argo Rollouts 대시보드에는 Ingr
 - **첫 동기화의 순서**: cert-manager의 ServiceMonitor는 kube-prometheus-stack의 CRD를, `cert-issuers`의 ClusterIssuer는 cert-manager의 CRD와 웹훅을 기다린다. 웨이브는 한 Application 안의 순서라
   두 경우 모두 Argo Rollouts와 같은 방법을 쓴다: 그 리소스에만 `SkipDryRunOnMissingResource=true`를 붙여 동기화 전 검증을 건너뛰고, Application의 `retry`(6번, 합쳐 약 8분)가 다시 시도한다.
   ClusterIssuer는 CRD가 있어도 웹훅 파드가 뜨고 cainjector가 CA를 넣기 전에는 웹훅 호출이 실패해 거부되는데, 이것도 같은 다시 시도로 풀린다.
-- **리다이렉트 Middleware는 sync-wave -1**이다. 없는 미들웨어를 가리키는 Ingress는 Traefik이 라우터를 버려 404가 되므로, 처음 켜는 동기화에서 Middleware를 Ingress보다 먼저 만든다.
+- **리다이렉트·HSTS Middleware는 sync-wave -1**이다. 없는 미들웨어를 가리키는 Ingress는 Traefik이 라우터를 버려 404가 되므로, 처음 켜는 동기화에서 Middleware를 Ingress보다 먼저 만든다.
 - **Traefik**은 k3s v1.35.8+k3s1이 노드가 뜰 때 설치하는 차트 `traefik-40.1.4+up40.1.0`(Traefik v3.7.8, k3s 저장소의 `manifests/traefik.yaml`)을 그대로 쓴다. 이 저장소가 기대는 그 차트의 기본값은 셋이다:
   websecure(443) entrypoint에 TLS가 켜져 있다(그래서 Ingress의 라우터가 443에서 TLS로 받는다), kubernetesCRD 공급자가 켜져 있고 `crossProviderNamespaces`가 없다(Ingress가 Middleware를 가리킬 수 있다),
   인증서 resolver가 없다(Traefik 자신의 ACME 라우터가 `/.well-known/acme-challenge/`를 가로채지 않는다). k3s를 올릴 때 셋이 그대로인지 본다.
@@ -619,7 +641,6 @@ Grafana·Prometheus·Alertmanager·ArgoCD·Argo Rollouts 대시보드에는 Ingr
 ### 아직 하지 않은 것
 
 - 인증서 만료·발급 실패 경보 규칙(`certmanager_certificate_ready_status`, `certmanager_certificate_expiration_timestamp_seconds`). 지표는 수집하고 있다.
-- HSTS(브라우저에게 앞으로 https로만 오라고 알리는 헤더). staging 인증서인 동안 붙이면 브라우저가 경고를 넘어가는 길까지 막아서 두지 않았다. prod 발급자로 바꾼 뒤에 다시 본다.
 - 앱 저장소의 부하 테스트(`loadtest/`)는 `BASE_URL`을 https 주소로 바꿔야 한다. http로 두면 리다이렉트 검사(`redirects: 0`)가 앱의 302 대신 Traefik의 301을 받는다.
   dev는 staging 인증서라 k6에 `--insecure-skip-tls-verify`가 필요하다(prod는 필요 없다).
 
@@ -630,7 +651,7 @@ CI 단계의 스크립트를 그대로 꺼내 돌린다. 위 "로컬에서 검�
 ```bash
 export KUBERNETES_VERSION KUBECONFORM_IMAGE K8S_SCHEMA_LOCATION CRD_SCHEMA_LOCATION
 export RUNNER_TEMP=$(mktemp -d) GITHUB_WORKSPACE=$PWD
-for step in "렌더링 + 쿠버네티스 스키마 검사 (dev, prod × Rollout, Deployment)" "앱 Ingress HTTPS 확인 (TLS, 리다이렉트, 발급자 이름)" \
+for step in "렌더링 + 쿠버네티스 스키마 검사 (dev, prod × Rollout, Deployment)" "앱 Ingress HTTPS 확인 (TLS, 리다이렉트, HSTS, 발급자 이름)" \
             "인증서 발급자 검사 (platform/cert-issuers)"; do
   bash -e -c "$(yq ".jobs.validate.steps[] | select(.name == \"$step\") | .run" .github/workflows/validate.yml)" || break
 done

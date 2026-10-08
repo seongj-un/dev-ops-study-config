@@ -8,7 +8,7 @@
 # dev와 prod(environments/prod/values.yaml)의 차이
 #   - 이미지 태그를 올리는 방법: dev는 앱 저장소의 CI가 main에 머지될 때마다 자동으로 바꾼다(아래 image.tag). prod는 사람이 PR로 바꾼다(승격).
 #   - 호스트 이름과 공개 주소: dev는 dev.dev-ops-study.duckdns.org, prod는 dev-ops-study.duckdns.org
-#   - 인증서 발급자: dev는 letsencrypt-staging(시험용 인증서), prod는 letsencrypt-prod(브라우저가 믿는 인증서)다(아래 ingress.tls).
+#   - 인증서 발급자: dev는 letsencrypt-staging(시험용 인증서), prod는 letsencrypt-prod(브라우저가 믿는 인증서)다(아래 ingress.tls). HSTS는 prod만 켠다.
 #   - 파드 수: dev는 2개 고정(HPA 없음), prod는 HPA가 2~3개로 조절한다. 앱 메모리는 같다(요청 384Mi·한도 512Mi, 차트 기본값과 같은 값).
 #     두 환경이 한 노드의 메모리를 나눠 쓰는 예산 계산은 environments/prod/values.yaml의 autoscaling 위 주석에 있다.
 #
@@ -36,7 +36,8 @@ ingress:
   #   - destroy → apply로 클러스터를 새로 만들 때마다 인증서를 다시 받는다(Secret과 ACME 계정 키가 함께 사라진다).
   #   - production의 "같은 이름 묶음 7일 5장"은 이름 묶음마다 따로 센다. dev가 production을 쓰면 dev 이름도 제 몫 5장에 묶여, 다시 만들기를 자주 하는 주에는 dev 발급이 막힌다.
   #     staging은 같은 한도가 7일 3만 장이라 막히지 않는다.
-  # 바꾸면 cert-manager가 발급자가 달라진 것을 보고 인증서를 다시 받는다.
+  # 바꾸면 cert-manager가 발급자가 달라진 것을 보고 인증서를 다시 받는다. staging 인증서라서 HSTS(ingress.hsts, 차트 기본값 꺼짐)도 켜지 않는다:
+  # 켜면 브라우저가 인증서 경고를 넘어가는 길을 막아 dev를 열 수 없다(차트 templates/hsts.yaml).
   tls:
     enabled: true
     clusterIssuer: letsencrypt-staging

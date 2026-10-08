@@ -28,6 +28,13 @@ ingress:
   tls:
     enabled: true
     clusterIssuer: letsencrypt-prod
+  # HSTS: 브라우저가 이 호스트를 max-age 동안 https로만 열게 하는 응답 헤더(차트 templates/hsts.yaml). 브라우저가 믿는 인증서(letsencrypt-prod)를 쓰는 prod만 켠다.
+  # max-age는 1일(86400)로 시작한다. 인증서를 믿지 못하게 되면(destroy → apply 직후 첫 발급 전, 발급 한도) 헤더를 기억한 브라우저가 그 기간 동안 prod를 열지 못하기 때문이다.
+  # 문제없이 지나면 1주(604800) → 1달(2592000) → 1년(31536000)으로 이 값을 올린다. includeSubDomains는 켜지 않는다: dev 호스트가 이 호스트의 하위 도메인이라 dev(staging 인증서)까지 막힌다.
+  # 발급자를 staging으로 되돌릴 때는 이것을 먼저 끈다(validate가 letsencrypt-prod가 아닌 발급자와 HSTS를 함께 켠 값을 거부한다).
+  hsts:
+    enabled: true
+    maxAgeSeconds: 86400
 # HPA를 켠다(파드 2~3개). autoscaling.enabled가 true이면 차트가 HPA를 만들고 워크로드(Rollout, Argo Rollouts가 없으면 Deployment)에는 replicas를 적지 않으므로 파드 수는 HPA가 정한다.
 # 그래서 replicaCount는 이 파일에 적지 않는다(쓰이지 않는다). 최소 2개는 파드 하나가 죽어도(5단계 장애 훈련) 다른 파드가 요청을 받고,
 # 카나리(setWeight 50)가 파드를 더 띄워 두지 않고도 카나리 1개·stable 1개로 나뉘게 하려는 것이다.
