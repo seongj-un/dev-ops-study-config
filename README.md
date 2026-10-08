@@ -314,7 +314,7 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 | 경보 | 가는 곳 |
 |---|---|
 | `Watchdog`(경보 파이프라인이 살아 있음을 보이려고 늘 울리는 경보), `InfoInhibitor`(info 경보를 누르는 데만 쓰는 경보. 같은 네임스페이스에 info 경보가 있고 warning·critical 경보는 울리지 않을 때만 울린다) | 보내지 않는다(`null`) |
-| `service="shortener"` (앱의 SLO 경보와 앱 파드 경보) | Discord |
+| `service="shortener"` (앱의 SLO 경보, 앱 파드 경보, 쓰기 경로 경보. 쓰기 경로 경보는 warning이지만 이 경로라 간다) | Discord |
 | `severity="critical"` (그 밖의 critical 경보. 인증서 경보 `CertificateExpiringSoon`·`CertificateNotReady`도 여기로 간다. 아래 "HTTPS"의 인증서 경보) | Discord |
 | 나머지(warning·info) | 보내지 않는다. Alertmanager UI에서 본다 |
 
@@ -326,7 +326,7 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 ### SLO 경보가 울리지 않는 장애
 
 앱의 SLO 경보(가용성·지연 번 레이트, `charts/shortener/templates/prometheusrule.yaml`)는 짧거나 일부만 실패하는 장애에는 일부러 울리지 않는다.
-그리고 요청이 앱까지 오지 않는 장애는 길어도 보지 못한다. 두 번째 빈자리는 앱 파드 경보가 맡는다.
+그리고 요청이 앱까지 오지 않는 장애는 길어도 보지 못한다. 두 번째 빈자리는 앱 파드 경보가, 첫 번째 가운데 생성(쓰기)만 망가진 장애는 쓰기 경로 경보가 맡는다.
 
 **짧은 장애·부분 장애는 페이지하지 않는다(예산 계산).** 가용성의 30일 오류 예산은 요청의 0.5%다. 요청이 고르게 온다면 "모든 요청이 실패하는 시간"으로
 30일 × 24시간 × 60분 × 0.5% = 216분이다. 빠른 소진 경보는 1시간 비율과 5분 비율이 모두 7.2%(예산의 14.4배)를 넘고 그것이 2분 이어져야 울린다.
@@ -357,12 +357,19 @@ available 0이 1분을 넘기 쉬운데, 그때마다 critical이 Discord로 가
 처음 배포한 뒤 Prometheus에서 `count by (exported_namespace, name) (rollout_info_replicas_available)`가 `shortener-dev`·`shortener-prod`를 하나씩 내는지 본다.
 경보는 이 레이블 이름(`exported_namespace`, `name`)으로 Rollout을 고르므로, 이름이 다르면 아무 경고 없이 영영 울리지 않는다.
 
+**생성만 실패하는 장애는 쓰기 경로 경보가 맡는다.** v5 연습(prod, DB 차단 약 5분 20초)에서 리다이렉트(GET)는 Redis 캐시로 계속 302를 돌려주고 생성(POST)만 모두 500이었다.
+전체 요청의 5xx는 약 12%라 5분 비율(최고 11.8%)은 7.2%를 넘었지만, 1시간 비율(2.9%)이 7.2%에, 30분 비율(최고 2.89%)이 3%에 못 미쳐 가용성 경보는 pending조차 되지 않았다.
+장애가 짧고 실패하지 않은 GET이 비율을 묽혀서 예산으로는 "아직 괜찮다"였지만, 그동안 단축 URL은 하나도 만들어지지 않았다.
+`ShortenerWritePathFailing`(같은 PrometheusRule의 `<릴리스>-write-path` 그룹)은 예산이 아니라 증상을 본다: `POST /api/v1/urls`의 5분 5xx 비율이 20%를 넘고
+그 요청이 초당 0.05건(5분에 15건)보다 많은 상태가 5분 이어지면 울린다. `severity="warning"`이지만 `service="shortener"`라 Discord로 간다. v5 모양이면 장애 6분째에 울린다(`tests/slo`의 (l)).
+최소 요청 수는 실패 한두 건으로 비율이 100%가 되는 것을 막는 대신, 그보다 드물게 오는 생성은 모두 실패해도 이 경보가 보지 못한다(`tests/slo`의 (n)).
+
 **아직 덮지 못하는 것.**
 - 앱 파드는 Ready인데 그 앞(Traefik, Ingress 설정, 노드의 네트워크)에서 실패하는 요청: 앱 지표에도 파드 수에도 보이지 않는다. 클러스터 밖에서 요청을 보내 보는 검사나
   Traefik의 지표로 재는 SLI가 있어야 잡힌다.
 - 노드가 통째로 멈추는 장애: Prometheus와 Alertmanager도 그 노드에 있어서 아무 경보도 나가지 않는다. Watchdog을 보내지 않으므로(위 표) "경보가 끊겼다"를 알려 줄 쪽도 없다.
 - 앱 파드 경보는 지표가 없으면 울리지 않는다. Argo Rollouts 컨트롤러가 내려가 있는 동안 앱도 내려가면 조용하다(수집 대상이 내려간 것은 기본 규칙 `TargetDown`이 알리지만 warning이다).
-- 위 표의 기준 아래인 부분 장애: 일부러 페이지하지 않는다.
+- 위 표의 기준 아래인 부분 장애: 일부러 페이지하지 않는다. 쓰기 경로 경보가 보는 것은 생성(`POST /api/v1/urls`) 하나뿐이다(일부 코드의 리다이렉트만 실패하는 것 등은 보지 않는다).
 - 노드가 부팅되고 5분 안의 전체 장애: 앱 파드 경보의 부팅 가드가 누른다. 5분이 지나도 앱 파드가 0개면 그때부터 1분 뒤에 울린다.
 
 ### 로그 (Loki, Alloy)
