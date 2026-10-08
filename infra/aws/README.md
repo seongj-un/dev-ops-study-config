@@ -43,6 +43,7 @@ flowchart LR
 | `security.tf` | 보안 그룹: 80·443은 전체, 6443은 `admin_cidr`만, 22 없음, 아웃바운드 전체 |
 | `iam.tf` | EC2용 역할, `AmazonSSMManagedInstanceCore` 연결, 인라인 정책(DuckDNS 토큰·Discord 웹훅 URL 읽기 허용, 다른 파라미터 읽기 거부, SSM을 거친 복호화), 인스턴스 프로파일 |
 | `ec2.tf` | Ubuntu 24.04 AMI 조회(Canonical의 SSM 공개 파라미터), 인스턴스 1대(IMDSv2 필수, gp3 30 GiB 암호화) |
+| `up.sh`, `down.sh`, `lib.sh` | 만들기·지우기를 명령 한 번으로 하는 스크립트(`lib.sh`는 둘이 함께 쓰는 함수). [실행 순서](#실행-순서-명령-한-번) |
 | `cloud-init.yaml.tftpl` | 인스턴스가 첫 부팅에 쓰는 파일과 `devops-bootstrap.service`. 이 서비스가 부팅마다 AWS CLI(서명 검사), DuckDNS 갱신, k3s, Helm, ArgoCD, 네임스페이스와 Secret(DB 비밀번호, 모니터링의 Grafana admin 비밀번호와 Discord 웹훅 URL), 루트 Application을 맞춘다 |
 | `test/` | 템플릿 렌더링 검사(`test/render.sh`, AWS에 접속하지 않는다. [오프라인 검증](#오프라인-검증)) |
 | `outputs.tf` | 인스턴스 ID, 공인 IP, 앱 주소, SSM 셸 명령, kubeconfig와 ArgoCD 접속 명령 |
@@ -104,10 +105,45 @@ Terraform이 만드는 리소스는 15개다: VPC, IGW, 서브넷, 라우트 테
    `aws/ssm` 키가 아직 없는 계정이어도 `plan`은 실패하지 않는다. `iam.tf`가 그 키를 별칭으로 조회(`DescribeKey`)할 때 KMS가 AWS 관리형 키를 만들기 때문이다.
 6. **로컬 도구**: Terraform 1.16.x, AWS CLI v2, kubectl. [Session Manager 플러그인](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)(`brew install --cask session-manager-plugin`)은 대화형 셸(`ssm_shell_command`)을 열 때만 필요하다. 이 문서의 확인·복구 명령은 `aws ssm send-command`(Run Command)를 써서 플러그인 없이 된다.
 
-## 실행 순서
+## 실행 순서: 명령 한 번
+
+만들기와 지우기는 스크립트 하나씩이다. 저장소 루트에서 실행한다(어느 폴더에서 불러도 된다).
+
+```bash
+infra/aws/up.sh
+infra/aws/down.sh
+```
+
+둘 다 `--yes`(확인 질문 생략)와 `--help`를 받는다. 다시 실행해도 안전하다: `up.sh`는 이미 있으면 "변경 없음"으로 보고 기다림 단계만 다시 확인하고, `down.sh`는 이미 비어 있으면 "지울 것이 없다"로 끝난다.
+`aws login`은 먼저 해 둔다(안 했으면 스크립트가 `aws login --region ap-northeast-2`를 알려 주고 멈춘다). 서브도메인과 상태 버킷은 환경 변수 `DUCKDNS_SUBDOMAIN`(기본 `dev-ops-study`), `STATE_BUCKET`(기본 이 계정의 버킷)으로 바꾼다.
+
+**`up.sh`가 하는 일과 단계마다 기다리는 것** (괄호는 기다림 제한. `T_RUNNING` 등 환경 변수로 바꾼다)
+
+| 단계 | 하는 일 / 기다리는 것 |
+|---|---|
+| 사전 점검 | `aws sts get-caller-identity` 성공, Terraform 1.16.x, 현재 공인 IP(`checkip.amazonaws.com`, IPv4 확인), SSM 파라미터 두 개의 존재(이름만. 없으면 경고) |
+| 멈춘 인스턴스 | 이 스택의 인스턴스가 `stopped`면 먼저 시작한다([멈춘 인스턴스](#멈춘-인스턴스)) |
+| terraform | `init`, `plan -out`, 요약(개수, 주소, 동작, 이유. 값은 없다)을 보이고 확인을 받은 뒤 저장한 계획을 `apply`. 교체·삭제가 있으면 `--yes`만으로는 멈춘다(`--allow-replace`를 더해야 한다) |
+| 인스턴스 `running` | EC2 상태가 `running`이 될 때까지(10분) |
+| SSM `Online` | SSM 에이전트가 등록될 때까지(10분. 보통 1~2분) |
+| 부트스트랩 완료 | SSM으로 완료 표시(`/var/lib/devops-bootstrap.done`)가 이번 부팅 뒤에 생겼는지, 서비스 상태, 마지막 `STEP:` 줄만 읽는다. `failed`면 바로 멈춘다(25분) |
+| DuckDNS | `<서브도메인>.duckdns.org`가 새 인스턴스 IP로 풀릴 때까지(10분) |
+| kubeconfig | SSM으로 받아 `~/.kube/dev-ops-study-aws.yaml`에 저장(`umask 077`, 서버 주소는 DuckDNS 이름, 내용은 출력하지 않는다) |
+| ArgoCD | Application이 전부(개수는 이 체크아웃의 `argocd/apps/*.yaml`과 `argocd/root.yaml` 중 `kind: Application`인 파일 수이고, 원격 `main`과 다르면 어긋날 수 있는 하한이다)  `Synced`/`Healthy`가 될 때까지(20분). 시간이 지나면 준비 안 된 것의 이름과 상태를 나열하고 0이 아닌 값으로 끝난다 |
+| 끝 | https 주소, 단계별 걸린 시간, 합계 |
+
+**`down.sh`가 하는 일**: 같은 사전 점검, `init`, `plan -destroy` 요약, 확인, 저장한 계획으로 destroy(`terraform destroy`와 결과가 같고, 화면에서 확인한 것과 지워지는 것이 같다), 남은 인스턴스·볼륨 조회, `up.sh`가 만든 kubeconfig 삭제, 걸린 시간.
+`infra/bootstrap`은 건드리지 않는다. 남는 것: 상태 버킷, 예산 알림, GitHub OIDC 역할, SSM 파라미터, DuckDNS 서브도메인.
+**Let's Encrypt 한도**: 같은 이름 조합의 인증서는 주당 5번까지만 중복 발급된다. 지우고 다시 만들기를 연습할 때는 staging 발급자를 쓴다.
+
+스크립트가 출력하지 않는 것: 관리자 IP(`현재 IP/32`라고만 쓴다. `TF_VAR_admin_cidr` 환경 변수로만 Terraform에 넘긴다), plan 본문, kubeconfig, SSM 파라미터 값.
+
+### 스크립트가 대신하는 수동 명령 (무엇을 하는지)
+
+스크립트가 안 될 때 한 단계씩 확인하려고 남겨 둔다. `infra/aws`에서 실행한다.
 
 1. 로그인하고 어느 계정인지 확인한다.
-2. `infra/aws`에서 초기화한다. 상태 버킷 이름은 `backend.tf`에 없어서(부분 구성) `init` 때 넘긴다. 이 계정의 버킷은 `dev-ops-study-tfstate-803879842357`이다.
+2. 초기화한다. 상태 버킷 이름은 `backend.tf`에 없어서(부분 구성) `init` 때 넘긴다.
 3. 계획을 만든다. 내 공인 IP를 `/32`로 넘긴다(k3s API 6443이 이 IP에만 열린다).
 4. 계획을 읽고(리소스 15개 추가가 나온다) 적용한다. 저장한 계획 파일을 적용하므로 `-var`를 다시 주지 않는다.
 
@@ -118,13 +154,30 @@ cd infra/aws
 terraform init -backend-config=bucket=dev-ops-study-tfstate-803879842357
 terraform plan -out=aws.tfplan \
   -var duckdns_subdomain=내서브도메인 \
-  -var admin_cidr="$(curl -s https://checkip.amazonaws.com)/32"
+  -var admin_cidr="$(curl -fsS https://checkip.amazonaws.com)/32"
 terraform apply aws.tfplan
 ```
 
 버킷 이름은 `terraform init "$(terraform -chdir=../bootstrap output -raw backend_config_arg)"`로도 넘길 수 있다. 다만 이 방법은 부트스트랩의 로컬 상태 파일(`infra/bootstrap/terraform.tfstate`)이 있는 체크아웃, 곧 부트스트랩을 `apply`한 메인 체크아웃에서만 된다. 워크트리나 새로 clone한 곳에는 그 파일이 없어서 출력이 없다는 오류가 난다. 그래서 위처럼 버킷 이름을 그대로 쓴다.
 
-`apply`는 인스턴스가 `running`이 되면 끝난다. **그 뒤에도 인스턴스 안에서 부트스트랩이 몇 분 동안 설치를 계속한다.** 아래 타임라인과 [진행 확인](#진행-확인)을 본다.
+`apply`는 인스턴스가 `running`이 되면 끝난다. **그 뒤에도 인스턴스 안에서 부트스트랩이 몇 분 동안 설치를 계속한다.** 스크립트의 나머지 단계가 그것을 기다린다. 손으로 할 때는 아래 타임라인과 [진행 확인](#진행-확인), [접속하기](#접속하기)(kubeconfig)를 본다.
+
+### 멈춘 인스턴스
+
+인스턴스를 콘솔이나 CLI로 멈춰 둔 채 `apply`하면 안 된다. 멈춘 인스턴스는 공인 IP가 없어서 state(옛 IP)와 실제가 어긋난 채로 계획이 만들어지고, 시작하면 IP가 또 바뀐다. 그래서 `up.sh`는 인스턴스가 `stopped`면 먼저 시작하고 `running`을 기다린 뒤 `plan`한다. 시작은 과금이 다시 시작된다는 뜻이다. 시작한 뒤 계획 확인에서 거절하면 인스턴스는 `running`으로 남아 계속 과금되니 직접 멈추거나 `down.sh`로 지운다.
+쓰지 않을 때는 멈추지 말고 `down.sh`로 지우는 것이 이 실습의 방식이다([비용](#비용)).
+
+### 왕복 점검표 (지우고 다시 만들기)
+
+처음 한 번, 또는 스크립트나 부트스트랩을 고쳤을 때 확인한다. 실측한 시간은 위 타임라인 표에 고쳐 적는다.
+
+- [ ] `up.sh`가 0으로 끝났고 단계별 시간과 https 주소가 나왔다
+- [ ] 앱이 열린다: prod와 dev 주소에서 단축 URL을 만들고 따라가 본다
+- [ ] `KUBECONFIG=~/.kube/dev-ops-study-aws.yaml kubectl get nodes`가 된다(안 되면 관리자 IP가 바뀌었는지 본다)
+- [ ] `up.sh`를 한 번 더 실행하면 "변경 없음"으로 기다림 단계만 통과한다(멱등)
+- [ ] `down.sh`가 0으로 끝났고 "살아 있는 인스턴스: 없음", "남은 EBS 볼륨: 없음"이 나왔다
+- [ ] `down.sh`를 한 번 더 실행하면 "지울 것이 없다"로 끝난다
+- [ ] 다시 `up.sh`를 실행하면 처음과 같은 상태로 올라온다(인증서 발급 횟수에 주의)
 
 ## 부팅 타임라인
 
@@ -320,6 +373,8 @@ kubectl -n monitoring get secret alertmanager-discord -o jsonpath='{.data.webhoo
 - S3 상태 파일, SSM Parameter Store(표준 파라미터), Session Manager, Run Command, DuckDNS는 사실상 무료다.
 
 ### 안 쓸 때는 destroy한다
+
+`infra/aws/down.sh`가 아래 명령과 남은 리소스 확인을 한꺼번에 한다. 손으로 할 때는 이렇게 한다.
 
 ```bash
 terraform destroy \
