@@ -46,11 +46,12 @@ argocd/apps/argo-rollouts.yaml      점진 배포 Application (Argo Rollouts: �
 platform/argo-rollouts/values.yaml  그 값 (컨트롤러·CRD·대시보드. 아래 "Argo Rollouts")
 argocd/apps/cert-manager.yaml       인증서 Application (cert-manager: 외부 차트 + 이 저장소의 값, multi-source)
 platform/cert-manager/values.yaml   그 값 (컨트롤러·웹훅·cainjector·CRD. 아래 "HTTPS")
-argocd/apps/cert-issuers.yaml       인증서 발급자 Application (이 저장소의 디렉터리를 그대로 적용)
-platform/cert-issuers/              Let's Encrypt ClusterIssuer 두 개(letsencrypt-staging, letsencrypt-prod)
+argocd/apps/cert-issuers.yaml       인증서 발급자·경보 Application (이 저장소의 디렉터리를 그대로 적용)
+platform/cert-issuers/              Let's Encrypt ClusterIssuer 두 개(letsencrypt-staging, letsencrypt-prod)와 인증서 경보(PrometheusRule)
 tests/slo/                       앱 SLO 규칙(차트의 PrometheusRule)의 promtool 단위 테스트. validate가 차트를 렌더링해 꺼낸 규칙으로 돌린다
 tests/canary/                    카나리 분석 쿼리(차트의 AnalysisTemplate)의 promtool 단위 테스트. validate가 렌더링 결과에서 쿼리를 꺼내 돌린다
-.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링(Rollout·Deployment 두 갈래), 스키마 검사, Ingress HTTPS 확인, SLO 규칙·카나리 분석 쿼리 검사, 플랫폼 차트 렌더링, 인증서 발급자·대시보드 검사)
+tests/certificates/              인증서 경보(platform/cert-issuers의 PrometheusRule)의 promtool 단위 테스트
+.github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링(Rollout·Deployment 두 갈래), 스키마 검사, Ingress HTTPS 확인, SLO 규칙·카나리 분석 쿼리 검사, 플랫폼 차트 렌더링, 인증서 발급자·경보·대시보드 검사)
 infra/aws/up.sh, down.sh           명령 한 번으로 EC2/k3s 환경을 만들고(up.sh) 지운다(down.sh). 사용법은 infra/aws/README.md
 .github/workflows/terraform-plan.yml  infra/aws를 바꾸는 PR의 terraform plan 요약 (GitHub OIDC로 읽기 전용 역할을 맡는다. 필수 검사 아님. infra/aws/README.md)
 .github/dependabot.yml           GitHub Actions 주간 갱신
@@ -314,7 +315,7 @@ Grafana는 자기 DB를 PVC 없이 emptyDir에 둔다. 대시보드는 Git(레�
 |---|---|
 | `Watchdog`(경보 파이프라인이 살아 있음을 보이려고 늘 울리는 경보), `InfoInhibitor`(info 경보를 누르는 데만 쓰는 경보. 같은 네임스페이스에 info 경보가 있고 warning·critical 경보는 울리지 않을 때만 울린다) | 보내지 않는다(`null`) |
 | `service="shortener"` (앱의 SLO 경보와 앱 파드 경보) | Discord |
-| `severity="critical"` (그 밖의 critical 경보) | Discord |
+| `severity="critical"` (그 밖의 critical 경보. 인증서 경보 `CertificateExpiringSoon`·`CertificateNotReady`도 여기로 간다. 아래 "HTTPS"의 인증서 경보) | Discord |
 | 나머지(warning·info) | 보내지 않는다. Alertmanager UI에서 본다 |
 
 - 같은 `alertname`·`namespace`의 경보를 한 알림으로 묶는다. 첫 알림은 30초 모았다 보내고, 묶음이 바뀌면 5분 간격으로, 그대로 울리면 4시간마다 다시 보낸다. 풀리면(RESOLVED)도 알린다.
@@ -609,8 +610,24 @@ curl -v https://dev-ops-study.duckdns.org/ -o /dev/null 2>&1 | grep -E 'subject:
 
 - `curl -I`(HEAD)는 GET이 아니라서 301이 아니라 308이 나온다(Traefik이 GET만 301로 돌려보낸다).
 - Prometheus(위 "열어 보기")에서 `certmanager_certificate_ready_status{condition="True"}`가 1인지, `(certmanager_certificate_expiration_timestamp_seconds - time()) / 86400`이 남은 날 수인지 본다.
-  ServiceMonitor는 값 파일이 켠다(job `cert-manager`, `webhook`, `cainjector`). 만료·발급 실패 경보 규칙은 아직 없다(아래 "아직 하지 않은 것").
+  ServiceMonitor는 값 파일이 켠다(job `cert-manager`, `webhook`, `cainjector`). 인증서의 네임스페이스는 `exported_namespace` 레이블에 있다(아래 "인증서 경보").
 - ArgoCD UI에서는 Certificate·CertificateRequest·Order·Challenge와 검증용 파드·Ingress가 앱 Ingress 아래에 자식으로 보인다(소유자 참조). ArgoCD가 만든 것이 아니라 prune하지 않는다.
+
+### 인증서 경보
+
+`platform/cert-issuers/certificate-alerts.yaml`(PrometheusRule, `cert-manager` 네임스페이스)을 `cert-issuers` Application이 ClusterIssuer와 함께 적용한다. 둘 다 `severity="critical"`이라 Discord로 간다.
+
+| 경보 | 조건 | 무엇을 뜻하나 |
+|---|---|---|
+| `CertificateExpiringSoon` | 남은 기간이 14일보다 짧은 것이 15분 이어진다 | cert-manager는 만료 30일 전(수명의 2/3)에 갱신하므로 갱신이 16일째 실패하고 있다. 갱신이 실패해도 인증서가 아직 유효하면 Ready는 True라서 이 경보만 보인다 |
+| `CertificateNotReady` | Ready가 True가 아닌(False, 또는 조건이 아직 없는 Unknown) 것이 15분 이어진다 | 첫 발급이나 다시 받기(만료, 발급자 변경)가 끝나지 않는다. 평소의 발급은 1~2분이다 |
+
+- 지표는 cert-manager 컨트롤러의 `certmanager_certificate_expiration_timestamp_seconds`(받기 전에는 0이라 `> 0`으로 뺀다)와 `certmanager_certificate_ready_status`(condition이 True·False·Unknown인 계열 중 지금 상태만 1)다.
+  인증서마다 계열이 있어서 dev의 staging 인증서도 같은 기준으로 본다.
+- cert-manager의 ServiceMonitor는 honorLabels가 false라 인증서의 네임스페이스가 `exported_namespace`로 저장된다. 식이 `label_replace`로 그 값을 `namespace`에 되돌리고
+  `max by (namespace, name, issuer_name)`로 묶어서, 경보는 환경(`shortener-dev`·`shortener-prod`)마다 따로 묶이고 컨트롤러 파드가 바뀌어도 이어진다.
+- `for: 15m`은 몇 분이면 끝나는 평소의 발급·갱신(새 클러스터의 첫 발급, 발급자 변경, 오래 멈췄다 켠 뒤 지난 갱신)으로 울리지 않게 하려는 것이다.
+- 시나리오별 기대는 `tests/certificates/certificate-alerts.test.yaml`이고, `validate`의 "인증서 경보 검사" 단계가 promtool로 돌린다.
 
 ### 관리 UI는 HTTPS를 붙여도 port-forward로만 본다
 
@@ -640,7 +657,6 @@ Grafana·Prometheus·Alertmanager·ArgoCD·Argo Rollouts 대시보드에는 Ingr
 
 ### 아직 하지 않은 것
 
-- 인증서 만료·발급 실패 경보 규칙(`certmanager_certificate_ready_status`, `certmanager_certificate_expiration_timestamp_seconds`). 지표는 수집하고 있다.
 - 앱 저장소의 부하 테스트(`loadtest/`)는 `BASE_URL`을 https 주소로 바꿔야 한다. http로 두면 리다이렉트 검사(`redirects: 0`)가 앱의 302 대신 Traefik의 301을 받는다.
   dev는 staging 인증서라 k6에 `--insecure-skip-tls-verify`가 필요하다(prod는 필요 없다).
 
@@ -649,10 +665,10 @@ Grafana·Prometheus·Alertmanager·ArgoCD·Argo Rollouts 대시보드에는 Ingr
 CI 단계의 스크립트를 그대로 꺼내 돌린다. 위 "로컬에서 검증하기"에서 읽은 변수를 쓰고, GitHub가 넣어 주는 `RUNNER_TEMP`·`GITHUB_WORKSPACE`는 대신 준다:
 
 ```bash
-export KUBERNETES_VERSION KUBECONFORM_IMAGE K8S_SCHEMA_LOCATION CRD_SCHEMA_LOCATION
+export KUBERNETES_VERSION KUBECONFORM_IMAGE K8S_SCHEMA_LOCATION CRD_SCHEMA_LOCATION PROMETHEUS_IMAGE
 export RUNNER_TEMP=$(mktemp -d) GITHUB_WORKSPACE=$PWD
 for step in "렌더링 + 쿠버네티스 스키마 검사 (dev, prod × Rollout, Deployment)" "앱 Ingress HTTPS 확인 (TLS, 리다이렉트, HSTS, 발급자 이름)" \
-            "인증서 발급자 검사 (platform/cert-issuers)"; do
+            "인증서 발급자 검사 (platform/cert-issuers)" "인증서 경보 검사 (promtool check + test)"; do
   bash -e -c "$(yq ".jobs.validate.steps[] | select(.name == \"$step\") | .run" .github/workflows/validate.yml)" || break
 done
 ```
@@ -747,6 +763,14 @@ docker run --rm -v "$PWD/tests/slo:/slo:ro" --entrypoint /bin/promtool "$PROMETH
 
 docker run --rm -v "$PWD":/work:ro -w /work $KUBECONFORM_IMAGE -strict -summary \
   -schema-location "$K8S_SCHEMA_LOCATION" -schema-location "$CRD_SCHEMA_LOCATION" -kubernetes-version $KUBERNETES_VERSION argocd/ platform/cert-issuers/
+
+# 인증서 경보: platform/cert-issuers의 PrometheusRule에서 규칙을 꺼내 promtool로 검사하고 tests/certificates의 테스트를 돌린다
+mkdir -p tests/certificates/rendered
+yq ea 'select(.kind == "PrometheusRule") | .spec' platform/cert-issuers/*.yaml > tests/certificates/rendered/certificate-alerts.yaml
+docker run --rm -v "$PWD/tests/certificates:/certificates:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
+  check rules --lint-fatal /certificates/rendered/certificate-alerts.yaml
+docker run --rm -v "$PWD/tests/certificates:/certificates:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
+  test rules /certificates/certificate-alerts.test.yaml
 ```
 
 `helm template`은 ArgoCD가 하는 것과 같이 릴리스 이름(`shortener-dev`)과 네임스페이스를 주고 환경 값 파일을 얹어 렌더링한다. `image.tag`가 커밋 SHA 40자가 아니거나 DB Secret 이름이 없으면
@@ -777,6 +801,7 @@ amtool() { docker run --rm -v $am:/c.yaml:ro --entrypoint amtool quay.io/prometh
 amtool check-config /c.yaml
 amtool config routes show --config.file=/c.yaml
 amtool config routes test --config.file=/c.yaml alertname=X service=shortener severity=critical   # discord
+amtool config routes test --config.file=/c.yaml alertname=CertificateNotReady namespace=shortener-prod severity=critical   # discord(인증서 경보)
 amtool config routes test --config.file=/c.yaml alertname=Watchdog severity=none                  # null
 ```
 

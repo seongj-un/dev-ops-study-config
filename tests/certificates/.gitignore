@@ -1,0 +1,3 @@
+# platform/cert-issuers의 PrometheusRule에서 꺼낸 Prometheus 규칙 파일(validate 워크플로의 "인증서 경보 검사" 단계, 또는 certificate-alerts.test.yaml 머리말의 명령이 만든다).
+# 원본은 platform/cert-issuers/certificate-alerts.yaml이라 이 결과물은 커밋하지 않는다.
+rendered/

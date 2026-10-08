@@ -46,7 +46,7 @@ jobs:
       # Dependabot이 갱신해 주지 않으니 쿠버네티스 마이너 버전을 올려 새 스키마가 필요할 때 손으로 새 커밋 SHA로 바꾼다.
       K8S_SCHEMA_LOCATION: https://raw.githubusercontent.com/yannh/kubernetes-json-schema/8df8a883b68a24a104b4a9e43c1288090ae60b3b/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json
       # CRD(쿠버네티스 내장 리소스가 아닌 kind)의 스키마 위치. CRD는 위 내장 리소스 스키마에 없어서 datreeio의 CRD 스키마 모음에서 받는다. 이 저장소는 이것으로
-      # ArgoCD의 Application(argoproj.io, Argo CD 3.5.0 CRD 기준)과 차트의 ServiceMonitor·PrometheusRule(monitoring.coreos.com, Prometheus Operator의 CRD),
+      # ArgoCD의 Application(argoproj.io, Argo CD 3.5.0 CRD 기준)과 차트·인증서 경보의 ServiceMonitor·PrometheusRule(monitoring.coreos.com, Prometheus Operator의 CRD),
       # 차트의 Middleware(traefik.io/middleware_v1alpha1.json), 발급자 ClusterIssuer(cert-manager.io/clusterissuer_v1.json)를 검사한다.
       # 이 커밋의 두 스키마에는 쓰는 필드(redirectScheme의 scheme·permanent, headers의 stsSeconds·stsIncludeSubdomains·stsPreload,
       # ACME의 server·privateKeySecretRef·solvers[].http01.ingress.ingressClassName)가 모두 있다.
@@ -55,7 +55,7 @@ jobs:
       # 모음의 main 브랜치는 거의 매일 바뀌어서 브랜치 이름이 아니라 커밋 SHA로 고정했다: 남이 스키마를 바꿔도 이 저장소의 검증 결과가 어느 날 갑자기 달라지지 않는다.
       # Dependabot이 갱신해 주지 않으니, ArgoCD나 kube-prometheus-stack(Prometheus Operator)을 CRD가 바뀌는 버전으로 올릴 때(새 필드가 필요할 때 포함) 손으로 새 커밋 SHA로 바꾼다.
       CRD_SCHEMA_LOCATION: https://raw.githubusercontent.com/datreeio/CRDs-catalog/d373c2da9702bc9509a004db83e57263fe3bdfc1/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
-      # promtool을 돌리는 Prometheus 이미지. "SLO 규칙 검사"와 "카나리 분석 쿼리 검사" 두 단계가 함께 쓴다.
+      # promtool을 돌리는 Prometheus 이미지. "SLO 규칙 검사", "카나리 분석 쿼리 검사", "인증서 경보 검사" 세 단계가 함께 쓴다.
       # promtool은 클러스터의 Prometheus와 같은 버전을 쓴다(v3.15.0: kube-prometheus-stack 91.8.2가 띄우는 버전. 클러스터는 같은 버전의 distroless 변형을 quay.io에서 받는다).
       # 규칙 문법과 PromQL 함수는 Prometheus 버전마다 다를 수 있어서다. kube-prometheus-stack을 올리면 그 차트의 Prometheus 이미지 태그에 맞춰 이 값도 올린다.
       # 태그@다이제스트(멀티 아키텍처 인덱스)로 고정하는 방식과 이유는 KUBECONFORM_IMAGE와 같고(docker.io와 quay.io의 다이제스트가 같다), 같은 이유로 Dependabot이 갱신해 주지 않는다.
@@ -371,6 +371,7 @@ jobs:
 
       # platform/cert-issuers(cert-issuers Application)의 ClusterIssuer를 검사한다. ArgoCD가 이 디렉터리의 YAML을 렌더링 없이 그대로 적용하므로 파일을 바로 넘긴다.
       #   1) kubeconform: 스키마는 CRD_SCHEMA_LOCATION의 커밋에 있다(cert-manager.io/clusterissuer_v1.json). -strict가 필드 이름의 오타(예: ingressClassname)를 잡는다.
+      #      같은 디렉터리의 인증서 경보(PrometheusRule)도 여기서 모양을 검사한다(monitoring.coreos.com/prometheusrule_v1.json). 그 PromQL은 다음 단계가 promtool로 본다.
       #   2) yq: 이름과 ACME 서버 주소의 짝이 맞는지 본다. 스키마는 주소를 문자열로만 본다. 둘이 뒤바뀌면 staging이라고 믿고 하는 시험이 production의 발급 한도(같은 이름 묶음으로 7일에 5장)를 쓴다.
       - name: 인증서 발급자 검사 (platform/cert-issuers)
         run: |
@@ -391,6 +392,26 @@ jobs:
             fi
           done
           exit "$status"
+
+      # platform/cert-issuers의 인증서 경보(PrometheusRule)를 promtool로 검사한다. kubeconform(위 단계)은 그 안의 PromQL을 문자열로만 본다.
+      #   1) yq로 PrometheusRule의 spec만 꺼내 tests/certificates/rendered/certificate-alerts.yaml에 쓴다(.gitignore). ArgoCD가 렌더링 없이 적용하는 파일이라 그대로 꺼낸다.
+      #      PrometheusRule이 정확히 하나여야 한다(없으면 파일이 빠졌거나 kind가 틀린 것이다).
+      #   2) promtool check rules --lint-fatal: YAML 구조, PromQL 문법, 어노테이션의 템플릿 문법, 중복을 검사한다.
+      #   3) promtool test rules: tests/certificates/certificate-alerts.test.yaml(14일보다 가까운 만료(staging 인증서 포함), 기준을 넘는 순간과 갱신, 첫 발급 실패와 컨트롤러 교체,
+      #      몇 분 안에 끝나는 평소의 발급·갱신, honorLabels를 켠 모양).
+      - name: 인증서 경보 검사 (promtool check + test)
+        run: |
+          mkdir -p tests/certificates/rendered
+          count="$(yq ea '[select(.kind == "PrometheusRule")] | length' platform/cert-issuers/*.yaml)"
+          if [ "$count" != 1 ]; then
+            echo "::error::platform/cert-issuers에 PrometheusRule이 ${count}개 있다(1개여야 한다)"
+            exit 1
+          fi
+          yq ea 'select(.kind == "PrometheusRule") | .spec' platform/cert-issuers/*.yaml > tests/certificates/rendered/certificate-alerts.yaml
+          docker run --rm -v "$GITHUB_WORKSPACE/tests/certificates:/certificates:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
+            check rules --lint-fatal /certificates/rendered/certificate-alerts.yaml
+          docker run --rm -v "$GITHUB_WORKSPACE/tests/certificates:/certificates:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
+            test rules /certificates/certificate-alerts.test.yaml
 
       # argocd/apps의 Application 가운데 Helm 차트 저장소의 차트를 쓰는 것(chart가 있는 소스. 예: kube-prometheus-stack)을 ArgoCD처럼 렌더링해 스키마로 검사한다.
       # 차트 저장소·차트 이름·버전·릴리스 이름(helm.releaseName, 없으면 Application 이름)·네임스페이스·값 파일을 모두 Application 파일에서 yq로 읽으므로

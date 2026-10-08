@@ -1,0 +1,200 @@
+# 인증서 경보(platform/cert-issuers/certificate-alerts.yaml의 CertificateExpiringSoon, CertificateNotReady)의 단위 테스트. 읽는 법은 tests/slo/shortener-slo.test.yaml 머리말과 같다.
+# 규칙 파일은 그 PrometheusRule의 spec을 꺼낸 것이다(rendered/는 .gitignore). validate 워크플로의 "인증서 경보 검사" 단계가 하는 일을 로컬에서 하려면 저장소 루트에서:
+#   PROMETHEUS_IMAGE=$(yq '.jobs.validate.env.PROMETHEUS_IMAGE' .github/workflows/validate.yml)
+#   mkdir -p tests/certificates/rendered
+#   yq ea 'select(.kind == "PrometheusRule") | .spec' platform/cert-issuers/*.yaml > tests/certificates/rendered/certificate-alerts.yaml
+#   docker run --rm -v "$PWD/tests/certificates:/certificates:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
+#     test rules /certificates/certificate-alerts.test.yaml
+#
+# 시계열의 레이블은 클러스터에 저장되는 모양 그대로다: cert-manager 차트의 ServiceMonitor는 honorLabels가 false라 인증서의 네임스페이스는 exported_namespace에,
+# namespace·job·pod·instance는 수집 대상(컨트롤러)의 것이 붙는다((e)만 honorLabels를 켠 모양). Certificate 이름은 Ingress의 TLS Secret 이름과 같고(shortener-<환경>-tls),
+# 발급자는 dev가 letsencrypt-staging, prod가 letsencrypt-prod다.
+# 컨트롤러는 Certificate마다 Ready 조건의 계열 셋(condition="True"·"False"·"Unknown")을 늘 내고 지금 상태만 1이다. 만료 시각은 인증서를 받기 전에는 0이다.
+# promtool의 시각은 유닉스 시각 0에서 시작하므로 만료 시각(유닉스 초)은 "시험 시작에서 몇 초 뒤"로 읽는다: 1123200은 13일, 5184000은 60일, 7776000은 90일이다.
+# 표본 간격과 평가 주기는 1분이다(클러스터의 수집 주기는 60초, 평가 주기는 30초다. 1분이면 for: 15m를 분 단위로 읽기 쉽다).
+# count_over_time(…[21m])을 20분에 물으면 0~20분의 평가를 센다(범위는 왼쪽 끝을 빼므로 [20m]이면 0분이 빠진다).
+rule_files:
+  - rendered/certificate-alerts.yaml
+evaluation_interval: 1m
+tests:
+  - name: (a) 만료가 14일보다 가까우면 15분 뒤에 울린다(staging 인증서도). 인증서가 아직 유효해 Ready는 True라 CertificateNotReady는 조용하다. 먼 인증서도 조용하다
+    interval: 1m
+    input_series:
+      # dev(staging): 13일 남았다. 갱신 시점(30일 전)을 17일 넘겼는데 갱신이 계속 실패하는 경우다.
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{exported_namespace="shortener-dev", name="shortener-dev-tls", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '1123200x20'
+      - series: 'certmanager_certificate_ready_status{exported_namespace="shortener-dev", name="shortener-dev-tls", condition="True", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '1x20'
+      - series: 'certmanager_certificate_ready_status{exported_namespace="shortener-dev", name="shortener-dev-tls", condition="False", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '0x20'
+      - series: 'certmanager_certificate_ready_status{exported_namespace="shortener-dev", name="shortener-dev-tls", condition="Unknown", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '0x20'
+      # prod: 60일 남았다(90일 인증서를 받은 지 30일).
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{exported_namespace="shortener-prod", name="shortener-prod-tls", issuer_name="letsencrypt-prod", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '5184000x20'
+      - series: 'certmanager_certificate_ready_status{exported_namespace="shortener-prod", name="shortener-prod-tls", condition="True", issuer_name="letsencrypt-prod", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '1x20'
+    promql_expr_test:
+      # 14분: 처음부터 기준 아래지만 for: 15m를 아직 채우지 못해 pending이다. 레이블은 max로 묶은 셋(namespace는 인증서의 네임스페이스)과 경보의 severity뿐이다.
+      - expr: ALERTS{alertname="CertificateExpiringSoon"}
+        eval_time: 14m
+        exp_samples:
+          - labels: 'ALERTS{alertname="CertificateExpiringSoon", alertstate="pending", namespace="shortener-dev", name="shortener-dev-tls", issuer_name="letsencrypt-staging", severity="critical"}'
+            value: 1
+    alert_rule_test:
+      # 15분: dev 하나만 울린다. 값은 남은 초(1123200 - 900 = 1122300)다.
+      - eval_time: 15m
+        alertname: CertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              namespace: shortener-dev
+              name: shortener-dev-tls
+              issuer_name: letsencrypt-staging
+              severity: critical
+            exp_annotations:
+              summary: 'shortener-dev: 인증서 shortener-dev-tls의 남은 기간이 14일보다 짧다(갱신이 실패하고 있다)'
+              description: >-
+                남은 기간 12d 23h 45m 0s(음수면 이미 만료됐다), 발급자 letsencrypt-staging.
+                cert-manager는 만료 30일 전(수명 90일의 1/3)에 갱신하므로 갱신이 2주 넘게 실패하고 있다. 만료되면 브라우저와 클라이언트가 연결을 거부한다.
+                kubectl -n shortener-dev describe certificate shortener-dev-tls의 Issuing 조건과 Events, kubectl get order,challenge -A로 원인을 본다.
+      - eval_time: 15m
+        alertname: CertificateNotReady
+        exp_alerts: []
+
+  - name: (b) 14일 기준을 넘어간 때부터 15분 뒤에 울리고, 갱신에 성공하면 풀린다
+    interval: 1m
+    input_series:
+      # prod: 시험 시작 때 14일 30분(1211400초) 남았다. 30분 뒤에 14일 아래로 내려간다. 61분에 갱신에 성공해 만료 시각이 90일 뒤로 바뀐다.
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{exported_namespace="shortener-prod", name="shortener-prod-tls", issuer_name="letsencrypt-prod", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '1211400x60 7779660x10'
+    promql_expr_test:
+      # 30분에는 남은 기간이 정확히 14일이라 아직 기준(14일보다 짧다) 안이 아니다. 31분부터 참이다.
+      - expr: ALERTS{alertname="CertificateExpiringSoon"}
+        eval_time: 30m
+        exp_samples: []
+      - expr: ALERTS{alertname="CertificateExpiringSoon"}
+        eval_time: 31m
+        exp_samples:
+          - labels: 'ALERTS{alertname="CertificateExpiringSoon", alertstate="pending", namespace="shortener-prod", name="shortener-prod-tls", issuer_name="letsencrypt-prod", severity="critical"}'
+            value: 1
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CertificateExpiringSoon
+        exp_alerts: []
+      # 46분: 31분부터 15분 동안 계속 참이라 울린다. 남은 기간은 1211400 - 2760 = 1208640초다.
+      - eval_time: 46m
+        alertname: CertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              namespace: shortener-prod
+              name: shortener-prod-tls
+              issuer_name: letsencrypt-prod
+              severity: critical
+            exp_annotations:
+              summary: 'shortener-prod: 인증서 shortener-prod-tls의 남은 기간이 14일보다 짧다(갱신이 실패하고 있다)'
+              description: >-
+                남은 기간 13d 23h 44m 0s(음수면 이미 만료됐다), 발급자 letsencrypt-prod.
+                cert-manager는 만료 30일 전(수명 90일의 1/3)에 갱신하므로 갱신이 2주 넘게 실패하고 있다. 만료되면 브라우저와 클라이언트가 연결을 거부한다.
+                kubectl -n shortener-prod describe certificate shortener-prod-tls의 Issuing 조건과 Events, kubectl get order,challenge -A로 원인을 본다.
+      # 61분: 갱신된 인증서의 만료 시각이 90일 뒤라 풀린다(Alertmanager가 RESOLVED를 보낸다).
+      - eval_time: 61m
+        alertname: CertificateExpiringSoon
+        exp_alerts: []
+
+  - name: (c) 첫 발급이 15분 넘게 끝나지 않으면 CertificateNotReady가 울린다. 만료 시각 0은 CertificateExpiringSoon을 울리지 않고, 컨트롤러 파드가 바뀌어도 같은 경보로 이어진다
+    interval: 1m
+    input_series:
+      # dev: 인증서를 받은 적이 없다(만료 시각 0, Ready False). HTTP-01 검증이 계속 실패하는 경우다.
+      # 컨트롤러 파드 aaaaa가 7분까지 값을 내놓다가 사라지고(8분에 stale 표시), 다시 뜬 bbbbb가 8분부터 같은 값을 내놓는다. '_x8'은 표본이 없는 시각 8개(0~7분)다.
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{exported_namespace="shortener-dev", name="shortener-dev-tls", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-aaaaa", instance="10.42.0.30:9402"}'
+        values: '0x7 stale'
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{exported_namespace="shortener-dev", name="shortener-dev-tls", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-bbbbb", instance="10.42.0.31:9402"}'
+        values: '_x8 0x12'
+      - series: 'certmanager_certificate_ready_status{exported_namespace="shortener-dev", name="shortener-dev-tls", condition="False", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-aaaaa", instance="10.42.0.30:9402"}'
+        values: '1x7 stale'
+      - series: 'certmanager_certificate_ready_status{exported_namespace="shortener-dev", name="shortener-dev-tls", condition="False", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-bbbbb", instance="10.42.0.31:9402"}'
+        values: '_x8 1x12'
+      - series: 'certmanager_certificate_ready_status{exported_namespace="shortener-dev", name="shortener-dev-tls", condition="True", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-aaaaa", instance="10.42.0.30:9402"}'
+        values: '0x7 stale'
+      - series: 'certmanager_certificate_ready_status{exported_namespace="shortener-dev", name="shortener-dev-tls", condition="True", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-bbbbb", instance="10.42.0.31:9402"}'
+        values: '_x8 0x12'
+    promql_expr_test:
+      # 20분까지 CertificateExpiringSoon은 한 번도 pending조차 되지 않았다(만료 시각 0인 계열은 > 0이 뺀다).
+      - expr: count_over_time(ALERTS{alertname="CertificateExpiringSoon"}[21m])
+        eval_time: 20m
+        exp_samples: []
+      # pending은 0~14분의 15번이고 한 번도 처음부터 다시 세지 않았다: max가 pod 레이블을 지웠고, 교체가 평가 한 번 안에 끝났다(옛 계열이 사라진 8분 평가에 새 계열이 이미 있다).
+      - expr: count_over_time(ALERTS{alertname="CertificateNotReady", alertstate="pending"}[21m])
+        eval_time: 20m
+        exp_samples:
+          - labels: '{alertname="CertificateNotReady", alertstate="pending", namespace="shortener-dev", name="shortener-dev-tls", issuer_name="letsencrypt-staging", severity="critical"}'
+            value: 15
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: CertificateNotReady
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: CertificateNotReady
+        exp_alerts:
+          - exp_labels:
+              namespace: shortener-dev
+              name: shortener-dev-tls
+              issuer_name: letsencrypt-staging
+              severity: critical
+            exp_annotations:
+              summary: 'shortener-dev: 인증서 shortener-dev-tls가 15분 넘게 준비되지 않았다'
+              description: >-
+                Certificate shortener-dev-tls(발급자 letsencrypt-staging)의 Ready가 15분 넘게 True가 아니다.
+                첫 발급이면 Traefik이 아직 자기 기본 자체 서명 인증서로 응답하고 있다. 흔한 원인은 HTTP-01 검증 실패(80 포트, DuckDNS가 옛 IP), Let's Encrypt의 발급 한도다.
+                kubectl -n shortener-dev describe certificate shortener-dev-tls, kubectl get order,challenge -A, kubectl -n shortener-dev describe challenge로 원인을 본다.
+
+  - name: (d) 몇 분 안에 끝나는 평소의 발급·갱신(새 클러스터의 첫 발급, 오래 멈췄다 켠 뒤 만료된 인증서의 갱신)으로는 어느 경보도 울리지 않는다
+    interval: 1m
+    input_series:
+      # dev: 새 클러스터의 첫 발급. Certificate가 막 만들어져 0분에는 Ready 조건이 없고(Unknown), 1~3분에 False, 4분에 인증서를 받아 True가 된다.
+      # 만료 시각은 받기 전 0, 받은 뒤 90일 뒤(4분 + 7776000초)다.
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{exported_namespace="shortener-dev", name="shortener-dev-tls", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '0x3 7776240x16'
+      - series: 'certmanager_certificate_ready_status{exported_namespace="shortener-dev", name="shortener-dev-tls", condition="Unknown", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '1 0x19'
+      - series: 'certmanager_certificate_ready_status{exported_namespace="shortener-dev", name="shortener-dev-tls", condition="False", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '0 1x2 0x16'
+      - series: 'certmanager_certificate_ready_status{exported_namespace="shortener-dev", name="shortener-dev-tls", condition="True", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '0x3 1x16'
+      # prod: EC2를 오래 멈춰 둔 사이에 인증서가 만료됐다. 만료 시각은 1(유닉스 시각 1초)이라 시험이 시작되자마자 지난 시각이 된다.
+      # 켜자마자 갱신해 6분에 새 인증서(6분 + 7776000초)를 받는다. 그때까지 Ready는 False(만료)다.
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{exported_namespace="shortener-prod", name="shortener-prod-tls", issuer_name="letsencrypt-prod", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '1x5 7776360x14'
+      - series: 'certmanager_certificate_ready_status{exported_namespace="shortener-prod", name="shortener-prod-tls", condition="False", issuer_name="letsencrypt-prod", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '1x5 0x14'
+      - series: 'certmanager_certificate_ready_status{exported_namespace="shortener-prod", name="shortener-prod-tls", condition="True", issuer_name="letsencrypt-prod", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", namespace="cert-manager", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '0x5 1x14'
+    promql_expr_test:
+      # 그 몇 분 동안은 pending이었지만(prod는 두 경보 모두, dev는 CertificateNotReady), 20분까지 한 번도 firing이 되지 않았다.
+      - expr: count_over_time(ALERTS{alertname=~"Certificate.*", alertstate="firing"}[21m])
+        eval_time: 20m
+        exp_samples: []
+      - expr: count_over_time(ALERTS{alertname="CertificateExpiringSoon", alertstate="pending"}[21m])
+        eval_time: 20m
+        exp_samples:
+          - labels: '{alertname="CertificateExpiringSoon", alertstate="pending", namespace="shortener-prod", name="shortener-prod-tls", issuer_name="letsencrypt-prod", severity="critical"}'
+            value: 6
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CertificateExpiringSoon
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CertificateNotReady
+        exp_alerts: []
+
+  - name: (e) honorLabels를 켠 모양(지표의 namespace가 그대로 남고 exported_namespace가 없다)이어도 경보의 namespace는 인증서의 네임스페이스다
+    interval: 1m
+    input_series:
+      - series: 'certmanager_certificate_ready_status{namespace="shortener-prod", name="shortener-prod-tls", condition="False", issuer_name="letsencrypt-prod", issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", job="cert-manager", pod="cert-manager-6b8f9c7d4-abcde", instance="10.42.0.30:9402"}'
+        values: '1x15'
+    promql_expr_test:
+      - expr: ALERTS{alertname="CertificateNotReady", alertstate="firing"}
+        eval_time: 15m
+        exp_samples:
+          - labels: 'ALERTS{alertname="CertificateNotReady", alertstate="firing", namespace="shortener-prod", name="shortener-prod-tls", issuer_name="letsencrypt-prod", severity="critical"}'
+            value: 1
