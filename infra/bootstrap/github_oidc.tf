@@ -28,6 +28,9 @@ locals {
   #  - ref:refs/heads/main: main 브랜치에서 도는 실행. 같은 워크플로를 main에서 손으로 돌리는 drift 검사(workflow_dispatch)가 이 값으로 들어온다.
   #    main을 믿어도 넓어지는 것이 거의 없다. main에 코드를 넣을 수 있는 주체(PR 머지, 룰셋을 우회하는 앱 저장소 CI의 deploy key)는
   #    이미 ArgoCD를 통해 클러스터에 무엇이든 배포할 수 있다. 이 역할이 주는 것은 그보다 훨씬 작은 AWS 읽기다.
+  #    주의: 이 sub는 워크플로가 아니라 맥락(main)만 나타낸다. id-token: write를 요청하는 워크플로는 무엇이든 main 맥락에서 돌면(push, schedule,
+  #    workflow_run, issue_comment, pull_request_target. 뒤의 둘은 공개 저장소에서 밖의 누구나 일으킬 수 있다) 이 역할을 맡는다.
+  #    그래서 id-token: write는 terraform-plan.yml에만 둔다(README의 "이 저장소를 고칠 때 지킬 것").
   #    다른 브랜치(ref:refs/heads/<이름>)는 받지 않는다. 쓰기 권한이 있는 사람이나 deploy key는 리뷰 없이 브랜치를 만들 수 있고, 그 브랜치의 워크플로를
   #    push나 workflow_dispatch로 바로 돌릴 수 있기 때문이다.
   #

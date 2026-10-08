@@ -655,6 +655,10 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
   이 파일들은 빈 줄이 없는 모양으로 커밋되어 있다(yq가 고쳐 쓸 때 빈 줄을 지우므로). 새 설정을 추가할 때도 이 모양을 지킨다.
   `validate`가 `diff <(yq '.' 파일) 파일`로 이 모양을 검사하므로 어긋난 PR은 머지 전에 걸린다.
 - `terraform-plan`은 필수 검사가 아니다. `infra/aws`·`bootstrap/argocd/values.yaml`·그 워크플로가 바뀐 PR에서만 돌고(paths 필터), 결과는 잡 요약의 계획 요약이다. 저장소 변수 `AWS_PLAN_ROLE_ARN`과 시크릿 `ADMIN_CIDR`가 있어야 돈다(`infra/aws/README.md`의 "GitHub Actions에서 plan (OIDC)").
+- `id-token: write`(GitHub OIDC 토큰을 받는 권한)는 `terraform-plan.yml`의 plan 잡에만 둔다. 다른 워크플로에는 더하지 않고, `pull_request_target`·`issue_comment`·`workflow_run`으로 시작하는 워크플로에는 절대 두지 않는다.
+  plan 역할(`dev-ops-study-github-plan`)의 신뢰 정책은 `sub`가 `…:ref:refs/heads/main`인 토큰을 받는데, 이 값은 어느 워크플로인지가 아니라 어느 맥락(main)에서 도는지만 나타낸다.
+  그래서 `id-token: write`를 요청하는 워크플로는 무엇이든 main 맥락에서 돌면(`push`, `schedule`, `workflow_dispatch`, `workflow_run`, `issue_comment`, `pull_request_target`) 그 역할을 맡는다.
+  공개 저장소에서 `issue_comment`(댓글)와 `pull_request_target`(포크 PR)은 저장소 밖의 누구나 일으킬 수 있다(`infra/aws/README.md`의 "GitHub Actions에서 plan (OIDC)").
 - `validate` 잡은 룰셋 "PR 필수"의 필수 상태 검사다(저장소 설정). 룰셋이 잡 이름으로 검사를 찾으므로 이름을 바꾸지 않는다. deploy key는 그 룰셋을 우회하므로 CI의 dev 태그 직접 커밋은
   이 검사를 기다리지 않고, 푸시된 뒤에 `push` 이벤트로 검사가 돈다(결과를 알려 줄 뿐 막지는 못한다. ArgoCD는 GitHub의 검사 결과를 보지 않는다).
 - Application을 지우면(루트의 prune 포함) 그것이 배포한 리소스는 클러스터에 남는다(삭제 finalizer를 붙이지 않았다). 네임스페이스와 PostgreSQL의 PVC도 남는다.

@@ -439,6 +439,7 @@ sequenceDiagram
 - `@` 뒤의 숫자는 GitHub 계정과 저장소의 바뀌지 않는 ID다. 2026-07-15 이후에 만든 저장소는 `sub`가 이 형식(immutable subject)이고, 이 저장소는 2026-09-30에 만들어졌다. 이름만 쓰는 예전 형식(`repo:seongj-un/dev-ops-study-config:...`)으로 적으면 역할을 맡지 못한다(`Not authorized to perform sts:AssumeRoleWithWebIdentity`). 이 저장소의 값은 `gh api repos/seongj-un/dev-ops-study-config/actions/oidc/customization/sub --jq .sub_claim_prefix`로 본다.
 - **`*`를 쓰지 않는 이유.** OIDC 공급자는 GitHub 전체가 쓰는 발급자 하나이고, `aud`(`sts.amazonaws.com`)도 모든 저장소의 기본값이다. `sub` 조건이 없거나 넓으면 세상의 어느 저장소의 워크플로든, 또는 이 저장소에서 리뷰 없이 만든 아무 브랜치·태그의 워크플로든 이 역할을 맡는다. 필요한 두 값만 정확히 적는다.
 - **`main`을 믿는 이유.** `main`에 코드를 넣을 수 있는 주체(PR 머지, 룰셋을 우회하는 앱 저장소 CI의 deploy key)는 이미 ArgoCD로 클러스터에 무엇이든 배포할 수 있다. 이 역할의 AWS 읽기는 그보다 훨씬 작다. 다른 브랜치는 믿지 않는다. 브랜치는 리뷰 없이 만들 수 있고 그 브랜치의 워크플로를 바로 돌릴 수 있기 때문이다.
+  **주의:** 이 `sub`는 워크플로가 아니라 맥락(main)만 나타낸다. `id-token: write`를 요청하는 워크플로는 무엇이든 main 맥락에서 돌면(`push`, `schedule`, `workflow_run`, `issue_comment`, `pull_request_target`. 뒤의 둘은 공개 저장소에서 밖의 누구나 일으킬 수 있다) 이 역할을 맡는다. 그래서 `id-token: write`는 `terraform-plan.yml`에만 두고, `pull_request_target`·`issue_comment`·`workflow_run` 워크플로에는 절대 두지 않는다(저장소 README의 "이 저장소를 고칠 때 지킬 것").
 - **포크 PR은 돌지 않는다.** `pull_request`라는 `sub`는 포크에서 온 PR에도 같지만, GitHub는 포크 PR의 실행에 OIDC 토큰과 시크릿을 주지 않는다. 워크플로도 포크와 Dependabot의 PR에서는 잡을 건너뛴다(skipped). `pull_request_target`은 쓰지 않는다.
 - **PR의 워크플로는 PR 쪽 파일로 돈다.** 이 저장소에 브랜치를 올려 PR을 열 수 있는 사람은 워크플로를 고쳐 이 역할로 아무 코드나 돌릴 수 있다. 그래서 역할은 읽기만 하고 비밀은 막는다(아래).
 
@@ -454,6 +455,7 @@ sequenceDiagram
 | 안 된다 | `ssm:GetCommandInvocation`, `ssm:ListCommandInvocations` | [접속하기](#접속하기)의 방법으로 받은 kubeconfig(cluster-admin 키)가 Run Command 기록에 약 30일 남는다 |
 | 안 된다 | `s3:PutObject`, `s3:DeleteObject`, `s3:DeleteObjectVersion` | CI는 state와 잠금 객체를 쓰지 않는다(`-lock=false`). 이전 버전(state 이력)의 영구 삭제도 막는다 |
 | 안 된다 | 쓰기 전반(`apply`) | `ReadOnlyAccess`에 없다. 이 역할로는 아무것도 만들거나 바꾸지 못한다 |
+| 된다(값은 아님) | `ssm:DescribeParameters` | 파라미터의 메타데이터, 곧 이름·형식(`SecureString`)·설명·KMS 키 ID·마지막으로 고친 사용자와 시각은 읽힌다. 값은 위 Deny로 막혀 있다. 그래서 파라미터의 이름과 설명에는 비밀을 넣지 않는다 |
 
 한계: `ReadOnlyAccess`는 넓다. 이 계정의 리소스 목록·정책·태그, S3 객체(state 포함), EC2 콘솔 출력, CloudWatch Logs를 읽을 수 있다. 이 계정에는 이 실습 말고 다른 것이 없고 state와 `user_data`에는 비밀을 넣지 않도록 설계해서 받아들였다. 비밀을 담는 곳을 새로 만들면(예: 다른 경로의 SSM 파라미터, 새 S3 버킷) Deny도 함께 늘린다. Secrets Manager의 값 읽기(`GetSecretValue`)와 KMS 복호화는 `ReadOnlyAccess`에 원래 없다.
 
@@ -471,12 +473,15 @@ sequenceDiagram
 1. `infra/bootstrap`을 `apply`한다(OIDC 공급자와 역할이 생긴다. 그 README의 실행 순서).
 2. 역할 ARN을 저장소 **변수**에 넣는다. ARN은 비밀이 아니다(안다고 역할을 맡을 수 있는 것이 아니다).
 3. 내 공인 IP를 `/32`로 저장소 **시크릿**에 넣는다. 값은 파이프로 넘겨서 화면과 셸 기록에 남지 않는다(`gh secret set`은 `--body`가 없으면 표준 입력을 읽는다).
+   `curl -fsS`는 HTTP 오류에도 실패로 끝나고, IP가 비어 있으면 넣지 않고 멈춘다. 그대로 넘기면 `/32`만 든 시크릿이 들어가 CI의 plan이 변수 검증에서 실패한다.
 4. 이름만 확인한다. `gh secret list`는 값을 보여 주지 않는다.
 
 ```bash
 cd infra/bootstrap
 gh variable set AWS_PLAN_ROLE_ARN --repo seongj-un/dev-ops-study-config --body "$(terraform output -raw github_plan_role_arn)"
-printf '%s/32' "$(curl -s https://checkip.amazonaws.com)" | gh secret set ADMIN_CIDR --repo seongj-un/dev-ops-study-config
+MY_IP=$(curl -fsS https://checkip.amazonaws.com)
+[ -n "$MY_IP" ] && printf '%s/32' "$MY_IP" | gh secret set ADMIN_CIDR --repo seongj-un/dev-ops-study-config || echo 'ADMIN_CIDR를 넣지 못했다(공인 IP를 받지 못했거나 gh가 실패했다)'
+unset MY_IP
 gh variable list --repo seongj-un/dev-ops-study-config
 gh secret list --repo seongj-un/dev-ops-study-config
 ```

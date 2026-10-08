@@ -135,7 +135,8 @@ jobs:
         run: |
           plan_json="$RUNNER_TEMP/plan.json"
           terraform show -json "$RUNNER_TEMP/aws.tfplan" > "$plan_json"
-          read -r create update replace delete read_ drift < <(jq -r '
+          # jq를 먼저 변수에 받는다. read … < <(jq …)로 쓰면 jq가 실패해도 프로세스 치환의 종료 코드는 set -e가 보지 못해 0개로 요약된다.
+          counts=$(jq -r '
             [.resource_changes[]? | .change.actions] as $a
             | [ ($a | map(select(. == ["create"])) | length),
                 ($a | map(select(. == ["update"])) | length),
@@ -144,6 +145,7 @@ jobs:
                 ($a | map(select(. == ["read"])) | length),
                 ([.resource_drift[]?] | length) ]
             | @tsv' "$plan_json")
+          read -r create update replace delete read_ drift <<<"$counts"
           {
             echo "## terraform plan (infra/aws)"
             echo
