@@ -1,4 +1,4 @@
-# 앱 SLO 규칙과 앱 파드 경보(charts/shortener/templates/prometheusrule.yaml)의 단위 테스트. promtool이 가짜 시계열(input_series)을 넣고 규칙을 평가해서,
+# 앱 SLO 규칙과 앱 파드·쓰기 경로·엣지 경보(charts/shortener/templates/prometheusrule.yaml)의 단위 테스트. promtool이 가짜 시계열(input_series)을 넣고 규칙을 평가해서,
 # 정한 시각(eval_time)에 울리는 알림(alert_rule_test)과 PromQL 결과(promql_expr_test)를 기대값과 비교한다.
 # 규칙 파일은 저장소에 없고 차트를 렌더링해서 만든다(rendered/는 .gitignore). 이 파일은 Rollout 갈래(Argo Rollouts가 있는 클러스터, 지금의 dev·prod)의 규칙을 읽는다.
 # 앱 파드 경보만 Deployment 갈래에서 다른 지표를 읽으므로, 그 갈래는 shortener-slo-deployment.test.yaml이 따로 시험한다.
@@ -22,13 +22,18 @@
 # 버킷도 규칙이 쓰는 le="0.3"만 넣었다(앱은 le="0.1", "0.3", "1.0"과 퍼센타일 히스토그램 버킷을 함께 내보낸다).
 # 값 표기: 'a+bxn'은 a에서 시작해 b씩 n번 늘린 n+1개의 표본, 'axn'은 a를 n+1번 되풀이한 것이다. 표본 간격(interval)과 평가 주기는 1분이다
 # (클러스터는 둘 다 30초다. 1분이면 시각을 분 단위로 읽기 쉽고, 창과 for(2m, 1m)의 의미는 같다).
-# (a)~(g)는 SLO 경보, (h)~(k)는 앱 파드 경보(ShortenerNoAvailablePods), (l)~(o)는 쓰기 경로 경보(ShortenerWritePathFailing)의 테스트다. 앱 파드 경보의 지표는 Argo Rollouts 컨트롤러의 rollout_info_replicas_available이고,
+# (a)~(g)는 SLO 경보, (h)~(k)는 앱 파드 경보(ShortenerNoAvailablePods), (l)~(o)는 쓰기 경로 경보(ShortenerWritePathFailing),
+# (p)~(s)는 엣지 경보(ShortenerEdgeFailing)와 그 기록 규칙의 테스트다. 앱 파드 경보의 지표는 Argo Rollouts 컨트롤러의 rollout_info_replicas_available이고,
 # 계열의 레이블은 클러스터에 저장되는 모양 그대로다: 지표의 namespace는 exported_namespace로 바뀌고 namespace·job·pod는 컨트롤러의 것이다(prometheusrule.yaml의 [앱 파드 경보]).
 # 앱 파드 경보는 노드가 부팅되고 300초가 지나야 울리므로(부팅 가드) node-exporter의 node_boot_time_seconds도 넣는다. promtool의 시각은 유닉스 시각 0에서 시작하므로
 # 부팅 시각 -86400은 "시험 시작 하루 전에 부팅했다", 0은 "시험 시작과 함께 부팅했다"는 뜻이다.
 # 시나리오의 서비스는 분당 1000건을 받는다. 장애 전에 6시간의 정상 이력을 넣은 것은 Prometheus를 막 띄웠을 때처럼 이력이 짧으면
 # 6시간 창도 그 짧은 이력만으로 계산되어(rate는 창 안에 있는 표본만 쓴다) 6시간·30분 짝이 1시간·5분 짝보다 먼저 울리기 때문이다.
 # promql_expr_test의 round(…, 0.0001)은 부동소수점 꼬리(0.2가 0.20000000000000007로 나오는 것)를 잘라 기대값과 정확히 비교하려는 것이다.
+# 엣지 경보의 지표는 Traefik의 traefik_router_requests_total이고, 계열의 레이블은 PodMonitor(platform/traefik-config)로 수집되어 저장되는 모양이다:
+# 지표의 code·method·protocol·router·service에 수집 대상의 namespace="kube-system"·job="kube-system/traefik"·pod가 붙는다(container·endpoint·instance는
+# 규칙이 sum으로 지우므로 적지 않았다). 라우터 이름은 443의 라우터가 websecure-<이름>, 80의 라우터가 <이름>이다(prometheusrule.yaml의 [엣지 경보]).
+# 엣지 테스트는 5분 창만 쓰므로 6시간의 정상 이력을 넣지 않는다.
 rule_files:
   - rendered/shortener-dev.yaml
   - rendered/shortener-prod.yaml
@@ -687,3 +692,191 @@ tests:
       - eval_time: 370m
         alertname: ShortenerWritePathFailing
         exp_alerts: []
+
+  - name: (p) v4 모양(prod의 앱 파드가 모두 NotReady, 사용자는 Traefik의 503만 받는다)이면 엣지 경보가 장애 5분째에 울리고 SLO 경보는 내내 조용하다 (dev는 조용하다)
+    interval: 1m
+    input_series:
+      # v4 연습의 프로브(초당 4건, 8건 중 1건이 POST)를 분 단위로 옮겼다. prod: 리다이렉트 GET 분당 210건(302), 생성 POST 분당 30건(201).
+      # 10분과 11분 사이에 앱 파드가 모두 NotReady가 되어 11~20분의 10분 동안 Traefik이 모든 요청에 503(no available server)을 직접 돌려주고, 21분부터 다시 302·201이다.
+      # Traefik은 code="503" 계열을 첫 503 때 만들므로 그 전에는 표본이 없다('_x11'은 표본이 없는 시각 11개, 0~10분).
+      - series: 'traefik_router_requests_total{code="302", method="GET", protocol="http", router="websecure-shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '0+210x10 2100x10 2310+210x10'
+      - series: 'traefik_router_requests_total{code="201", method="POST", protocol="http", router="websecure-shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '0+30x10 300x10 330+30x10'
+      - series: 'traefik_router_requests_total{code="503", method="GET", protocol="http", router="websecure-shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '_x11 210+210x9 2100x11'
+      - series: 'traefik_router_requests_total{code="503", method="POST", protocol="http", router="websecure-shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '_x11 30+30x9 300x11'
+      # prod 앱의 요청 수: 503은 앱까지 가지 않으므로 장애 동안 그대로다(위 Traefik의 302·201과 같은 모양).
+      - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", method="GET", uri="/{code:[0-9a-zA-Z]+}", status="302"}'
+        values: '0+210x10 2100x10 2310+210x10'
+      - series: 'http_server_requests_seconds_count{namespace="shortener-prod", job="shortener-prod", method="POST", uri="/api/v1/urls", status="201"}'
+        values: '0+30x10 300x10 330+30x10'
+      # dev: 내내 정상. 80 포트로 온 요청을 https로 돌려보낸 301은 같은 Ingress의 80 라우터(이름에 websecure-가 없다)에 남는다.
+      - series: 'traefik_router_requests_total{code="302", method="GET", protocol="http", router="websecure-shortener-dev-shortener-dev-dev-dev-ops-study-duckdns-org@kubernetes", service="shortener-dev-shortener-dev-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '0+60x31'
+      - series: 'traefik_router_requests_total{code="301", method="GET", protocol="http", router="shortener-dev-shortener-dev-dev-dev-ops-study-duckdns-org@kubernetes", service="shortener-dev-shortener-dev-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '0+6x31'
+    promql_expr_test:
+      # 11분: 503 계열의 표본이 하나뿐이라 rate가 값을 내지 못한다. 5xx 쪽 기록 규칙은 or 0 * (전체)로 0이고, 경보는 pending도 아니다.
+      - expr: namespace_job:traefik_router_requests_errors:rate5m{namespace="shortener-prod"}
+        eval_time: 11m
+        exp_samples:
+          - labels: 'namespace_job:traefik_router_requests_errors:rate5m{namespace="shortener-prod", job="shortener-prod"}'
+            value: 0
+      - expr: ALERTS{alertname="ShortenerEdgeFailing"}
+        eval_time: 11m
+        exp_samples: []
+      # 12분: 표본이 둘이 되어 5분 창의 5xx 비율(37.5%)이 20%를 넘었다(pending). 레이블의 namespace·job은 기록 규칙이 붙인 이 릴리스의 값이다(kube-system이 아니다).
+      - expr: ALERTS{alertname="ShortenerEdgeFailing"}
+        eval_time: 12m
+        exp_samples:
+          - labels: 'ALERTS{alertname="ShortenerEdgeFailing", alertstate="pending", namespace="shortener-prod", job="shortener-prod", severity="critical", service="shortener"}'
+            value: 1
+      # 16분: 5분 창의 요청이 모두 503이다. Traefik은 초당 4건을 받고 그 4건이 모두 5xx다.
+      - expr: namespace_job:traefik_router_requests:rate5m{namespace="shortener-prod"}
+        eval_time: 16m
+        exp_samples:
+          - labels: 'namespace_job:traefik_router_requests:rate5m{namespace="shortener-prod", job="shortener-prod"}'
+            value: 4
+      - expr: namespace_job:traefik_router_requests_errors:rate5m{namespace="shortener-prod"}
+        eval_time: 16m
+        exp_samples:
+          - labels: 'namespace_job:traefik_router_requests_errors:rate5m{namespace="shortener-prod", job="shortener-prod"}'
+            value: 4
+      # 같은 16분에 앱의 5분 창에는 요청이 없어 5xx 비율이 NaN(0 ÷ 0)이다(NaN은 자기 자신과 같지 않다: (d)). 앱의 지표로는 이 장애가 보이지 않는다.
+      - expr: namespace_job:http_server_requests_errors:ratio_rate5m{namespace="shortener-prod"} != bool namespace_job:http_server_requests_errors:ratio_rate5m{namespace="shortener-prod"}
+        eval_time: 16m
+        exp_samples:
+          - labels: '{namespace="shortener-prod", job="shortener-prod"}'
+            value: 1
+      # 31분까지 가용성·지연 경보는 한 번도 pending조차 되지 않았고, dev의 엣지 경보도 그렇다.
+      - expr: count_over_time(ALERTS{alertname=~"ShortenerAvailabilityBudgetBurn|ShortenerLatencyBudgetBurn"}[31m])
+        eval_time: 31m
+        exp_samples: []
+      - expr: count_over_time(ALERTS{alertname="ShortenerEdgeFailing", namespace="shortener-dev"}[31m])
+        eval_time: 31m
+        exp_samples: []
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: ShortenerEdgeFailing
+        exp_alerts: []
+      # 15분(장애 5분째, 아직 장애 중): 12분부터 3분 동안 계속 기준 위라 울린다. 5분 창의 요청이 모두 503이라 값은 100%다. prod 하나뿐이다.
+      - eval_time: 15m
+        alertname: ShortenerEdgeFailing
+        exp_alerts:
+          - exp_labels:
+              namespace: shortener-prod
+              job: shortener-prod
+              severity: critical
+              service: shortener
+            exp_annotations:
+              summary: 'shortener-prod: Traefik(엣지)에서 잰 5xx 비율이 3분 넘게 20%를 넘고 있다'
+              description: >-
+                최근 5분 동안 Traefik이 이 환경의 Ingress로 받은 요청의 100%가 5xx다(기준은 5분 창에서 20%, 그 요청이 5분에 15건보다 많을 때).
+                사용자가 받은 응답을 클러스터의 입구에서 잰 증상 경보다. 앱 파드가 모두 NotReady면 Traefik이 503(no available server)을 직접 돌려주고,
+                그 요청은 앱의 지표에 남지 않아 SLO 경보가 보지 못한다. ShortenerNoAvailablePods가 함께 울리면 그것이 원인이다.
+                파드가 Ready인데 울리면 Traefik과 파드 사이의 실패(502·504)나 앱의 5xx다. kubectl -n shortener-prod get pods,endpointslices와
+                Traefik 로그(kubectl -n kube-system logs deploy/traefik), Grafana의 Shortener 대시보드(엣지와 앱 비교 패널)로 원인을 본다.
+      # 장애가 끝나도(21분부터 다시 성공) 5분 창 안의 503이 20% 아래로 빠질 때까지는 울린다. 23분에는 33.33%다.
+      - eval_time: 23m
+        alertname: ShortenerEdgeFailing
+        exp_alerts:
+          - exp_labels:
+              namespace: shortener-prod
+              job: shortener-prod
+              severity: critical
+              service: shortener
+            exp_annotations:
+              summary: 'shortener-prod: Traefik(엣지)에서 잰 5xx 비율이 3분 넘게 20%를 넘고 있다'
+              description: >-
+                최근 5분 동안 Traefik이 이 환경의 Ingress로 받은 요청의 33.33%가 5xx다(기준은 5분 창에서 20%, 그 요청이 5분에 15건보다 많을 때).
+                사용자가 받은 응답을 클러스터의 입구에서 잰 증상 경보다. 앱 파드가 모두 NotReady면 Traefik이 503(no available server)을 직접 돌려주고,
+                그 요청은 앱의 지표에 남지 않아 SLO 경보가 보지 못한다. ShortenerNoAvailablePods가 함께 울리면 그것이 원인이다.
+                파드가 Ready인데 울리면 Traefik과 파드 사이의 실패(502·504)나 앱의 5xx다. kubectl -n shortener-prod get pods,endpointslices와
+                Traefik 로그(kubectl -n kube-system logs deploy/traefik), Grafana의 Shortener 대시보드(엣지와 앱 비교 패널)로 원인을 본다.
+      # 24분: 창에 503이 없어 풀린다(Alertmanager가 RESOLVED를 보낸다). 마지막 503(20분)에서 4분, 첫 성공(21분)에서 3분 뒤다.
+      - eval_time: 24m
+        alertname: ShortenerEdgeFailing
+        exp_alerts: []
+
+  - name: (q) 평소의 트래픽(앱의 5xx 약 1%, 80 포트의 리다이렉트, 앱의 404)에는 엣지 경보가 울리지 않는다. 같은 네임스페이스의 cert-manager 검증용 서비스는 세지 않는다
+    interval: 1m
+    input_series:
+      # prod 443 라우터: 302 분당 210건, 201 30건, 404 3건(없는 코드), 500 2건(앱의 5xx).
+      - series: 'traefik_router_requests_total{code="302", method="GET", protocol="http", router="websecure-shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '0+210x30'
+      - series: 'traefik_router_requests_total{code="201", method="POST", protocol="http", router="websecure-shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '0+30x30'
+      - series: 'traefik_router_requests_total{code="404", method="GET", protocol="http", router="websecure-shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '0+3x30'
+      - series: 'traefik_router_requests_total{code="500", method="GET", protocol="http", router="websecure-shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '0+2x30'
+      # prod 80 라우터: https로 돌려보낸 301 분당 10건. 분모에 들어간다.
+      - series: 'traefik_router_requests_total{code="301", method="GET", protocol="http", router="shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '0+10x30'
+      # 인증서를 받는 동안 cert-manager가 같은 네임스페이스에 만드는 검증용 Ingress의 라우터. 응답용 파드가 아직 뜨지 않아 모두 503이지만 서비스 이름이 달라 세지 않는다.
+      - series: 'traefik_router_requests_total{code="503", method="GET", protocol="http", router="shortener-prod-cm-acme-http-solver-x7k2p-dev-ops-study-duckdns-org-well-known-acme-challenge-q2s9vb@kubernetes", service="shortener-prod-cm-acme-http-solver-x7k2p-8089@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '0+20x30'
+      # dev: 302 분당 60건뿐이다. 5xx 계열이 한 번도 없었다.
+      - series: 'traefik_router_requests_total{code="302", method="GET", protocol="http", router="websecure-shortener-dev-shortener-dev-dev-dev-ops-study-duckdns-org@kubernetes", service="shortener-dev-shortener-dev-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '0+60x30'
+    promql_expr_test:
+      # prod: 초당 요청 4.25건(분당 255건: 210 + 30 + 3 + 2 + 10. 검증용 서비스의 20건은 빠진다), 그중 5xx는 초당 2 ÷ 60건(약 0.8%).
+      - expr: namespace_job:traefik_router_requests:rate5m{namespace="shortener-prod"}
+        eval_time: 30m
+        exp_samples:
+          - labels: 'namespace_job:traefik_router_requests:rate5m{namespace="shortener-prod", job="shortener-prod"}'
+            value: 4.25
+      - expr: round(namespace_job:traefik_router_requests_errors:rate5m{namespace="shortener-prod"}, 0.0001)
+        eval_time: 30m
+        exp_samples:
+          - labels: '{namespace="shortener-prod", job="shortener-prod"}'
+            value: 0.0333
+      # dev: 5xx 계열이 없어도 or 0 * (전체)로 0이 기록된다(대시보드가 "데이터 없음" 대신 0을 그린다).
+      - expr: namespace_job:traefik_router_requests_errors:rate5m{namespace="shortener-dev"}
+        eval_time: 30m
+        exp_samples:
+          - labels: 'namespace_job:traefik_router_requests_errors:rate5m{namespace="shortener-dev", job="shortener-dev"}'
+            value: 0
+      # 30분 동안 두 환경 모두 한 번도 pending조차 되지 않았다.
+      - expr: count_over_time(ALERTS{alertname="ShortenerEdgeFailing"}[30m])
+        eval_time: 30m
+        exp_samples: []
+
+  - name: (r) 요청이 드물면(5분에 15건 이하) 모두 503이어도 엣지 경보가 울리지 않는다
+    interval: 1m
+    input_series:
+      # prod: 앱 파드가 모두 내려가 있는데 요청이 분당 2건(5분에 10건)뿐이다. 비율은 100%지만 최소 요청 수(초당 0.05건)에 못 미친다. 최소 요청 수의 대가다
+      # (그동안 앱 파드 경보가 울린다: (h)).
+      - series: 'traefik_router_requests_total{code="503", method="GET", protocol="http", router="websecure-shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '0+2x30'
+    promql_expr_test:
+      - expr: namespace_job:traefik_router_requests_errors:rate5m{namespace="shortener-prod"} / namespace_job:traefik_router_requests:rate5m{namespace="shortener-prod"}
+        eval_time: 30m
+        exp_samples:
+          - labels: '{namespace="shortener-prod", job="shortener-prod"}'
+            value: 1
+      - expr: count_over_time(ALERTS{alertname="ShortenerEdgeFailing"}[30m])
+        eval_time: 30m
+        exp_samples: []
+
+  - name: (s) Traefik이 라우터를 버리면(요청이 404, 라우터의 계열이 사라진다) 엣지 경보는 울리지 않는다 (덮지 못하는 장애)
+    interval: 1m
+    input_series:
+      # prod: 10분까지 정상이다가 10분과 11분 사이에 Traefik이 라우터를 버렸다(Ingress가 가리키는 Service가 지워졌거나 미들웨어가 없다).
+      # Traefik은 설정에서 사라진 라우터의 계열을 지우므로 11분부터 계열이 없다(stale).
+      - series: 'traefik_router_requests_total{code="302", method="GET", protocol="http", router="websecure-shortener-prod-shortener-prod-dev-ops-study-duckdns-org@kubernetes", service="shortener-prod-shortener-prod-80@kubernetes", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '0+240x10 stale'
+      # 그 뒤 사용자의 요청(분당 240건)은 맞는 라우터가 없어 404가 되고 엔트리포인트 지표에만 남는다. 평소에도 인터넷의 스캐너가 분당 5건쯤 404를 만든다.
+      # 이 계열에는 호스트가 없어서 어느 환경의 요청인지 알 수 없다. 엣지 경보는 이 계열을 읽지 않는다.
+      - series: 'traefik_entrypoint_requests_total{code="404", entrypoint="websecure", method="GET", protocol="http", namespace="kube-system", job="kube-system/traefik", pod="traefik-6d8f9c7b5-xk2pq"}'
+        values: '0+5x10 295+245x10'
+    promql_expr_test:
+      # 16분: 마지막 표본(10분)이 5분 창을 벗어나 기록 규칙이 비었다.
+      - expr: namespace_job:traefik_router_requests:rate5m{namespace="shortener-prod"}
+        eval_time: 16m
+        exp_samples: []
+      - expr: count_over_time(ALERTS{alertname="ShortenerEdgeFailing"}[21m])
+        eval_time: 21m
+        exp_samples: []

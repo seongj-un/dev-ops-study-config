@@ -157,6 +157,15 @@ or
 {{- end }}
 
 {{- /*
+Traefik이 이 릴리스의 Ingress 백엔드(앱 Service의 80 포트, ingress.yaml)에 붙이는 서비스 이름. Traefik 지표의 service 레이블 값이고, 엣지 경보가 이 값으로 이 환경의 요청을 고른다.
+Traefik v3.7의 Ingress 공급자는 <네임스페이스>-<Service 이름>-<포트 번호 또는 이름>에서 글자·숫자가 아닌 것을 -로 바꾸고(이 이름에는 그런 글자가 없다)
+공급자 이름 kubernetes를 @ 뒤에 붙인다. 예: shortener-prod-shortener-prod-80@kubernetes. ingress.yaml의 백엔드를 바꾸면 이 값도 바꾼다(validate가 둘이 맞는지 확인한다).
+*/}}
+{{- define "shortener.traefikServiceName" -}}
+{{- printf "%s-%s-80@kubernetes" .Release.Namespace (include "shortener.fullname" .) -}}
+{{- end }}
+
+{{- /*
 앱을 Deployment 대신 Argo Rollouts의 Rollout으로 배포할지. 참이면 "true", 아니면 빈 문자열을 돌려준다(include의 결과는 문자열이라 if는 빈 문자열만 거짓으로 본다).
 rollout.enabled가 켜져 있고 클러스터가 Rollout과 AnalysisTemplate 두 kind를 모두 알 때만 참이다. 조건의 이유는 rollout.yaml 머리말의 [조건부 생성]에 있다.
 deployment.yaml·rollout.yaml·analysistemplate.yaml·hpa.yaml이 이 한 곳을 함께 써서, Deployment와 Rollout이 함께 나오거나 함께 빠지는 일이 없고 HPA가 늘 있는 쪽을 가리킨다.
