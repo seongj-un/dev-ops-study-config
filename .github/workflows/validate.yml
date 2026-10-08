@@ -393,6 +393,69 @@ jobs:
           done
           exit "$status"
 
+      # platform/traefik-config(traefik-config Application)의 HelmChartConfig와 PodMonitor를 검사한다. ArgoCD가 이 디렉터리의 YAML을 렌더링 없이 그대로 적용한다.
+      #   1) kubeconform: PodMonitor의 스키마는 CRD_SCHEMA_LOCATION의 커밋에 있다(monitoring.coreos.com/podmonitor_v1.json). -strict가 필드 이름의 오타를 잡는다.
+      #      HelmChartConfig는 건너뛴다(-skip). 그 커밋(과 2026-10의 main)의 helm.cattle.io 스키마는 failurePolicy로 abort·reinstall만 받는데, 이 파일은 k3s v1.35.8의
+      #      helm-controller(v0.17.7) CRD가 받는 retry를 쓴다(이유는 platform/traefik-config/helmchartconfig.yaml). 그 내용은 아래 2)·3)이 본다.
+      #   2) yq: HelmChartConfig가 하나이고 kube-system의 traefik(k3s의 HelmChart와 같은 이름·네임스페이스여야 합쳐진다)이며 failurePolicy가 retry인지 본다.
+      #   3) k3s가 쓰는 Traefik 차트를 k3s의 값(HelmChart traefik의 valuesContent)과 이 HelmChartConfig의 valuesContent를 차례로 얹어(helm-controller와 같은 순서)
+      #      helm template으로 렌더링하고, Traefik의 인자에 라우터 지표·빈 서비스 허용이 들어 있는지, PodMonitor의 셀렉터 레이블과 포트 이름이 렌더링된 파드와 맞는지 본다.
+      #      값의 이름이 틀리면(addRouterLabels 등) 차트가 조용히 무시해서 라우터 지표가 생기지 않고, PodMonitor가 파드를 고르지 못하면 아무것도 수집하지 않는다.
+      #      어느 쪽이든 엣지 경보가 아무 경고 없이 영영 울리지 않는다. k3s의 HelmChart가 --set으로 넘기는 global.systemDefaultRegistry는 k3s가 채우는 자리표시자라 빈 값으로 준다.
+      #      차트 파일과 k3s 매니페스트는 k3s v1.35.8+k3s1이 쓰는 것이다(k3s 저장소의 manifests/traefik.yaml과 scripts/download가 받는 차트). 내려받은 파일을 SHA-256으로 확인한다.
+      #      Dependabot이 갱신해 주지 않으니 k3s를 올리면 네 값을 함께 바꾼다(차트 이름은 새 매니페스트의 spec.chart에서 읽는다).
+      # 기대와 다른 것이 있어도 바로 멈추지 않고 모두 오류로 남긴 뒤 실패한다.
+      - name: Traefik 설정 검사 (platform/traefik-config)
+        env:
+          K3S_TRAEFIK_MANIFEST_URL: https://raw.githubusercontent.com/k3s-io/k3s/v1.35.8%2Bk3s1/manifests/traefik.yaml
+          K3S_TRAEFIK_MANIFEST_SHA256: e398aa7f8f6686c480ea666984b55cda9ca7b561dbd5b4308455262533edda17
+          TRAEFIK_CHART_URL: https://k3s.io/k3s-charts/assets/traefik/traefik-40.1.4+up40.1.0.tgz
+          TRAEFIK_CHART_SHA256: a9ebcfeecdd5b9f1ffea1167a7ffee69e346cd10864998ce8e44b51c204b7767
+        run: |
+          set -euo pipefail
+          dir=platform/traefik-config
+          docker run --rm -v "$GITHUB_WORKSPACE:/work:ro" -w /work "$KUBECONFORM_IMAGE" \
+            -strict -summary -skip HelmChartConfig \
+            -schema-location "$K8S_SCHEMA_LOCATION" \
+            -schema-location "$CRD_SCHEMA_LOCATION" \
+            -kubernetes-version "$KUBERNETES_VERSION" \
+            "$dir/"
+          status=0
+          # 인자: 설명, 기대값, yq ea 식, 파일(여럿이면 함께 읽는다)
+          expect() {
+            actual="$(yq ea "$3" "${@:4}")"
+            if [ "$actual" != "$2" ]; then
+              echo "::error::${1}: ${2}이어야 하는데 ${actual}이다"
+              status=1
+            fi
+          }
+          hcc='select(.kind == "HelmChartConfig")'
+          pm='select(.kind == "PodMonitor")'
+          expect "HelmChartConfig 수" 1 "[$hcc] | length" "$dir"/*.yaml
+          expect "HelmChartConfig의 네임스페이스/이름" kube-system/traefik "$hcc | .metadata.namespace + \"/\" + .metadata.name" "$dir"/*.yaml
+          expect "HelmChartConfig의 failurePolicy" retry "$hcc | .spec.failurePolicy" "$dir"/*.yaml
+          expect "PodMonitor 수" 1 "[$pm] | length" "$dir"/*.yaml
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/k3s-traefik.yaml" "$K3S_TRAEFIK_MANIFEST_URL"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/traefik.tgz" "$TRAEFIK_CHART_URL"
+          # 체크섬이 다르면 sha256sum이 실패하고(set -e) 내려받은 파일은 쓰지 않는다.
+          printf '%s  %s\n' "$K3S_TRAEFIK_MANIFEST_SHA256" "$RUNNER_TEMP/k3s-traefik.yaml" "$TRAEFIK_CHART_SHA256" "$RUNNER_TEMP/traefik.tgz" | sha256sum -c -
+          yq 'select(.kind == "HelmChart" and .metadata.name == "traefik") | .spec.valuesContent' "$RUNNER_TEMP/k3s-traefik.yaml" > "$RUNNER_TEMP/traefik-values-k3s.yaml"
+          yq ea "$hcc | .spec.valuesContent" "$dir"/*.yaml > "$RUNNER_TEMP/traefik-values-config.yaml"
+          helm template traefik "$RUNNER_TEMP/traefik.tgz" --namespace kube-system --kube-version "$KUBERNETES_VERSION" \
+            -f "$RUNNER_TEMP/traefik-values-k3s.yaml" -f "$RUNNER_TEMP/traefik-values-config.yaml" \
+            --set global.systemDefaultRegistry= > "$RUNNER_TEMP/traefik.yaml"
+          deploy='select(.kind == "Deployment" and .metadata.name == "traefik")'
+          for arg in --metrics.prometheus.addRoutersLabels=true --providers.kubernetesingress.allowEmptyServices=true; do
+            expect "Traefik 컨테이너 인자 $arg 수" 1 "[$deploy | .spec.template.spec.containers[] | select(.name == \"traefik\") | .args[] | select(. == \"$arg\")] | length" "$RUNNER_TEMP/traefik.yaml"
+          done
+          while IFS= read -r label; do
+            expect "Traefik 파드의 레이블 ${label%%=*}(PodMonitor의 셀렉터)" "${label#*=}" "$deploy | .spec.template.metadata.labels.\"${label%%=*}\"" "$RUNNER_TEMP/traefik.yaml"
+          done < <(yq ea "$pm | .spec.selector.matchLabels | to_entries | .[] | .key + \"=\" + .value" "$dir"/*.yaml)
+          while IFS= read -r port; do
+            expect "Traefik 파드에서 이름이 ${port}인 컨테이너 포트 수(PodMonitor의 port)" 1 "[$deploy | .spec.template.spec.containers[].ports[] | select(.name == \"$port\")] | length" "$RUNNER_TEMP/traefik.yaml"
+          done < <(yq ea "$pm | .spec.podMetricsEndpoints[].port" "$dir"/*.yaml)
+          exit "$status"
+
       # 인증서 경보(platform/kube-prometheus-stack/values.yaml의 additionalPrometheusRulesMap.certificates)를 promtool로 검사한다.
       # 아래 플랫폼 차트 단계가 그 PrometheusRule(kube-prometheus-stack-certificates)의 모양을 kubeconform으로 보지만, 그 안의 PromQL은 문자열로만 본다.
       #   1) yq로 그 키의 값(groups)을 꺼내 tests/certificates/rendered/certificate-alerts.yaml에 쓴다(.gitignore). 차트는 groups를 toYaml로 그대로 옮기므로
