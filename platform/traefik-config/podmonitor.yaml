@@ -1,0 +1,46 @@
+# Traefik 지표 수집(PodMonitor). Prometheus Operator가 이것을 Prometheus의 수집 설정으로 바꾼다. kube-prometheus-stack의 Prometheus는 모든 네임스페이스의
+# PodMonitor를 레이블 없이 고른다(platform/kube-prometheus-stack/values.yaml의 podMonitorSelectorNilUsesHelmValues: false). traefik-config Application이 적용한다.
+# k3s의 Traefik은 지표를 파드의 9100 포트(엔트리포인트 metrics, 컨테이너 포트 이름 metrics)의 /metrics로 내놓지만, k3s가 쓰는 차트 값으로는 그 포트를 Service에 열지 않고
+# ServiceMonitor도 만들지 않아서 지금까지 아무도 수집하지 않았다(파드의 prometheus.io/* 어노테이션은 Prometheus Operator가 읽지 않는다).
+#
+# ServiceMonitor가 아니라 PodMonitor인 이유:
+#   - Service가 필요 없다. ServiceMonitor를 쓰려면 HelmChartConfig로 지표용 Service를 하나 더 만들어야 한다.
+#   - ServiceMonitor는 수집한 계열에 대상 Service의 이름을 service 레이블로 붙인다. Traefik 지표에도 service 레이블(Traefik의 서비스 이름)이 있어서 이름이 겹치면
+#     지표의 것이 exported_service로 바뀐다(honorLabels가 false일 때). PodMonitor는 namespace·container·pod·job·endpoint만 붙여서 지표의 service가 그대로 남는다.
+#   - Traefik 차트의 serviceMonitor 값을 켜는 방법은 쓰지 않는다. k3s는 노드가 뜰 때 Traefik을 설치하는데 그때는 Prometheus Operator의 CRD가 아직 없어서,
+#     차트가 렌더링을 실패시키고("You have to deploy monitoring.coreos.com/v1 first") Traefik 설치 자체가 실패한다.
+#
+# 수집된 계열의 레이블: Traefik 지표의 레이블에 namespace="kube-system", pod·container(Traefik 파드), endpoint="metrics", job="kube-system/traefik"(<네임스페이스>/<PodMonitor 이름>)이 붙는다.
+# 지표의 namespace는 없으므로 앱의 네임스페이스는 service 레이블(<앱 네임스페이스>-<Service 이름>-<포트>@kubernetes)로 가린다(앱 차트 templates/prometheusrule.yaml의 [엣지 경보]).
+#
+# 동기화 순서: PodMonitor의 CRD는 kube-prometheus-stack Application이 만든다. 새 클러스터에서 이쪽이 먼저 동기화되면 CRD가 아직 없다.
+# 아래 어노테이션(SkipDryRunOnMissingResource=true)이 동기화 전 검증이 "kind를 모른다"로 동기화를 통째로 거부하지 않게 하고,
+# 실제 적용의 실패는 Application의 retry가 다시 시도한다(argocd/apps/traefik-config.yaml의 retry 주석. cert-issuers의 ClusterIssuer와 같은 방법).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: traefik
+  namespace: kube-system
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  # k3s의 Traefik 차트가 Traefik 파드에 붙이는 레이블(릴리스 traefik, 네임스페이스 kube-system). ServiceLB가 만드는 svclb-traefik 파드는 레이블이 달라 빠진다.
+  # namespaceSelector를 적지 않으면 이 PodMonitor의 네임스페이스(kube-system)에서만 찾는다.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+      app.kubernetes.io/instance: traefik-kube-system
+  podMetricsEndpoints:
+    # 컨테이너 포트의 이름. validate가 k3s의 값으로 렌더링한 Traefik 파드에 이 이름의 포트와 위 레이블이 있는지 확인한다.
+    - port: metrics
+      path: /metrics
+      # Prometheus의 전역 수집 주기와 같다(앱 ServiceMonitor와 같은 값). 엣지 경보의 5분 창에 표본이 10개 들어간다.
+      interval: 30s
+      # 라우터 지표 가운데 엣지 경보가 쓰는 요청 수(traefik_router_requests_total)만 남긴다. 라우터 지표를 켜면 라우터마다 지속 시간 히스토그램
+      # (경계 4개 + +Inf 버킷 + _sum + _count = 코드·메서드 조합마다 계열 7개)과 요청·응답 바이트 수, TLS 요청 수도 생긴다. 그것들은 같은 요청을 서비스 단위로 세는
+      # 서비스 지표(traefik_service_*)로 보고 라우터 단위로는 버린다. 수집한 뒤에 버리는 것이라 Traefik은 그대로 내놓고, Prometheus에 저장되지 않는다.
+      # 엔트리포인트·서비스 지표는 Traefik의 기본값(켜짐) 그대로 수집한다.
+      metricRelabelings:
+        - action: drop
+          sourceLabels: [__name__]
+          regex: traefik_router_(request_duration_seconds_.+|requests_bytes_total|responses_bytes_total|requests_tls_total)

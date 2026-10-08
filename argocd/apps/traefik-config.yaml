@@ -1,0 +1,36 @@
+# k3s Traefik 설정 Application: 이 저장소의 platform/traefik-config에 있는 HelmChartConfig(라우터 지표 켜기)와 PodMonitor(Traefik 지표 수집)를 kube-system에 만든다.
+# 루트 Application(argocd/root.yaml)이 이 파일을 읽어 클러스터에 Application을 만든다. Traefik 자체는 이 저장소가 아니라 k3s가 설치한다(README의 엣지 SLI).
+#
+# 외부 차트가 없어서 소스가 하나다(cert-issuers처럼 이 저장소의 경로를 직접 가리킨다). kustomization.yaml이 없는 디렉터리라 ArgoCD가 안의 YAML을 그대로 읽는다.
+# HelmChartConfig를 바꾸면 k3s의 helm-controller가 Traefik을 다시 설치해서 Traefik 파드가 한 번 바뀐다(platform/traefik-config/helmchartconfig.yaml 머리말).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: traefik-config
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/seongj-un/dev-ops-study-config.git
+    targetRevision: main
+    path: platform/traefik-config
+  # 두 리소스 모두 kube-system에 있다(파일에도 네임스페이스를 적었다). kube-system은 늘 있으므로 CreateNamespace를 두지 않는다.
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    # 자동 동기화와 prune·selfHeal은 다른 Application과 같다(argocd/apps/shortener-dev.yaml 참고). prune은 ArgoCD가 만든 이 두 리소스만 지운다
+    # (k3s가 만든 HelmChart traefik 등 kube-system의 다른 리소스에는 ArgoCD의 추적 어노테이션이 없다).
+    automated:
+      prune: true
+      selfHeal: true
+    # 동기화 순서: PodMonitor의 CRD는 kube-prometheus-stack Application이 만든다. 새 클러스터에서 이쪽이 먼저 동기화되면 PodMonitor의 적용이 "kind를 모른다"로 실패하고
+    # (SkipDryRunOnMissingResource=true가 동기화 전 검증만 건너뛰게 한다. platform/traefik-config/podmonitor.yaml), 이 retry가 CRD가 생길 때까지 다시 시도한다.
+    # 값과 대가는 cert-issuers와 같다(argocd/apps/cert-issuers.yaml의 retry 주석): 10초에서 시작해 2배씩, 3분을 넘지 않게 6번(합쳐 약 8분).
+    # HelmChartConfig의 CRD는 k3s가 처음부터 설치해 두어 기다리지 않는다.
+    retry:
+      limit: 6
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

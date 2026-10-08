@@ -60,6 +60,13 @@ jobs:
       # 규칙 문법과 PromQL 함수는 Prometheus 버전마다 다를 수 있어서다. kube-prometheus-stack을 올리면 그 차트의 Prometheus 이미지 태그에 맞춰 이 값도 올린다.
       # 태그@다이제스트(멀티 아키텍처 인덱스)로 고정하는 방식과 이유는 KUBECONFORM_IMAGE와 같고(docker.io와 quay.io의 다이제스트가 같다), 같은 이유로 Dependabot이 갱신해 주지 않는다.
       PROMETHEUS_IMAGE: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+      # "Traefik 설정 검사" 단계가 렌더링하는 k3s의 Traefik: k3s v1.35.8+k3s1의 manifests/traefik.yaml과 그것이 가리키는 차트 파일(k3s의 scripts/download가 받는 곳).
+      # 내려받은 파일을 이 SHA-256으로 확인한다. 그 앞의 캐시 단계도 두 SHA-256을 키로 쓰므로 단계의 env가 아니라 잡의 env에 둔다.
+      # Dependabot이 갱신해 주지 않으니 k3s를 올리면 네 값을 함께 바꾼다(차트 이름은 새 매니페스트의 spec.chart에서 읽는다).
+      K3S_TRAEFIK_MANIFEST_URL: https://raw.githubusercontent.com/k3s-io/k3s/v1.35.8%2Bk3s1/manifests/traefik.yaml
+      K3S_TRAEFIK_MANIFEST_SHA256: e398aa7f8f6686c480ea666984b55cda9ca7b561dbd5b4308455262533edda17
+      TRAEFIK_CHART_URL: https://k3s.io/k3s-charts/assets/traefik/traefik-40.1.4+up40.1.0.tgz
+      TRAEFIK_CHART_SHA256: a9ebcfeecdd5b9f1ffea1167a7ffee69e346cd10864998ce8e44b51c204b7767
     steps:
       # 이 파일의 액션은 태그(v5 등)가 아니라 전체 커밋 SHA로 고정하고, 뒤에 버전을 주석으로 남긴다.
       # 태그는 저장소 소유자(또는 계정을 탈취한 공격자)가 다른 커밋으로 옮길 수 있는 이름이라, 태그로 참조하면 그 시점의 코드가 그대로 실행된다.
@@ -298,16 +305,21 @@ jobs:
           expect "shortener-dev(TLS 끔, HSTS 켬) Ingress의 spec.tls" null "$ingress | .spec.tls" "$no_tls"
           exit "$status"
 
-      # 차트의 SLO 규칙과 앱 파드 경보·쓰기 경로 경보(PrometheusRule)를 Prometheus의 도구 promtool로 검사한다. kubeconform은 리소스의 모양만 보고 그 안의 PromQL은 문자열로만 본다.
+      # 차트의 SLO 규칙과 앱 파드 경보·쓰기 경로 경보·엣지 경보(PrometheusRule)를 Prometheus의 도구 promtool로 검사한다. kubeconform은 리소스의 모양만 보고 그 안의 PromQL은 문자열로만 본다.
       #   1) 위 단계의 두 갈래 렌더링 결과에서 yq로 PrometheusRule의 spec만 꺼내 tests/slo/rendered/<릴리스>.yaml(Rollout 갈래)과
       #      <릴리스>-deployment.yaml(Deployment 갈래)에 쓴다. spec(groups)이 곧 Prometheus 규칙 파일의 형식이다.
       #      두 갈래는 앱 파드 경보가 읽는 지표만 다르다(Rollout이면 Argo Rollouts 컨트롤러의 지표, Deployment이면 kube-state-metrics의 지표. 차트 templates/prometheusrule.yaml).
       #      갈래마다 PrometheusRule이 정확히 하나여야 한다. 없으면 값 파일에서 slo가 꺼졌거나 위 --api-versions 조건이 깨진 것이라 실패시킨다.
-      #   2) promtool check rules: YAML 구조, PromQL 문법, 어노테이션의 템플릿 문법, 같은 규칙의 중복을 검사한다(--lint-fatal: 중복 경고도 실패로 본다).
-      #   3) promtool test rules: 테스트 파일이 가짜 시계열을 넣고, 정한 시각에 울려야 할 알림과 울리지 않아야 할 알림을 확인한다.
+      #   2) 엣지 경보의 기록 규칙이 고르는 Traefik 서비스 이름(service 레이블)이 렌더링된 Ingress의 백엔드에서 Traefik이 만드는 이름
+      #      <네임스페이스>-<Service 이름>-<포트>@kubernetes와 같은지 본다(차트 _helpers.tpl의 shortener.traefikServiceName). 둘이 어긋나면 규칙이 고르는 계열이 없어
+      #      엣지 경보가 아무 경고 없이 영영 울리지 않는다. Traefik은 이름의 글자·숫자가 아닌 글자를 -로 바꾸는데, 쿠버네티스 이름에는 그런 글자가 - 말고 없어서 그대로 이어 붙인다.
+      #      Ingress의 백엔드가 하나라는 전제다(차트 templates/ingress.yaml). 늘리면 이 확인도 고친다.
+      #   3) promtool check rules: YAML 구조, PromQL 문법, 어노테이션의 템플릿 문법, 같은 규칙의 중복을 검사한다(--lint-fatal: 중복 경고도 실패로 본다).
+      #   4) promtool test rules: 테스트 파일이 가짜 시계열을 넣고, 정한 시각에 울려야 할 알림과 울리지 않아야 할 알림을 확인한다.
       #      tests/slo/shortener-slo.test.yaml은 Rollout 갈래의 두 환경 규칙을 함께 읽는다(5xx 100%, 5xx 0.1%, 20%가 느린 요청, 요청 없음, 5xx 4%의 느린 소진,
       #      le 버킷이 없는 옛 파드와 있는 새 파드가 섞인 롤아웃, le 버킷이 없는 앱, 앱 파드 0개·순간 0개·컨트롤러 교체와 지표 없음·노드 부팅 직후,
-      #      생성만 모두 실패하는 v5 모양과 첫 실패 때 생기는 5xx 계열·생성 5xx 10%와 리다이렉트만 실패·드문 생성의 실패).
+      #      생성만 모두 실패하는 v5 모양과 첫 실패 때 생기는 5xx 계열·생성 5xx 10%와 리다이렉트만 실패·드문 생성의 실패,
+      #      앱 지표 없이 Traefik의 503만 있는 v4 모양·평소의 트래픽과 검증용 서비스·드문 요청·라우터가 사라진 404).
       #      tests/slo/shortener-slo-deployment.test.yaml은 Deployment 갈래의 앱 파드 경보만 본다(앱 Deployment 0개, 다른 Deployment 0개, 지표 없음, 노드 부팅 직후).
       # promtool의 버전과 이미지는 잡의 PROMETHEUS_IMAGE(위 env)다. promtool은 파일을 읽기만 하므로 tests/slo를 읽기 전용으로 마운트한다.
       - name: SLO 규칙 검사 (promtool check + test)
@@ -324,6 +336,15 @@ jobs:
               fi
               yq 'select(.kind == "PrometheusRule") | .spec' "$rendered" > "tests/slo/rendered/shortener-$environment$suffix.yaml"
             done
+            # 엣지 경보의 Traefik 서비스 이름. 릴리스 이름과 네임스페이스는 둘 다 shortener-<환경>이다. 엣지 그룹의 기록 규칙에 나오는 service 매처가 이것 하나뿐이어야 한다.
+            backend="$(yq 'select(.kind == "Ingress") | .spec.rules[].http.paths[].backend.service | .name + "-" + ((.port.number // .port.name) | tostring)' "$RUNNER_TEMP/$environment.yaml")"
+            want="service=\"shortener-$environment-$backend@kubernetes\""
+            got="$(yq ".groups[] | select(.name == \"shortener-$environment-edge\") | .rules[] | select(has(\"record\")) | .expr" "tests/slo/rendered/shortener-$environment.yaml" \
+              | grep -o 'service="[^"]*"' | sort -u | paste -sd ' ' -)" || true
+            if [ "$got" != "$want" ]; then
+              echo "::error::shortener-$environment 엣지 기록 규칙의 Traefik 서비스 매처가 ${want}이어야 하는데 ${got:-없음}이다(Ingress의 백엔드와 차트의 shortener.traefikServiceName이 어긋났다)"
+              exit 1
+            fi
           done
           docker run --rm -v "$GITHUB_WORKSPACE/tests/slo:/slo:ro" --entrypoint /bin/promtool "$PROMETHEUS_IMAGE" \
             check rules --lint-fatal /slo/rendered/shortener-dev.yaml /slo/rendered/shortener-prod.yaml \
@@ -391,6 +412,82 @@ jobs:
               status=1
             fi
           done
+          exit "$status"
+
+      # 다음 단계가 쓰는 k3s의 Traefik 차트 파일과 매니페스트를 캐시에서 꺼낸다. 이 두 파일 때문에 모든 PR의 validate가 k3s.io와 raw.githubusercontent.com에 기대게 되어서,
+      # 한 번 받은 것을 GitHub Actions 캐시에 두고 다시 쓴다. 키는 두 파일의 SHA-256(잡 env)이라 k3s를 올려 값을 바꾸면 새 키가 되고, 같은 키의 내용은 바뀌지 않는다.
+      # 캐시에 없으면(cache-hit이 아니면) 다음 단계가 내려받고, 잡이 성공하면 이 액션의 post 단계가 그 디렉터리를 저장한다(post-if: success()라 실패한 잡의 파일은 저장하지 않는다).
+      # 캐시에서 꺼낸 파일도 다음 단계가 쓰기 전에 SHA-256으로 확인한다(캐시는 같은 저장소의 다른 워크플로도 쓸 수 있는 저장소라 내용을 믿지 않는다).
+      # PR 실행은 기본 브랜치(main)가 만든 캐시를 읽을 수 있고, PR에서 만든 캐시는 그 PR 안에서만 보인다.
+      - name: k3s Traefik 차트·매니페스트 캐시
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/k3s-traefik
+          key: k3s-traefik-${{ env.K3S_TRAEFIK_MANIFEST_SHA256 }}-${{ env.TRAEFIK_CHART_SHA256 }}
+
+      # platform/traefik-config(traefik-config Application)의 HelmChartConfig와 PodMonitor를 검사한다. ArgoCD가 이 디렉터리의 YAML을 렌더링 없이 그대로 적용한다.
+      #   1) kubeconform: PodMonitor의 스키마는 CRD_SCHEMA_LOCATION의 커밋에 있다(monitoring.coreos.com/podmonitor_v1.json). -strict가 필드 이름의 오타를 잡는다.
+      #      HelmChartConfig는 건너뛴다(-skip). 그 커밋(과 2026-10의 main)의 helm.cattle.io 스키마는 failurePolicy로 abort·reinstall만 받는데, 이 파일은 k3s v1.35.8의
+      #      helm-controller(v0.17.7) CRD가 받는 retry를 쓴다(이유는 platform/traefik-config/helmchartconfig.yaml). 그 내용은 아래 2)·3)이 본다.
+      #   2) yq: HelmChartConfig가 하나이고 kube-system의 traefik(k3s의 HelmChart와 같은 이름·네임스페이스여야 합쳐진다)이며 failurePolicy가 retry인지 본다.
+      #   3) k3s가 쓰는 Traefik 차트를 k3s의 값(HelmChart traefik의 valuesContent)과 이 HelmChartConfig의 valuesContent를 차례로 얹어(helm-controller와 같은 순서)
+      #      helm template으로 렌더링하고, Traefik의 인자에 라우터 지표·빈 서비스 허용이 들어 있는지, PodMonitor의 셀렉터 레이블과 포트 이름이 렌더링된 파드와 맞는지 본다.
+      #      값의 이름이 틀리면(addRouterLabels 등) 차트가 조용히 무시해서 라우터 지표가 생기지 않고, PodMonitor가 파드를 고르지 못하면 아무것도 수집하지 않는다.
+      #      어느 쪽이든 엣지 경보가 아무 경고 없이 영영 울리지 않는다. k3s의 HelmChart가 --set으로 넘기는 global.systemDefaultRegistry는 k3s가 채우는 자리표시자라 빈 값으로 준다.
+      #      차트 파일과 k3s 매니페스트는 k3s v1.35.8+k3s1이 쓰는 것이다(잡 env의 K3S_TRAEFIK_MANIFEST_*·TRAEFIK_CHART_*).
+      #      바로 앞 단계의 캐시에 있으면 그것을 쓰고, 없으면 내려받는다. 어느 쪽이든 쓰기 전에 SHA-256으로 확인한다.
+      #      curl은 --retry 3에 --retry-all-errors(HTTP 오류 등 모든 실패)와 --retry-connrefused(연결 거부)를 더해 다시 시도한다(--retry만으로는 연결 거부를 다시 시도하지 않는다).
+      # 기대와 다른 것이 있어도 바로 멈추지 않고 모두 오류로 남긴 뒤 실패한다.
+      - name: Traefik 설정 검사 (platform/traefik-config)
+        run: |
+          set -euo pipefail
+          dir=platform/traefik-config
+          docker run --rm -v "$GITHUB_WORKSPACE:/work:ro" -w /work "$KUBECONFORM_IMAGE" \
+            -strict -summary -skip HelmChartConfig \
+            -schema-location "$K8S_SCHEMA_LOCATION" \
+            -schema-location "$CRD_SCHEMA_LOCATION" \
+            -kubernetes-version "$KUBERNETES_VERSION" \
+            "$dir/"
+          status=0
+          # 인자: 설명, 기대값, yq ea 식, 파일(여럿이면 함께 읽는다)
+          expect() {
+            actual="$(yq ea "$3" "${@:4}")"
+            if [ "$actual" != "$2" ]; then
+              echo "::error::${1}: ${2}이어야 하는데 ${actual}이다"
+              status=1
+            fi
+          }
+          hcc='select(.kind == "HelmChartConfig")'
+          pm='select(.kind == "PodMonitor")'
+          expect "HelmChartConfig 수" 1 "[$hcc] | length" "$dir"/*.yaml
+          expect "HelmChartConfig의 네임스페이스/이름" kube-system/traefik "$hcc | .metadata.namespace + \"/\" + .metadata.name" "$dir"/*.yaml
+          expect "HelmChartConfig의 failurePolicy" retry "$hcc | .spec.failurePolicy" "$dir"/*.yaml
+          expect "PodMonitor 수" 1 "[$pm] | length" "$dir"/*.yaml
+          # 앞 단계(캐시)와 같은 디렉터리다. 캐시에서 꺼낸 파일이 있으면 그대로 쓰고, 없는 파일만 내려받는다.
+          downloads="$RUNNER_TEMP/k3s-traefik"
+          mkdir -p "$downloads"
+          manifest="$downloads/k3s-traefik.yaml"
+          chart="$downloads/traefik.tgz"
+          [ -f "$manifest" ] || curl -fsSL --retry 3 --retry-all-errors --retry-connrefused -o "$manifest" "$K3S_TRAEFIK_MANIFEST_URL"
+          [ -f "$chart" ] || curl -fsSL --retry 3 --retry-all-errors --retry-connrefused -o "$chart" "$TRAEFIK_CHART_URL"
+          # 캐시에서 꺼냈든 내려받았든 체크섬이 다르면 sha256sum이 실패하고(set -e) 그 파일은 쓰지 않는다. 내려받은 파일이 다르면 잡이 실패해 캐시에 저장되지 않고,
+          # 캐시의 파일이 다르면 그 캐시를 지울 때까지(gh cache delete <키>) 실패한다(다른 내용을 믿고 쓰는 것보다 멈추는 쪽을 고른다).
+          printf '%s  %s\n' "$K3S_TRAEFIK_MANIFEST_SHA256" "$manifest" "$TRAEFIK_CHART_SHA256" "$chart" | sha256sum -c -
+          yq 'select(.kind == "HelmChart" and .metadata.name == "traefik") | .spec.valuesContent' "$manifest" > "$RUNNER_TEMP/traefik-values-k3s.yaml"
+          yq ea "$hcc | .spec.valuesContent" "$dir"/*.yaml > "$RUNNER_TEMP/traefik-values-config.yaml"
+          helm template traefik "$chart" --namespace kube-system --kube-version "$KUBERNETES_VERSION" \
+            -f "$RUNNER_TEMP/traefik-values-k3s.yaml" -f "$RUNNER_TEMP/traefik-values-config.yaml" \
+            --set global.systemDefaultRegistry= > "$RUNNER_TEMP/traefik.yaml"
+          deploy='select(.kind == "Deployment" and .metadata.name == "traefik")'
+          for arg in --metrics.prometheus.addRoutersLabels=true --providers.kubernetesingress.allowEmptyServices=true; do
+            expect "Traefik 컨테이너 인자 $arg 수" 1 "[$deploy | .spec.template.spec.containers[] | select(.name == \"traefik\") | .args[] | select(. == \"$arg\")] | length" "$RUNNER_TEMP/traefik.yaml"
+          done
+          while IFS= read -r label; do
+            expect "Traefik 파드의 레이블 ${label%%=*}(PodMonitor의 셀렉터)" "${label#*=}" "$deploy | .spec.template.metadata.labels.\"${label%%=*}\"" "$RUNNER_TEMP/traefik.yaml"
+          done < <(yq ea "$pm | .spec.selector.matchLabels | to_entries | .[] | .key + \"=\" + .value" "$dir"/*.yaml)
+          while IFS= read -r port; do
+            expect "Traefik 파드에서 이름이 ${port}인 컨테이너 포트 수(PodMonitor의 port)" 1 "[$deploy | .spec.template.spec.containers[].ports[] | select(.name == \"$port\")] | length" "$RUNNER_TEMP/traefik.yaml"
+          done < <(yq ea "$pm | .spec.podMetricsEndpoints[].port" "$dir"/*.yaml)
           exit "$status"
 
       # 인증서 경보(platform/kube-prometheus-stack/values.yaml의 additionalPrometheusRulesMap.certificates)를 promtool로 검사한다.
