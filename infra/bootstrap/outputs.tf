@@ -16,3 +16,10 @@ output "backend_config_arg" {
   description = "infra/aws의 terraform init에 붙일 -backend-config 인자(버킷 이름)"
   value       = "-backend-config=bucket=${aws_s3_bucket.state.bucket}"
 }
+
+# 저장소 변수 AWS_PLAN_ROLE_ARN에 넣는 값이다(infra/aws/README의 "GitHub Actions에서 plan"). ARN에는 계정 ID가 들어 있지만 비밀은 아니다.
+# 이 ARN을 안다고 역할을 맡을 수 있는 것이 아니다. 맡으려면 신뢰 정책의 sub에 맞는 GitHub OIDC 토큰이 있어야 한다.
+output "github_plan_role_arn" {
+  description = "GitHub Actions의 terraform-plan 워크플로가 맡는 역할의 ARN(저장소 변수 AWS_PLAN_ROLE_ARN)"
+  value       = aws_iam_role.github_plan.arn
+}

@@ -47,6 +47,7 @@ platform/argo-rollouts/values.yaml  그 값 (컨트롤러·CRD·대시보드. �
 tests/slo/                       앱 SLO 규칙(차트의 PrometheusRule)의 promtool 단위 테스트. validate가 차트를 렌더링해 꺼낸 규칙으로 돌린다
 tests/canary/                    카나리 분석 쿼리(차트의 AnalysisTemplate)의 promtool 단위 테스트. validate가 렌더링 결과에서 쿼리를 꺼내 돌린다
 .github/workflows/validate.yml   PR·main 푸시 검증 (값 파일 형식, helm lint, 렌더링(Rollout·Deployment 두 갈래), 스키마 검사, SLO 규칙·카나리 분석 쿼리 검사, 플랫폼 차트 렌더링, 대시보드 검사)
+.github/workflows/terraform-plan.yml  infra/aws를 바꾸는 PR의 terraform plan 요약 (GitHub OIDC로 읽기 전용 역할을 맡는다. 필수 검사 아님. infra/aws/README.md)
 .github/dependabot.yml           GitHub Actions 주간 갱신
 ```
 
@@ -627,8 +628,11 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 |---|---|---|
 | ArgoCD Helm 차트 / 앱 | 10.9.4 / v3.5.3 | `bootstrap/argocd/values.yaml`, 이 README |
 | Helm (로컬·CI) | 4.3.0 | `validate.yml`의 `azure/setup-helm` 입력 `version` |
-| `actions/checkout` | v7.0.1 (커밋 SHA로 고정) | `validate.yml` |
+| `actions/checkout` | v7.0.1 (커밋 SHA로 고정) | `validate.yml`, `terraform-plan.yml` |
 | `azure/setup-helm` | v5.0.1 (커밋 SHA로 고정) | `validate.yml` |
+| `aws-actions/configure-aws-credentials` | v6.3.0 (커밋 SHA로 고정) | `terraform-plan.yml` |
+| `hashicorp/setup-terraform` | v4.0.1 (커밋 SHA로 고정) | `terraform-plan.yml` |
+| Terraform (CI) | 1.16.4 (로컬에서 `apply`하는 버전과 같게 둔다: `user_data`의 gzip 결과가 빌드한 Go 버전에 따라 달라질 수 있다) | `terraform-plan.yml`의 `setup-terraform` 입력 `terraform_version` |
 | kubeconform | v0.8.0 (태그@다이제스트) | `validate.yml`의 `KUBECONFORM_IMAGE` |
 | 쿠버네티스 내장 리소스 스키마 | yannh/kubernetes-json-schema 커밋 `8df8a88`(2026-09-29의 최신 커밋) | `validate.yml`의 `K8S_SCHEMA_LOCATION` |
 | CRD 스키마 (Argo CD, monitoring.coreos.com) | datreeio/CRDs-catalog 커밋 `d373c2d`(2026-09-29. Argo CD 3.5.0 CRD 기준. monitoring.coreos.com 스키마는 클러스터의 Prometheus Operator v0.94.1보다 오래됐다: `validate.yml`의 주석) | `validate.yml`의 `CRD_SCHEMA_LOCATION` |
@@ -650,6 +654,11 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
   (`env()`는 값을 YAML로 해석해서 숫자처럼 생긴 값을 숫자로 읽을 수 있다).
   이 파일들은 빈 줄이 없는 모양으로 커밋되어 있다(yq가 고쳐 쓸 때 빈 줄을 지우므로). 새 설정을 추가할 때도 이 모양을 지킨다.
   `validate`가 `diff <(yq '.' 파일) 파일`로 이 모양을 검사하므로 어긋난 PR은 머지 전에 걸린다.
+- `terraform-plan`은 필수 검사가 아니다. `infra/aws`·`bootstrap/argocd/values.yaml`·그 워크플로가 바뀐 PR에서만 돌고(paths 필터), 결과는 잡 요약의 계획 요약이다. 저장소 변수 `AWS_PLAN_ROLE_ARN`과 시크릿 `ADMIN_CIDR`가 있어야 돈다(`infra/aws/README.md`의 "GitHub Actions에서 plan (OIDC)").
+- `id-token: write`(GitHub OIDC 토큰을 받는 권한)는 `terraform-plan.yml`의 plan 잡에만 둔다. 다른 워크플로에는 더하지 않고, `pull_request_target`·`issue_comment`·`workflow_run`으로 시작하는 워크플로에는 절대 두지 않는다.
+  plan 역할(`dev-ops-study-github-plan`)의 신뢰 정책은 `sub`가 `…:ref:refs/heads/main`인 토큰을 받는데, 이 값은 어느 워크플로인지가 아니라 어느 맥락(main)에서 도는지만 나타낸다.
+  그래서 `id-token: write`를 요청하는 워크플로는 무엇이든 main 맥락에서 돌면(`push`, `schedule`, `workflow_dispatch`, `workflow_run`, `issue_comment`, `pull_request_target`) 그 역할을 맡는다.
+  공개 저장소에서 `issue_comment`(댓글)와 `pull_request_target`(포크 PR)은 저장소 밖의 누구나 일으킬 수 있다(`infra/aws/README.md`의 "GitHub Actions에서 plan (OIDC)").
 - `validate` 잡은 룰셋 "PR 필수"의 필수 상태 검사다(저장소 설정). 룰셋이 잡 이름으로 검사를 찾으므로 이름을 바꾸지 않는다. deploy key는 그 룰셋을 우회하므로 CI의 dev 태그 직접 커밋은
   이 검사를 기다리지 않고, 푸시된 뒤에 `push` 이벤트로 검사가 돈다(결과를 알려 줄 뿐 막지는 못한다. ArgoCD는 GitHub의 검사 결과를 보지 않는다).
 - Application을 지우면(루트의 prune 포함) 그것이 배포한 리소스는 클러스터에 남는다(삭제 finalizer를 붙이지 않았다). 네임스페이스와 PostgreSQL의 PVC도 남는다.

@@ -1,6 +1,6 @@
 # Dependabot: 주 1회 GitHub Actions 갱신 PR을 자동으로 연다. PR은 하나로 묶는다.
 #
-# 이 저장소는 워크플로의 액션을 전체 커밋 SHA로 고정한다(.github/workflows/validate.yml). 고정한 값은 저절로 갱신되지 않아서
+# 이 저장소는 워크플로의 액션을 전체 커밋 SHA로 고정한다(.github/workflows/의 validate.yml, terraform-plan.yml). 고정한 값은 저절로 갱신되지 않아서
 # Dependabot이 없으면 보안 패치가 나와도 옛 버전에 머문다. Dependabot은 액션의 SHA와 그 뒤의 `# vX.Y.Z` 주석을 함께 올려 준다.
 # 갱신 PR에도 validate 워크플로가 돌아서 새 버전을 머지 전에 검증한다.
 #
@@ -10,6 +10,7 @@
 #   - validate.yml의 setup-helm 입력 version(Helm 버전), KUBECONFORM_IMAGE(kubeconform 태그@다이제스트), K8S_SCHEMA_LOCATION·CRD_SCHEMA_LOCATION과
 #     플랫폼 차트 단계의 K8S_LOCAL_SCHEMA_LOCATION(스키마 모음의 커밋 SHA), 대시보드 단계의 KUSTOMIZE_VERSION·KUSTOMIZE_SHA256
 #     (액션의 입력값과 env 값이라 github-actions 생태계가 읽지 않는다)
+#   - terraform-plan.yml의 setup-terraform 입력 terraform_version(로컬에서 apply하는 Terraform과 같은 버전으로 함께 올린다)
 #   - bootstrap/argocd/values.yaml과 README의 ArgoCD 차트 버전
 #   - argocd/apps의 외부 차트 버전(kube-prometheus-stack·loki·alloy·argo-rollouts의 targetRevision. 외부 Helm 차트 저장소라 Dependabot이 보지 않는다)
 #   - charts/shortener/values.yaml의 PostgreSQL·Redis·busybox 이미지(태그@다이제스트). Helm 생태계는 설정하지 않았다.
