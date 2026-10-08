@@ -298,6 +298,11 @@ kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:909
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-alertmanager 9093:9093   # http://localhost:9093
 ```
 
+Discord 메시지에서 경보마다 끝에 붙는 `Source:` 링크(Prometheus가 경보에 붙이는 generatorURL)는 `http://localhost:9090/graph?...`로 시작한다. Prometheus의 `externalUrl`을
+위 port-forward 주소로 두었기 때문이다(`platform/kube-prometheus-stack/values.yaml`. 차트 기본값은 클러스터 안의 Service 주소라 맥에서 열리지 않는다).
+Prometheus의 port-forward를 켜 둔 동안에는 링크를 누르면 그 경보의 식이 열리고, 켜지 않았으면 열리지 않는다. Alertmanager의 `externalUrl`도 같은 이유로 http://localhost:9093 이다
+(지금의 Discord 메시지는 이 값을 쓰지 않는다. 알림 템플릿의 `.ExternalURL`과 Alertmanager UI의 링크가 쓴다).
+
 Grafana 관리자 비밀번호는 부트스트랩이 무작위로 만들어 Secret `grafana-admin`에 넣어 둔다. 이렇게 읽는다(화면에 찍히므로 화면 공유·녹화 중에는 쓰지 않는다):
 
 ```bash
