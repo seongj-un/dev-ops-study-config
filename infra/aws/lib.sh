@@ -14,6 +14,8 @@ DUCKDNS_SUBDOMAIN=${DUCKDNS_SUBDOMAIN:-dev-ops-study}
 KUBECONFIG_PATH=${KUBECONFIG_PATH:-$HOME/.kube/dev-ops-study-aws.yaml}
 # 이 저장소가 검증한 Terraform 버전대(versions.tf의 ~> 1.16). CI는 1.16.4로 고정한다.
 TF_VERSION_PREFIX=1.16.
+# variables.tf의 oidc_bucket 기본값과 같아야 한다(다르게 쓰려면 둘 다 바꾼다).
+OIDC_BUCKET=${OIDC_BUCKET:-dev-ops-study-oidc-803879842357}
 SSM_PARAMS=(/dev-ops-study/duckdns-token /dev-ops-study/discord-webhook-url)
 
 # 모든 aws 호출이 같은 리전을 쓰게 한다(리전을 빠뜨리면 다른 리전을 보고 "없다"고 오판한다). 페이저는 꺼서 스크립트가 멈추지 않게 한다.
@@ -153,6 +155,30 @@ preflight_ssm_params() {
   done
   [ "$missing" = 0 ] && say "SSM 파라미터 확인 완료 (이름만 확인)"
   return 0
+}
+
+# OIDC 버킷과 클러스터 발급자의 IAM OIDC 공급자가 있는지 본다(infra/bootstrap이 만든다). 없으면 부팅 5단계가 올릴 곳이 없고 ESO의 STS 인증도 실패한다.
+# 이 점검은 값을 읽지 않고 존재만 본다. 권한이 없어서 확인하지 못한 경우는 경고만 하고 넘어가지만, 확실히 없을 때는 인스턴스를 만들기 전에 멈춘다.
+preflight_oidc() {
+  local bucket host out
+  bucket=$OIDC_BUCKET
+  host="$bucket.s3.$REGION.amazonaws.com"
+  if ! out=$(awsr s3api head-bucket --bucket "$bucket" 2>&1); then
+    case "$out" in
+      *404*|*NotFound*|*NoSuchBucket*) die "OIDC 버킷 $bucket 이 없다. 먼저 infra/bootstrap을 apply한다(infra/bootstrap/README.md)." ;;
+      *) warn "OIDC 버킷 $bucket 을 확인하지 못했다(권한이나 소유자 문제?). 없으면 부팅 5단계가 실패한다." ;;
+    esac
+    return 0
+  fi
+  if ! out=$(awsr iam list-open-id-connect-providers --query 'OpenIDConnectProviderList[].Arn' --output text 2>&1); then
+    warn "IAM OIDC 공급자 목록을 확인하지 못했다(iam:ListOpenIDConnectProviders 권한?). 없으면 ESO가 STS 인증을 받지 못한다."
+    return 0
+  fi
+  case "$out" in
+    *"/$host"*) ;;
+    *) die "IAM OIDC 공급자 $host 가 없다. 먼저 infra/bootstrap을 apply한다(infra/bootstrap/README.md)." ;;
+  esac
+  say "OIDC 버킷과 IAM OIDC 공급자 확인 완료"
 }
 
 # ---- Terraform ----------------------------------------------------------------

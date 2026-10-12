@@ -102,10 +102,11 @@ variable "oidc_bucket" {
   type        = string
   default     = "dev-ops-study-oidc-803879842357"
 
-  # cloud-init 템플릿은 이름을 bootstrap.env에 넣어 root가 source 하므로 템플릿의 regex()도 같은 문자 집합만 통과시킨다. S3 버킷 이름 규칙(소문자, 숫자, . -)이다.
+  # cloud-init 템플릿은 이름을 bootstrap.env에 넣어 root가 source 하므로 템플릿의 regex()도 같은 문자 집합만 통과시킨다. S3 버킷 이름 규칙에서 점(.)을 뺀 문자 집합(소문자, 숫자, -)이다.
+  # 점이 든 이름은 가상 호스트 주소(<버킷>.s3.<리전>.amazonaws.com)가 와일드카드 TLS 인증서(*.s3.<리전>.amazonaws.com)와 맞지 않아 STS가 두 문서를 받지 못하므로 막는다.
   validation {
-    condition     = can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.oidc_bucket))
-    error_message = "oidc_bucket은 S3 버킷 이름 규칙(소문자, 숫자, . -, 3~63자)을 따라야 한다(예: dev-ops-study-oidc-803879842357)."
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$", var.oidc_bucket))
+    error_message = "oidc_bucket은 S3 버킷 이름 규칙(소문자, 숫자, -, 3~63자, 점 없음)을 따라야 한다(예: dev-ops-study-oidc-803879842357)."
   }
 }
 

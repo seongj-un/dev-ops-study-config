@@ -43,6 +43,7 @@ preflight_tools
 preflight_aws
 preflight_ip
 preflight_ssm_params
+preflight_oidc
 
 # ---- 2. 멈춘 인스턴스 처리 ----------------------------------------------------
 # 멈춘 인스턴스는 공인 IP가 없다. 그 상태로 plan하면 state(옛 IP)와 실제가 어긋난 채로 계획이 만들어지고, 시작하면 IP가 또 바뀐다.

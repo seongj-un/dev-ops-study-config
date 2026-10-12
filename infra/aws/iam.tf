@@ -81,6 +81,9 @@ resource "aws_iam_role_policy_attachment" "ssm_core" {
 #     버킷 정책이 익명에게 읽기를 여는 키와 같은 두 개라서 이 역할은 그 밖의 키를 쓰거나 지우지 못하고, 읽기·목록(s3:GetObject, s3:ListBucket)도 이 문장으로는 얻지 못한다.
 #     버킷이 BucketOwnerEnforced라 ACL을 보내지 않으므로 s3:PutObjectAcl은 필요 없다. 같은 계정이라 버킷 정책에 이 역할을 따로 적지 않아도 이 문장만으로 된다.
 #     SSE-S3(AES256) 기본 암호화라 KMS 권한도 필요 없다.
+#     보안 영향: 이 두 객체를 쓸 수 있는 주체는 자기 키로 JWKS와 디스커버리 문서를 바꿔 sub=system:serviceaccount:monitoring:eso-ssm 토큰을 직접 만들고,
+#     이 발급자를 믿는 모든 역할을 맡을 수 있다. 그래서 IMDS 홉 제한 1과 hostNetwork 금지(인스턴스 역할 자격 증명을 파드가 못 얻게 하는 것)가 여기서도 중요하다.
+#     지금은 얻는 것이 없다(ESO 역할이 읽는 것은 Discord 웹훅 URL 하나이고 이 역할도 읽을 수 있는 값이었다). 다만 이 발급자를 믿는 역할이 늘면 노드 역할이 그 역할로 닿는다.
 resource "aws_iam_role_policy" "duckdns_token" {
   name = "read-duckdns-token"
   role = aws_iam_role.k3s.name

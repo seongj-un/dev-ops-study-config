@@ -123,7 +123,7 @@ infra/aws/down.sh
 
 | 단계 | 하는 일 / 기다리는 것 |
 |---|---|
-| 사전 점검 | `aws sts get-caller-identity` 성공, Terraform 1.16.x, 현재 공인 IP(`checkip.amazonaws.com`, IPv4 확인), SSM 파라미터 두 개의 존재(이름만. 없으면 경고) |
+| 사전 점검 | `aws sts get-caller-identity` 성공, Terraform 1.16.x, 현재 공인 IP(`checkip.amazonaws.com`, IPv4 확인), SSM 파라미터 두 개의 존재(이름만. 없으면 경고), OIDC 버킷(`s3api head-bucket`)과 IAM OIDC 공급자의 존재(확실히 없으면 `infra/bootstrap`을 먼저 apply하라는 메시지로 멈춘다. 권한이 없어 확인하지 못하면 경고) |
 | 멈춘 인스턴스 | 이 스택의 인스턴스가 `stopped`면 먼저 시작한다([멈춘 인스턴스](#멈춘-인스턴스)) |
 | terraform | `init`, `plan -out`, 요약(개수, 주소, 동작, 이유. 값은 없다)을 보이고 확인을 받은 뒤 저장한 계획을 `apply`. 교체·삭제가 있으면 `--yes`만으로는 멈춘다(`--allow-replace`를 더해야 한다) |
 | 인스턴스 `running` | EC2 상태가 `running`이 될 때까지(10분) |
@@ -289,8 +289,8 @@ terraform output -raw ssm_shell_command
 
 ESO가 AWS(SSM)에 들어가는 길에는 AWS 액세스 키가 없다. `monitoring/eso-ssm` ServiceAccount의 토큰을 STS에 내밀어 역할을 맡는다(AssumeRoleWithWebIdentity). STS는 토큰의 발급자(`iss`)를 보고 그 발급자의 디스커버리 문서와 JWKS를 **익명으로** 받아 서명을 확인한다. 클러스터는 인터넷에서 닿지 않아도 되도록 이 두 문서를 공개 S3 버킷에 둔다. 부트스트랩이 맡는 일은 그 앞부분 둘이다.
 
-- **4단계(k3s)**: kube-apiserver의 `service-account-issuer`를 `https://dev-ops-study-oidc-<계정 ID>.s3.ap-northeast-2.amazonaws.com`로, `service-account-jwks-uri`를 그 뒤에 `/openid/v1/jwks`를 붙인 주소로 정한다. 발급자 인자 이름 끝의 `-`는 k3s 소스(`GetArgs`)의 인자 합치기 규칙에 따르면 k3s 기본 발급자 앞에 덧붙인다는 뜻이다. 문서가 아니라 소스를 읽고 안 규칙이라 실제 클러스터에서 확인한다(어긋나면 접미사 없는 `service-account-issuer=`로 바꾼다). 덧붙여지면 새 토큰은 이 발급자로 서명되고 기본 발급자로 나간 토큰도 계속 통한다.
-- **5단계(OIDC 공개)**: `kubectl get --raw`로 디스커버리 문서(`/.well-known/openid-configuration`)와 JWKS(`/openid/v1/jwks`)를 받아 `issuer`·`jwks_uri`가 기대한 값과 같고 키가 하나 이상인지 `python3`로 확인한 뒤, 버킷의 `.well-known/openid-configuration`, `openid/v1/jwks` 두 키에 `application/json`으로 올린다. 올린 뒤 인증 없이 `https`로 다시 받아 같은지도 본다. 인스턴스 역할의 `s3:PutObject`는 이 두 객체에만 있다.
+- **4단계(k3s)**: kube-apiserver의 `service-account-issuer`를 `https://dev-ops-study-oidc-<계정 ID>.s3.ap-northeast-2.amazonaws.com`로, `service-account-jwks-uri`를 그 뒤에 `/openid/v1/jwks`를 붙인 주소로 정한다. 발급자 인자 이름 끝의 `-`는 k3s v1.35.8+k3s1 소스(`pkg/util/args.go`의 `GetArgs`, `pkg/daemons/control/server.go`)로 확인한 인자 합치기 규칙에 따라 k3s 기본 발급자 앞에 덧붙이고, 값마다 `--service-account-issuer`를 따로 넘긴다. 다시 만든 실제 클러스터에서 한 번 더 확인한다(어긋나면 접미사 없는 `service-account-issuer=`로 바꾼다). 덧붙여지면 새 토큰은 이 발급자로 서명되고 기본 발급자로 나간 토큰도 계속 통한다.
+- **5단계(OIDC 공개)**: `kubectl get --raw`로 디스커버리 문서(`/.well-known/openid-configuration`)와 JWKS(`/openid/v1/jwks`)를 받아 `issuer`·`jwks_uri`가 기대한 값과 같고 키가 하나 이상인지 `python3`로 확인한 뒤, 버킷의 `.well-known/openid-configuration`, `openid/v1/jwks` 두 키에 `application/json`으로 올린다. 통과하면 디스커버리 문서에 `"claims_supported": ["sub", "iss"]`를 더해(IAM이 필수 항목으로 꼽고 `aws/amazon-eks-pod-identity-webhook`의 `SELF_HOSTED_SETUP.md`도 넣는다. `issuer`·`jwks_uri`는 그대로) 올리고, 올린 뒤 인증 없이 `https`로 다시 받아 올린 파일(더한 뒤의 것)과 같은지도 본다. 인스턴스 역할의 `s3:PutObject`는 이 두 객체에만 있다.
 
 두 문서에는 발급자 주소와 공개 키만 있어서 로그에 크기와 `kid`를 남긴다(비밀이 아니다).
 
@@ -382,6 +382,7 @@ terraform destroy \
   그 밖의 허용은 그 파라미터에 대한 `ssm:GetParameter`, SSM을 거칠 때만 `aws/ssm` 키로 하는 `kms:Decrypt`, 그리고 OIDC 버킷의 객체 두 개(`.well-known/openid-configuration`, `openid/v1/jwks`)에 대한 `s3:PutObject`뿐이다. 객체 둘은 버킷 정책이 익명 읽기를 여는 키와 같아서, 이 역할은 버킷의 다른 키를 쓰지 못하고 읽거나 지우지도 못한다. 파라미터 허용과 거부는 같은 ARN 목록(`iam.tf`의 `readable_parameter_arns`)을 써서 둘이 어긋나지 않는다.
 - **비밀은 코드·상태에 없다.** DuckDNS 토큰과 Discord 웹훅 URL은 SSM에만 있고, DB 비밀번호와 Grafana admin 비밀번호는 클러스터 안에서 ESO가 생성한다. 이 값들은 부트스트랩 스크립트·로그·`user_data`를 지나가지 않지만 Secret으로 k3s 데이터 저장소(암호화된 EBS 볼륨)에 저장된다. k3s는 Secret을 따로 암호화하지 않아서(base64일 뿐이다) 그 보호는 EBS 암호화다.
   웹훅 URL을 아는 사람은 누구나 그 Discord 채널에 글을 올릴 수 있으므로 DuckDNS 토큰처럼 다룬다([Secret](#secret)).
+  이 두 객체를 쓸 수 있는 주체(인스턴스 역할)는 이 발급자를 믿는 모든 역할을 맡을 수 있다. 자기 키로 JWKS와 디스커버리 문서를 바꿔 `system:serviceaccount:monitoring:eso-ssm` 토큰을 직접 만들 수 있어서다. 그래서 IMDS 홉 제한 1·hostNetwork 금지가 여기서도 중요하다. 지금은 얻는 것이 없지만(ESO 역할이 읽는 Discord 웹훅 URL은 이 역할도 읽을 수 있었다) 이 발급자를 믿는 역할이 늘면 노드 역할이 그 역할로 닿는다.
   OIDC 버킷의 두 객체는 일부러 공개다(발급자 주소와 공개 키뿐이다). 버킷의 나머지는 막혀 있고 쓰기는 인스턴스 역할만 한다.
   `user_data`(cloud-init 전체)는 암호화되지 않아 인스턴스에 접속한 사람과 EC2 API로 조회할 권한이 있는 누구나 읽을 수 있고 Terraform 상태에도 들어가므로, 그 안에는 비밀을 넣지 않는다.
 - **내려받는 도구를 검사한다.** AWS CLI는 최신 zip과 그 `.sig`를 받아, `user_data`에 넣어 둔 AWS CLI 팀 PGP 공개 키([AWS CLI 설치 문서](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)의 블록, 지문 `FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C`, 만료 2027-07-01)로 `gpgv` 서명 검사를 통과해야 푼다.
