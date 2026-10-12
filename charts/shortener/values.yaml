@@ -158,9 +158,16 @@ database:
   # helm template이나 클라이언트 쪽 dry-run, 이 저장소를 배포하는 ArgoCD 같은 GitOps 도구의 렌더링에서는 빈 값을 돌려줘서 결과가 매번 달라지기 때문이다.
   # 그래서 Secret의 값을 바꿔도 앱 파드는 저절로 재시작되지 않는다(kubectl rollout restart로 다시 띄운다).
   existingSecret: ""
-  # existingSecret이 비어 있을 때만 쓴다: 차트가 이 값으로 Secret(<릴리스>-database)을 만든다. existingSecret이 있으면 이 값은 무시된다. 둘 다 비면 템플릿이 실패한다.
+  # existingSecret이 비어 있고 generatePassword가 false일 때만 쓴다: 차트가 이 값으로 Secret(<릴리스>-database)을 만든다. existingSecret이 있으면 이 값은 무시된다. 셋 다 비면 템플릿이 실패한다.
   # 연습용이다. 값이 셸 히스토리와 Helm 릴리스 기록(클러스터의 Secret)에 평문으로 남고, SHA-256 해시가 파드 어노테이션(checksum/secret)에 남는다.
   password: ""
+  # true이면 비밀번호를 ESO(External Secrets Operator)가 클러스터 안에서 만든다(templates/externalsecret.yaml 머리말): Password 생성기가 무작위 32자를 만들고
+  # ExternalSecret이 그것을 Secret에 담는다. 비밀번호가 Git에도 Helm 값에도 없고, 차트가 직접 만드는 Secret(templates/secret.yaml)은 렌더링되지 않는다.
+  # Secret의 이름은 위와 같은 규칙이다: existingSecret이 있으면 그 이름(dev·prod는 shortener-db), 없으면 <릴리스>-database. 키는 항상 password라서 앱과 PostgreSQL은 어느 경우든 같은 곳을 읽는다.
+  # password와 함께 쓰면 템플릿이 실패한다(어느 값이 PostgreSQL에 들어가는지 모호해진다).
+  # ESO가 설치된 클러스터에서만 켠다: Password·ExternalSecret의 CRD가 없으면 동기화가 실패한다. 그래서 기본값은 false이고, ESO가 없는 클러스터에 차트를 직접 렌더링할 때는 existingSecret이나 password 경로를 쓴다. argocd/apps로 배포하면 환경 값 파일이 켜므로(로컬 k3d 포함) ESO가 필요하다.
+  # 켜는 곳은 environments/dev, prod의 values.yaml이다. 한 번 만든 비밀번호는 바뀌지 않는다(refreshPolicy: CreatedOnce). Secret이 없어지거나 그 데이터를 손으로 고치면(ESO v2.12.0 소스 기준 해시 불일치) 새 값이 나오는데, PostgreSQL의 PVC가 남아 있으면 DB 안의 비밀번호와 어긋난다.
+  generatePassword: false
 
 # 클러스터 안의 PostgreSQL (StatefulSet 1개). 이미지는 앱 저장소의 compose.yaml과 같은 postgres 18 alpine이다.
 postgresql:

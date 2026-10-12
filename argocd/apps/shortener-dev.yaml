@@ -36,11 +36,11 @@ spec:
     # 자동 동기화: Git이 바뀌어 클러스터와 달라지면(OutOfSync) ArgoCD가 사람 손 없이 동기화한다. 기본은 수동 동기화다(UI나 CLI에서 Sync를 눌러야 한다).
     # 동기화가 실패하면: syncPolicy.retry를 따로 두지 않아도 자동 동기화에는 ArgoCD의 기본 재시도가 붙는다(v3.5.3: 다시 시도를 최대 5번, 대기는 5초에서 시작해 2배씩 늘고 최대 3분).
     # 이 재시도까지 모두 실패하면 같은 커밋으로는 새 동기화를 시작하지 않는다(selfHeal이 켜져 있어도 같다). 그때는 Application의 상태에서 원인을 읽고,
-    # 고친 커밋을 올리거나 UI에서 직접 Sync를 눌러 다시 시도한다. retry를 직접 적으면 이 기본값 대신 그 값이 쓰인다.
+    # 고친 커밋을 올리거나 UI에서 직접 Sync를 눌러 다시 시도한다. retry를 직접 적으면 이 기본값 대신 그 값이 쓰인다. 이 Application은 아래 syncPolicy.retry로 늘렸다(이유는 그 주석).
     automated:
       # Git에서 사라진 리소스를 클러스터에서도 지운다. 기본은 꺼짐이다(안전장치로, 자동 동기화는 만들고 고치기만 하고 지우지는 않는다).
       # 예를 들어 차트에서 리소스를 없애면 그 리소스가 클러스터에서도 지워진다.
-      # 지워지는 것은 ArgoCD가 추적하는 리소스뿐이다: 손으로 만든 Secret(shortener-db)과 PostgreSQL의 PVC(StatefulSet이 만든다)는 추적 대상이 아니라 남는다.
+      # 지워지는 것은 ArgoCD가 추적하는 리소스뿐이다: DB 비밀번호 Secret(shortener-db)은 ESO가 만들어 ArgoCD가 추적하지 않고(ExternalSecret만 추적한다), PostgreSQL의 PVC(StatefulSet이 만든다)도 추적 대상이 아니라 남는다.
       prune: true
       # 클러스터의 라이브 상태를 누가 손으로 바꿔도(예: kubectl scale, kubectl edit) Git의 내용으로 되돌린다.
       # 기본은 꺼짐이라 Git이 바뀔 때만 동기화하고, 손으로 바꾼 것은 OutOfSync로 표시만 하고 그대로 둔다. 이 환경에서 Git이 원본이라는 것을 강제하는 설정이다.
@@ -48,7 +48,7 @@ spec:
       selfHeal: true
     syncOptions:
       # destination.namespace(shortener-dev)가 없으면 동기화할 때 만든다. 이 옵션이 없으면 네임스페이스가 없을 때 동기화가 실패한다.
-      # 이미 있으면 건드리지 않는다: 부트스트랩에서 DB 비밀번호 Secret을 넣으려고 네임스페이스를 미리 만들어 두어도 충돌하지 않는다.
+      # 이미 있으면 건드리지 않는다.
       # ArgoCD가 만든 네임스페이스는 추적하지 않으므로 Application을 지우거나 prune해도 네임스페이스는 남는다.
       - CreateNamespace=true
       # Git에서 사라진 리소스를 동기화의 맨 끝에, 그 앞에 적용한 리소스가 모두 Healthy가 된 뒤에 지운다. 기본은 같은 웨이브 안에서 다른 리소스를 적용하기 전에 먼저 지운다.
@@ -57,5 +57,20 @@ spec:
       # 이것이 있으면 Rollout이 첫 버전을 전체 파드 수로 띄워 Healthy가 된 뒤에 Deployment가 지워지고, 그 사이에는 앱 Service가 셀렉터가 같은 두 쪽 파드에 요청을 나눈다.
       # 지울 리소스가 없는 평소의 동기화에는 영향이 없다. 옮기는 과정은 README의 카나리 배포에 있다.
       - PruneLast=true
+    # 새 클러스터에서 이 Application이 ESO(argocd/apps/external-secrets.yaml)보다 먼저 동기화되면 DB 비밀번호의 Password·ExternalSecret(charts/shortener/templates/externalsecret.yaml)이 두 가지로 실패한다.
+    # 웨이브(sync-wave)는 한 Application 안의 순서라서 Application 사이에는 쓰지 못한다(argocd/apps/external-secrets-config.yaml 참고).
+    #   1) CRD가 아직 없다: 두 리소스의 SkipDryRunOnMissingResource=true가 동기화 전 검증을 건너뛰지만, 적용이 "kind를 모른다"로 실패한다.
+    #   2) CRD는 있는데 ESO의 웹훅이 아직 준비되지 않았다: 웹훅 호출이 실패해 적용이 거부된다.
+    #   두 경우 모두 아래 retry가 다시 시도하고, ESO가 준비되면 적용된다. 기본 재시도(합쳐 약 2분 반)는 새 노드에서 ESO 이미지를 받고 웹훅이 뜨기까지보다 짧을 수 있어서
+    #   external-secrets-config와 같은 값으로 늘린다: 10초에서 시작해 2배씩, 3분을 넘지 않게 6번(합쳐 약 8분). 대가도 같다: 기다리는 동안 동기화 작업이 Running으로 남아 새 커밋을 적용하지 않고,
+    #   다시 시도를 모두 쓰면 사람이 Sync를 눌러야 한다(README의 막혔을 때). 합쳐 약 8분은 10+20+40+80+160+180초다. ESO는 이미지 하나이고 cert-controller가 웹훅에 CA를 넣기까지 1~2분쯤 걸려 보통 넉넉하다.
+    #   ESO가 그보다 늦어도 dev는 다음 커밋이 오면 다시 시도한다.
+    #   ExternalSecret(웨이브 -1)이 Healthy(Ready=True)가 될 때까지 웨이브 0의 앱과 PostgreSQL은 적용되지 않는다. 그동안 이 Application은 Progressing으로 보인다.
+    retry:
+      limit: 6
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
 # 삭제 finalizer(resources-finalizer.argocd.argoproj.io)는 붙이지 않았다. finalizer가 없으면 이 Application을 지워도(kubectl delete, 루트의 prune 포함)
 # Application만 사라지고 배포된 리소스는 클러스터에 그대로 남는다. 리소스까지 함께 지우려면 metadata.finalizers에 그 finalizer를 넣는다.

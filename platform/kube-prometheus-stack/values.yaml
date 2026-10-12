@@ -237,14 +237,16 @@ alertmanager:
       - name: 'null'
       - name: discord
         discord_configs:
-          # 웹훅 주소는 Git에 두지 않는다(주소만 알면 누구나 그 채널에 글을 쓸 수 있다). 부트스트랩이 SSM의 값으로 Secret alertmanager-discord(키 webhook-url)를 만들고,
+          # 웹훅 주소는 Git에 두지 않는다(주소만 알면 누구나 그 채널에 글을 쓸 수 있다). ESO가 SSM의 값으로 Secret alertmanager-discord(키 webhook-url)를 만들고(platform/external-secrets-config/alertmanager-discord.yaml),
           # 아래 alertmanagerSpec.secrets가 그 Secret을 /etc/alertmanager/secrets/<Secret 이름>/<키> 파일로 붙인다. Alertmanager는 알림을 보낼 때마다 이 파일을 읽는다.
           - webhook_url_file: /etc/alertmanager/secrets/alertmanager-discord/webhook-url
             # 경보가 풀렸을 때(RESOLVED)도 알린다. discord_configs의 기본값도 true지만 SLO 정의에 맞춰 적어 둔다.
             send_resolved: true
   alertmanagerSpec:
     # 위 discord 수신자가 읽는 Secret. Operator가 /etc/alertmanager/secrets/alertmanager-discord/에 키 이름을 파일 이름으로 붙인다.
-    # Secret이 없으면 파드가 볼륨을 붙이지 못해 뜨지 않으므로, 부트스트랩이 루트 Application보다 먼저 만든다(SSM 값을 못 읽으면 쓸모없는 주소로라도 만든다).
+    # Secret이 없으면 파드가 볼륨을 붙이지 못해 뜨지 않는다. 예전에는 부트스트랩이 만든 가짜 Secret으로라도 떴지만 지금은 AWS 경로(OIDC 발급자 → STS → SSM)에 의존한다:
+    # 그 경로의 어디가 막혀도 Alertmanager가 뜨지 않아 알림이 어디로도 가지 않는다(경보는 Prometheus에 남는다). 새로 만든 뒤 kube-prometheus-stack이 Degraded이면 차트보다 이 경로를 먼저 의심한다
+    # (확인: kubectl -n monitoring get externalsecret alertmanager-discord, Alertmanager 파드의 FailedMount 이벤트). ESO가 SSM을 읽지 못하면(OIDC·역할 문제, 파라미터 없음) Secret이 만들어지지 않아 파드가 ContainerCreating에 머문다(README의 막혔을 때).
     secrets:
       - alertmanager-discord
     # Alertmanager가 밖에서 닿는 주소. 알림 템플릿의 .ExternalURL(Slack 같은 다른 수신자의 기본 템플릿이 만드는 경보 목록 링크)과 UI의 링크가 이 값으로 시작한다.
@@ -259,7 +261,7 @@ alertmanager:
       limits:
         memory: 128Mi
 grafana:
-  # 관리자 계정은 부트스트랩이 만드는 Secret grafana-admin(키 admin-user·admin-password, 비밀번호는 무작위)에서 읽는다.
+  # 관리자 계정은 ESO가 만드는 Secret grafana-admin(키 admin-user·admin-password, 비밀번호는 Password 생성기가 만든 무작위 값. platform/external-secrets-config/grafana-admin.yaml)에서 읽는다.
   # 이 값이 없으면 하위 차트가 비밀번호 Secret을 직접 만든다: adminPassword를 적으면 그 값이 공개 저장소에 남고, 비워 두면 템플릿이 무작위 값을 만든다.
   # 무작위 값은 클러스터에서 기존 Secret을 조회(lookup)해 재사용하는데, ArgoCD의 렌더링은 클러스터를 조회하지 않아 렌더링할 때마다 새 값이 나온다.
   # 그러면 Secret이 늘 OutOfSync이고 동기화할 때마다 비밀번호가 바뀐다.
@@ -319,7 +321,7 @@ kube-state-metrics:
 # 노드의 CPU·메모리·디스크·파일시스템·네트워크를 지표로 내놓는다(DaemonSet이라 노드마다 하나. 네트워크 지표의 일부는 아래 hostNetwork 참고).
 prometheus-node-exporter:
   # 하위 차트 기본값(true)은 파드가 노드의 네트워크 네임스페이스를 같이 쓰게 한다. 그러면 IMDSv2의 홉 제한 1(파드 네트워크에서는 토큰 응답이 한 홉 더 건너야 해서
-  # 닿지 못한다)이 이 파드를 막지 못하고, 인스턴스 메타데이터에서 인스턴스 역할의 자격 증명을 얻어 SSM의 DuckDNS 토큰과 Discord 웹훅 주소를 읽을 수 있게 된다.
+  # 닿지 못한다)이 이 파드를 막지 못하고, 인스턴스 메타데이터에서 인스턴스 역할의 자격 증명을 얻게 된다. 인스턴스 역할은 SSM의 DuckDNS 토큰을 읽고, OIDC 발급자 버킷의 discovery 문서·JWKS를 덮어쓸 수 있다(ESO가 STS에서 역할을 맡는 신뢰의 근거가 그 문서라서, 덮어쓰면 신뢰를 바꿀 수 있다).
   # 이 클러스터는 hostNetwork 파드를 띄우지 않는다는 전제로 지켜진다(infra/aws/ec2.tf의 metadata_options). 그래서 끈다.
   # 대가는 네트워크 지표의 일부다. 수집기가 어디서 읽느냐에 따라 갈린다:
   #   - 이 파드의 네트워크 네임스페이스(eth0, lo)를 보이게 되는 것: netdev 수집기의 송수신·오류 카운터(node_network_receive_bytes_total 등. 기본으로

@@ -48,8 +48,8 @@ spec:
       # ArgoCD는 추적 어노테이션(argocd.argoproj.io/tracking-id)이 자기 자신을 가리키는 리소스만 관리하므로 Operator가 고치는 StatefulSet과 다투지 않는다.
       selfHeal: true
     syncOptions:
-      # destination.namespace(monitoring)가 없으면 동기화할 때 만든다. 부트스트랩이 Secret(grafana-admin, alertmanager-discord)을 넣으려고
-      # 미리 만들어 둔 네임스페이스는 건드리지 않으므로 충돌하지 않는다.
+      # destination.namespace(monitoring)가 없으면 동기화할 때 만든다. 이미 있으면(loki Application이 먼저 동기화돼 만든 경우) 건드리지 않으므로 충돌하지 않는다.
+      # kube-prometheus-stack과 loki 중 먼저 동기화된 쪽이 monitoring을 만든다. external-secrets-config Application은 만들지 않는다.
       - CreateNamespace=true
       # 서버 쪽 적용(kubectl apply --server-side). 기본인 클라이언트 쪽 적용은 적용한 객체 전체를 JSON으로
       # kubectl.kubernetes.io/last-applied-configuration 어노테이션에 넣어 두고 다음 적용 때 3-way 병합의 기준으로 쓰는데, 어노테이션은 객체 하나에
