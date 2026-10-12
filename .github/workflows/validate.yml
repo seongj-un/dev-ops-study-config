@@ -522,6 +522,83 @@ jobs:
             'select(.kind == "ExternalSecret" and ([(.spec.dataFrom // [])[].sourceRef.generatorRef.kind] | contains(["Password"]))) | .spec.refreshPolicy'
           exit "$status"
 
+      # 인프라 코드(Terraform)와 GitOps 파일이 같은 값을 따로 적고 있는 곳이 있다. 한쪽만 바꾸면 CI는 모두 통과하는데 클러스터에서 ESO가 STS나 SSM의 인증·권한 오류로 멈춘다.
+      # 이 단계는 그 짝의 값이 글자 그대로 같은지만 본다(AWS나 클러스터에 접속하지 않고 파일의 글자만 읽는다). 짝 네 가지:
+      #   1) IAM 역할 이름과 계정 ID: infra/bootstrap/eso_oidc.tf의 aws_iam_role "eso_monitoring" ↔ platform/external-secrets-config/serviceaccount.yaml의 eks.amazonaws.com/role-arn.
+      #      eso_oidc.tf에는 계정 ID가 글자로 없고(data.aws_caller_identity에서 온다) 계정 ID는 OIDC 버킷 이름의 끝에 들어가므로, 어노테이션의 계정 ID를 infra/aws의 oidc_bucket 기본값과 lib.sh의 OIDC_BUCKET 끝 숫자와 대조한다.
+      #   2) 신뢰 정책의 주체: eso_oidc.tf의 "<OIDC 호스트>:sub" 값 system:serviceaccount:<네임스페이스>:<이름> ↔ 같은 ServiceAccount의 metadata.namespace·name. 다르면 STS가 AssumeRoleWithWebIdentity를 거부한다.
+      #   3) SSM 파라미터: eso_oidc.tf의 파라미터 ARN(eso_discord_parameter_arn)이 가리키는 이름 ↔ alertmanager-discord.yaml의 remoteRef.key. 정책의 Resource가 그 ARN을 쓰는 것도 확인한다.
+      #   4) OIDC 버킷 이름: eso_oidc.tf의 oidc_bucket(dev-ops-study-oidc-<계정 ID>, 계정 ID는 위 어노테이션의 것) ↔ infra/aws/variables.tf의 oidc_bucket 기본값 ↔ infra/aws/lib.sh의 OIDC_BUCKET 기본값.
+      # YAML은 yq 대신 정규식으로 읽는다(필요한 값은 최상위 metadata 아래와 remoteRef 아래의 단순한 스칼라뿐이다). 들여쓰기·따옴표·줄 끝 주석이 달라도 값이 같으면 통과하고, 값이 다르면 어느 짝인지 적고 실패한다.
+      - name: 인프라와 GitOps의 공유 식별자 일치 확인 (IAM 역할, ServiceAccount, SSM 파라미터, OIDC 버킷)
+        run: |
+          python3 - <<'PY'
+          import re, sys
+
+          def read(path):
+              with open(path, encoding="utf-8") as f:
+                  return f.read()
+
+          def one(pattern, text, what, flags=re.S):
+              found = re.findall(pattern, text, flags)
+              if len(found) != 1:
+                  print(f"::error::{what}: 패턴이 {len(found)}번 나왔다(1번이어야 한다). 파일 모양이 바뀌었으면 이 단계의 정규식도 고친다")
+                  sys.exit(1)
+              return found[0]
+
+          def unquote(value):
+              return re.sub(r"\s+#.*$", "", value.strip()).strip("\"'")
+
+          tf = read("infra/bootstrap/eso_oidc.tf")
+          sa = read("platform/external-secrets-config/serviceaccount.yaml")
+          es = read("platform/external-secrets-config/alertmanager-discord.yaml")
+          variables = read("infra/aws/variables.tf")
+          lib = read("infra/aws/lib.sh")
+
+          # 최상위 metadata 블록(들여쓰기된 줄의 묶음)에서 name, namespace를 읽는다.
+          meta = one(r"^metadata:[ \t]*\n((?:[ \t]+\S.*\n?)+)", sa, "serviceaccount.yaml의 metadata", re.M)
+          sa_name = unquote(one(r"^  name:[ \t]*(\S.*)$", meta, "ServiceAccount의 name", re.M))
+          sa_ns = unquote(one(r"^  namespace:[ \t]*(\S.*)$", meta, "ServiceAccount의 namespace", re.M))
+          arn = unquote(one(r"^[ \t]+eks\.amazonaws\.com/role-arn:[ \t]*(\S.*)$", sa, "role-arn 어노테이션", re.M))
+          arn_match = re.fullmatch(r"arn:aws:iam::(\d{12}):role/(.+)", arn)
+          if arn_match is None:
+              print(f"::error::role-arn 어노테이션이 arn:aws:iam::<12자리 계정 ID>:role/<이름> 모양이 아니다: {arn}")
+              sys.exit(1)
+          account, annotation_role = arn_match.groups()
+
+          tf_role = one(r'resource\s+"aws_iam_role"\s+"eso_monitoring"\s*\{.*?\bname\s*=\s*"([^"]+)"', tf, "eso_oidc.tf의 IAM 역할 이름")
+          tf_sub = one(r'"\$\{local\.oidc_host\}:sub"\s*=\s*"([^"]+)"', tf, "eso_oidc.tf의 신뢰 정책 sub")
+          tf_param_arn = one(r'\beso_discord_parameter_arn\s*=\s*"arn:aws:ssm:[^:"]*:[^:"]*:parameter(/[^"]+)"', tf, "eso_oidc.tf의 SSM 파라미터 ARN")
+          tf_policy_resource = one(r'resource\s+"aws_iam_role_policy"\s+"eso_monitoring_ssm"\s*\{.*?\bResource\s*=\s*([^\n]+)', tf, "eso_oidc.tf의 SSM 정책 Resource")
+          tf_bucket_template = one(r'\boidc_bucket\s*=\s*"([^"]+)"', tf, "eso_oidc.tf의 oidc_bucket")
+          tf_bucket = tf_bucket_template.replace("${data.aws_caller_identity.current.account_id}", account)
+          if "${" in tf_bucket:
+              print(f"::error::eso_oidc.tf의 oidc_bucket에 이 단계가 모르는 보간이 있다: {tf_bucket_template}")
+              sys.exit(1)
+          es_key = unquote(one(r"\bremoteRef:[ \t]*\n(?:[ \t]+\S.*\n)*?[ \t]+key:[ \t]*(\S.*)$", es, "alertmanager-discord.yaml의 remoteRef.key", re.M))
+          var_bucket = one(r'variable\s+"oidc_bucket"\s*\{.*?\bdefault\s*=\s*"([^"]+)"', variables, "variables.tf의 oidc_bucket 기본값")
+          lib_bucket = one(r"^OIDC_BUCKET=\$\{OIDC_BUCKET:-([^}]+)\}", lib, "lib.sh의 OIDC_BUCKET 기본값", re.M)
+
+          failed = False
+          def same(pair, left_name, left, right_name, right):
+              global failed
+              if left == right:
+                  print(f"일치: {pair}: {left!r}")
+              else:
+                  print(f"::error::불일치({pair}): {left_name}={left!r}, {right_name}={right!r}")
+                  failed = True
+
+          same("IAM 역할 이름", "eso_oidc.tf", tf_role, "serviceaccount.yaml의 role-arn", annotation_role)
+          same("계정 ID(어노테이션 ↔ variables.tf의 버킷 이름 끝)", "serviceaccount.yaml", account, "variables.tf", var_bucket.rsplit("-", 1)[-1])
+          same("계정 ID(어노테이션 ↔ lib.sh의 버킷 이름 끝)", "serviceaccount.yaml", account, "lib.sh", lib_bucket.rsplit("-", 1)[-1])
+          same("신뢰 정책의 주체", "eso_oidc.tf의 sub", tf_sub, "ServiceAccount", f"system:serviceaccount:{sa_ns}:{sa_name}")
+          same("SSM 파라미터 이름", "eso_oidc.tf의 ARN", tf_param_arn, "alertmanager-discord.yaml의 remoteRef.key", es_key)
+          same("SSM 정책의 Resource", "eso_oidc.tf의 정책 Resource", tf_policy_resource.strip().rstrip(","), "local", "local.eso_discord_parameter_arn")
+          same("OIDC 버킷(eso_oidc.tf ↔ variables.tf)", "eso_oidc.tf", tf_bucket, "variables.tf", var_bucket)
+          same("OIDC 버킷(eso_oidc.tf ↔ lib.sh)", "eso_oidc.tf", tf_bucket, "lib.sh", lib_bucket)
+          sys.exit(1 if failed else 0)
+          PY
+
       # 다음 단계가 쓰는 k3s의 Traefik 차트 파일과 매니페스트를 캐시에서 꺼낸다. 이 두 파일 때문에 모든 PR의 validate가 k3s.io와 raw.githubusercontent.com에 기대게 되어서,
       # 한 번 받은 것을 GitHub Actions 캐시에 두고 다시 쓴다. 키는 두 파일의 SHA-256(잡 env)이라 k3s를 올려 값을 바꾸면 새 키가 되고, 같은 키의 내용은 바뀌지 않는다.
       # 캐시에 없으면(cache-hit이 아니면) 다음 단계가 내려받고, 잡이 성공하면 이 액션의 post 단계가 그 디렉터리를 저장한다(post-if: success()라 실패한 잡의 파일은 저장하지 않는다).
