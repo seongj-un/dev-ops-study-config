@@ -1,6 +1,7 @@
 # Terraform과 provider의 버전 범위.
 #   required_version "~> 1.16" : 1.16 이상 2.0 미만 (~>는 오른쪽 끝 숫자만 올라가는 것을 허용한다)
 #   aws provider     "~> 6.66" : 6.66.0 이상 7.0.0 미만
+#   tls provider     "~> 4.4"  : 4.4.0 이상 5.0.0 미만 (OIDC 공급자 지문을 읽는 데이터 소스 하나에만 쓴다)
 # 메이저 버전(Terraform 2.0, provider 7.0)은 호환이 깨지는 변경을 담을 수 있어서 자동으로 올라가지 않게 막는다.
 #
 # 실제로 받는 provider의 정확한 버전과 해시는 .terraform.lock.hcl이 고정한다. 그 파일은 커밋한다(.gitignore에 넣지 않는다).
@@ -13,6 +14,10 @@ terraform {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 6.66"
+    }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.4"
     }
   }
 

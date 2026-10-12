@@ -35,7 +35,7 @@ Terraform은 자기가 만든 리소스의 목록과 속성을 state 파일에 �
 | S3 버킷 `dev-ops-study-oidc-<계정 ID>` | 버전 관리 없음, SSE-S3, `BucketOwnerEnforced`, `force_destroy = false` | 클러스터 발급자의 디스커버리 문서와 JWKS를 올린다(아래 "클러스터 OIDC (ESO용)") |
 | 위 버킷의 퍼블릭 액세스 차단 | `block_public_acls`·`ignore_public_acls`만 켬 | 정책으로 공개하는 두 객체를 STS가 익명으로 읽게 한다 |
 | 위 버킷의 정책 | 객체 둘의 `s3:GetObject`만 공개 + TLS 아니면 거절 | 공개 범위를 `.well-known/openid-configuration`과 `openid/v1/jwks`로 한정한다 |
-| OIDC 공급자 `<버킷>.s3.ap-northeast-2.amazonaws.com` | audience `sts.amazonaws.com`, 지문 없음 | 이 클러스터의 ServiceAccount 토큰을 AWS가 믿게 한다 |
+| OIDC 공급자 `<버킷>.s3.ap-northeast-2.amazonaws.com` | audience `sts.amazonaws.com`, 지문은 발급자 주소의 인증서에서 읽은 값 | 이 클러스터의 ServiceAccount 토큰을 AWS가 믿게 한다 |
 | IAM 역할 `dev-ops-study-eso-monitoring` | 신뢰: `monitoring/eso-ssm` ServiceAccount 하나, 최대 1시간 | ESO가 맡는 역할 |
 | 역할의 인라인 정책 `read-discord-webhook-parameter` | `ssm:GetParameter` 한 파라미터 | Discord 웹훅 URL 파라미터 하나만 읽는다(DuckDNS 토큰은 못 읽는다) |
 
@@ -123,6 +123,7 @@ terraform init "$(terraform -chdir=../bootstrap output -raw backend_config_arg)"
 `eso_oidc.tf`는 클러스터 안의 External Secrets Operator(ESO)가 AWS 액세스 키 없이 SSM 파라미터를 읽는 길을 만든다. ESO는 `monitoring/eso-ssm` ServiceAccount의 토큰을 STS의 `AssumeRoleWithWebIdentity`에 내밀고, 임시 자격 증명을 받아 파라미터 하나를 읽는다.
 
 - **발급자 URL**: `https://dev-ops-study-oidc-<계정 ID>.s3.ap-northeast-2.amazonaws.com`(가상 호스트 방식, 끝 슬래시 없음). k3s의 `service-account-issuer`, 디스커버리 문서의 `issuer`, IAM 공급자의 URL, 신뢰 정책의 조건 키가 이 문자열과 글자 하나까지 같아야 한다. `terraform output -raw oidc_issuer`로 본다.
+- **OIDC 공급자의 지문(`thumbprint_list`)**: `data "tls_certificate"`로 발급자 주소의 인증서 체인에서 읽어 넣는다(plan 때 인터넷 접속이 필요하다). 지문을 비워 두면 IAM이 공급자를 만들 때 디스커버리 문서를 받으러 접속하는데, 그 문서는 인스턴스가 처음 부팅할 때 올리므로 첫 `apply` 시점에는 없다. 값 자체는 대조되지 않는다(S3 주소는 AWS가 신뢰 CA 목록으로 검증한다). 그래도 공급자 생성이 `OpenIdIdpCommunicationError`로 실패하면 `infra/aws/up.sh`를 한 번 실행해 문서가 올라간 뒤 `terraform apply`를 다시 한다.
 - **역할 `dev-ops-study-eso-monitoring`**: `sub`가 `system:serviceaccount:monitoring:eso-ssm`이고 `aud`가 `sts.amazonaws.com`인 토큰만 받는다(`StringEquals`). 권한은 Discord 웹훅 URL 파라미터(`/dev-ops-study/discord-webhook-url`)의 `ssm:GetParameter` 하나다. DuckDNS 토큰은 읽지 못한다.
 
 ### 왜 버킷이 공개인가, 무엇이 공개인가
@@ -143,7 +144,7 @@ aws s3control get-public-access-block --account-id "$(aws sts get-caller-identit
 # BlockPublicPolicy와 RestrictPublicBuckets가 false여야 한다. 설정이 없다고(NoSuchPublicAccessBlockConfiguration) 나오면 계정 수준 차단이 없는 것이라 괜찮다.
 ```
 
-둘 중 하나라도 true면 `apply`가 `AccessDenied`로 정책 붙이기에서 실패한다. 계정 수준 설정을 풀지, CloudFront(Origin Access Control)로 공개 버킷 없이 하는 방법으로 바꿀지는 사용자가 정한다.
+`BlockPublicPolicy`가 true면 `apply`가 `AccessDenied`로 정책 붙이기에서 실패한다. `RestrictPublicBuckets`만 true면 `apply`는 성공하지만 익명 읽기가 조용히 막혀서, `infra/aws`의 부팅 5단계가 올린 뒤 "공개 주소에서 받은 내용이 올린 파일과 다르거나 받지 못했다"라고 경고한다. 계정 수준 설정을 풀지, CloudFront(Origin Access Control)로 공개 버킷 없이 하는 방법으로 바꿀지는 사용자가 정한다.
 
 ### 비용
 
@@ -176,11 +177,12 @@ S3 저장과 요청은 객체가 둘이고 수 KB라 한 달에 1센트에도 �
 이 스택은 프로젝트를 **완전히 정리할 때 맨 마지막에** 지운다.
 
 1. **이 버킷을 쓰는 스택을 먼저 모두 `terraform destroy`한다**(`infra/aws` 등). 그 스택들의 state가 이 버킷에 있어서, 버킷을 먼저 지우면 그 스택이 만든 리소스가 state 없이 AWS에 남아 계속 과금된다.
-2. **버킷을 비운다.** `force_destroy = false`라서 객체가 하나라도 남아 있으면 destroy가 버킷 삭제를 거부한다. 이것이 안전장치다. 버전 관리가 켜져 있으므로 "비운다"는 현재 객체뿐 아니라 **모든 이전 버전과 삭제 마커(delete marker)까지** 지운다는 뜻이다.
+2. **버킷을 비운다.** 상태 버킷은 `force_destroy = false`라서 객체가 하나라도 남아 있으면 destroy가 버킷 삭제를 거부한다. 이것이 안전장치다. 버전 관리가 켜져 있으므로 "비운다"는 현재 객체뿐 아니라 **모든 이전 버전과 삭제 마커(delete marker)까지** 지운다는 뜻이다.
    `aws s3 rm --recursive`는 삭제 마커만 더할 뿐 이전 버전을 지우지 않아서 충분하지 않다. 다음 둘 중 하나를 쓴다.
    - 콘솔: S3 → 버킷 → "비우기(Empty)".
    - Terraform: `state_bucket.tf`의 `force_destroy`를 `true`로 바꾸고 `terraform apply`를 한 번 한다(이 값이 state에 기록되어야 destroy가 적용한다). 그 뒤 3번으로 간다.
-3. `terraform destroy`. 예산 2개도 함께 사라진다(비용 알림이 끝난다). OIDC 공급자와 plan 역할도 사라져서 PR의 `terraform-plan` 워크플로는 역할을 맡지 못해 실패한다(필수 검사가 아니라 PR을 막지는 않는다).
+   OIDC 버킷(`dev-ops-study-oidc-<계정 ID>`)도 `force_destroy = false`라서 비워야 한다. 객체는 `.well-known/openid-configuration`과 `openid/v1/jwks` 둘이고 버전 관리가 꺼져 있어 `aws s3 rm`으로 지우면 된다.
+3. `terraform destroy`. 예산 2개도 함께 사라진다(비용 알림이 끝난다). OIDC 공급자(GitHub용과 클러스터용)와 plan 역할, ESO 역할(`dev-ops-study-eso-monitoring`)도 사라져서 PR의 `terraform-plan` 워크플로는 역할을 맡지 못해 실패한다(필수 검사가 아니라 PR을 막지는 않는다).
 4. 로컬의 `terraform.tfstate`는 지워도 된다.
 
 버킷을 비우면 모든 스택의 state와 그 이전 버전이 영구 삭제되어 되돌릴 수 없다. 1번이 끝났는지 확인한 뒤에 한다.

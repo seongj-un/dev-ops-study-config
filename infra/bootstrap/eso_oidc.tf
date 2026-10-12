@@ -129,13 +129,28 @@ resource "aws_s3_bucket_policy" "oidc" {
   depends_on = [aws_s3_bucket_public_access_block.oidc]
 }
 
+# 발급자 주소의 TLS 인증서 체인에서 지문(thumbprint)을 구한다. 이 값은 아래 OIDC 공급자의 thumbprint_list에만 쓰인다.
+# 가상 호스트 주소(버킷.s3.리전.amazonaws.com)는 버킷에 객체가 없어도 TLS 핸드셰이크가 되므로(와일드카드 인증서) 객체를 올리기 전인 첫 apply에서도 읽힌다.
+# certificates[0]은 체인에서 가장 위(루트에 가까운) 인증서다. 이 데이터 소스는 plan 때 인터넷으로 그 주소에 접속한다.
+data "tls_certificate" "oidc_issuer" {
+  url = local.oidc_issuer
+}
+
 # 이 클러스터의 발급자를 계정에 OIDC 공급자로 등록한다. 같은 URL의 공급자는 계정에 하나만 만들 수 있다.
 #  - client_id_list(audience): 토큰의 aud가 이 목록에 있어야 STS가 받는다. ESO가 투영하는 토큰의 audience가 sts.amazonaws.com이다.
-#  - thumbprint_list는 적지 않는다. S3 주소의 JWKS는 AWS가 자기의 신뢰 루트 CA 목록으로 TLS 인증서를 검증하므로 지문이 쓰이지 않는다
-#    (github_oidc.tf의 설명과 같고, aws provider 문서도 S3에 올린 JWKS에는 지문이 쓰이지 않는다고 적는다). 비우면 IAM이 스스로 채운다.
+#  - thumbprint_list를 적는 이유: 비워 두면 IAM이 공급자를 만드는 순간 발급자 주소의 디스커버리 문서를 받으러 접속해 지문을 스스로 채운다(OpenIdIdpCommunicationError가 나올 수 있다).
+#    그런데 이 문서는 인스턴스가 처음 부팅할 때 올리므로(infra/aws의 cloud-init 5단계) 이 스택의 첫 apply 때는 버킷에 아직 없다(익명 요청은 403).
+#    지문을 미리 주면 IAM이 생성 시점의 이 접속을 건너뛴다. 값 자체는 쓰이지 않는다. S3 주소의 JWKS는 AWS가 자기의 신뢰 루트 CA 목록으로 TLS 인증서를 검증하므로 지문이 대조되지 않는다
+#    (aws provider 문서도 S3에 올린 JWKS에는 지문이 쓰이지 않는다고 적는다).
+#    그래서 데이터 소스로 읽은 값을 그대로 넣는다.
+#  - depends_on: 버킷과 정책이 먼저 있어야 발급자 주소가 이 계정의 실제 버킷을 가리킨다. url이 local이라 Terraform이 이 순서를 스스로 알지 못한다.
+#  - 그래도 생성이 OpenIdIdpCommunicationError로 실패하면 infra/aws/up.sh를 한 번 실행해 문서가 올라간 뒤 terraform apply를 다시 한다(README 참고).
 resource "aws_iam_openid_connect_provider" "cluster" {
-  url            = local.oidc_issuer
-  client_id_list = ["sts.amazonaws.com"]
+  url             = local.oidc_issuer
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = [data.tls_certificate.oidc_issuer.certificates[0].sha1_fingerprint]
+
+  depends_on = [aws_s3_bucket_policy.oidc]
 }
 
 # ESO가 맡는 역할. 신뢰 정책(누가 맡는가): 위 공급자가 발급자인 토큰 가운데 monitoring 네임스페이스의 eso-ssm ServiceAccount 것만.
