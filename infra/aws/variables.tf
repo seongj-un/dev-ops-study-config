@@ -97,17 +97,16 @@ variable "duckdns_token_parameter" {
   }
 }
 
-variable "discord_webhook_parameter" {
-  description = "Discord 웹훅 URL을 담은 SSM Parameter Store SecureString의 이름. 인스턴스가 부팅할 때 이 값을 읽어 Alertmanager가 쓰는 Secret(monitoring/alertmanager-discord)을 만든다. 사람이 미리 만들어 둔다(README 참고). 없어도 부팅은 끝나고, Alertmanager는 자리표시자 URL로 뜬다(Discord 알림은 가지 않는다). 부트스트랩이 다시 돌 때 읽히면 자리표시자가 값으로 바뀐다."
+variable "oidc_bucket" {
+  description = "클러스터의 OIDC 디스커버리 문서와 JWKS를 올리는 공개 S3 버킷의 이름. infra/bootstrap(eso_oidc.tf)이 만들고 이름이 dev-ops-study-oidc-<계정 ID>다. 발급자 URL(https://<버킷>.s3.<리전>.amazonaws.com)이 이 이름에서 나와 k3s의 service-account-issuer와 IAM OIDC 공급자에 글자 그대로 들어가므로, 거기와 다르면 ESO가 STS 인증을 받지 못한다. 부트스트랩 5단계가 이 버킷의 객체 두 개를 부팅마다 올린다."
   type        = string
-  default     = "/dev-ops-study/discord-webhook-url"
+  default     = "dev-ops-study-oidc-803879842357"
 
-  # duckdns_token_parameter와 같은 이유로 /로 시작하는 이름만 받는다: iam.tf가 이름을 ARN 문자열에 이어 붙이고(parameter<이름>),
-  # cloud-init 템플릿은 이름을 bootstrap.env에 넣어 root가 source 하므로 템플릿의 regex()도 이 문자 집합만 통과시킨다.
-  # 이 파라미터는 DuckDNS 토큰과 같은 방식(기본 키 aws/ssm으로 암호화한 SecureString)으로 만든다. iam.tf의 정책이 그 키의 복호화만 허용한다.
+  # cloud-init 템플릿은 이름을 bootstrap.env에 넣어 root가 source 하므로 템플릿의 regex()도 같은 문자 집합만 통과시킨다. S3 버킷 이름 규칙에서 점(.)을 뺀 문자 집합(소문자, 숫자, -)이다.
+  # 점이 든 이름은 가상 호스트 주소(<버킷>.s3.<리전>.amazonaws.com)가 와일드카드 TLS 인증서(*.s3.<리전>.amazonaws.com)와 맞지 않아 STS가 두 문서를 받지 못하므로 막는다.
   validation {
-    condition     = can(regex("^/[a-zA-Z0-9_./-]+$", var.discord_webhook_parameter))
-    error_message = "discord_webhook_parameter는 /로 시작하고 영문자, 숫자, . - _ / 만 쓴 이름이어야 한다(예: /dev-ops-study/discord-webhook-url)."
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$", var.oidc_bucket))
+    error_message = "oidc_bucket은 S3 버킷 이름 규칙(소문자, 숫자, -, 3~63자, 점 없음)을 따라야 한다(예: dev-ops-study-oidc-803879842357)."
   }
 }
 

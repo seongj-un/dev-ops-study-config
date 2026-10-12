@@ -21,7 +21,8 @@ fail() { echo "실패: $*" >&2; exit 1; }
 export EXPECT_SUB=myshort
 export EXPECT_ROOT_APP_URL=https://raw.githubusercontent.com/seongj-un/dev-ops-study-config/main/argocd/root.yaml
 export EXPECT_DUCKDNS_PARAM=/dev-ops-study/duckdns-token
-export EXPECT_DISCORD_PARAM=/dev-ops-study/discord-webhook-url
+export EXPECT_OIDC_BUCKET=dev-ops-study-oidc-803879842357
+export EXPECT_OIDC_ISSUER=https://dev-ops-study-oidc-803879842357.s3.ap-northeast-2.amazonaws.com
 cat >"$tf/main.tf" <<EOF
 locals {
   tpl = "$aws_dir/cloud-init.yaml.tftpl"
@@ -29,7 +30,8 @@ locals {
     aws_region                     = "ap-northeast-2"
     duckdns_subdomain              = "$EXPECT_SUB"
     ssm_parameter_name             = "$EXPECT_DUCKDNS_PARAM"
-    discord_webhook_parameter_name = "$EXPECT_DISCORD_PARAM"
+    oidc_bucket                    = "$EXPECT_OIDC_BUCKET"
+    oidc_issuer                    = "$EXPECT_OIDC_ISSUER"
     k3s_version                    = "v1.35.8+k3s1"
     helm_version                   = "v4.3.0"
     argocd_chart_version           = "10.9.4"
@@ -65,7 +67,7 @@ echo "length(templatefile(local.tpl, local.vars))" | terraform -chdir="$tf" cons
   fail "정상 값으로도 terraform console 렌더링이 실패했다"
 rejected=0
 for bad in 'duckdns_subdomain = "my.short"' 'duckdns_subdomain = "x;reboot"' 'aws_region = "ap-northeast-2 x"' \
-  'ssm_parameter_name = "/x;reboot"' 'discord_webhook_parameter_name = "/x;reboot"' 'discord_webhook_parameter_name = "/x y"' \
+  'ssm_parameter_name = "/x;reboot"' 'oidc_bucket = "x;reboot"' 'oidc_bucket = "Upper_Case"' 'oidc_issuer = "https://x.example.com/;id"' 'oidc_issuer = "http://x.example.com"' \
   'k3s_version = "latest"' 'helm_version = "v4.3"' 'config_repo_url = "https://gitlab.com/a/b"' 'config_repo_ref = "main;id"'; do
   if echo "templatefile(local.tpl, merge(local.vars, { $bad }))" | terraform -chdir="$tf" console >/dev/null 2>&1; then
     fail "잘못된 값이 렌더링을 통과했다: $bad"
@@ -112,9 +114,21 @@ print("argocd-values.yaml: 주석을 뺀", len(rf["/etc/devops/argocd-values.yam
 
 env = dict(line.split("=", 1) for line in rf["/etc/devops/bootstrap.env"]["content"].splitlines())
 assert env["DUCKDNS_SUBDOMAIN"] == os.environ["EXPECT_SUB"], env
-# 두 SSM 파라미터 이름이 서로 바뀌어 들어가면 DuckDNS 토큰이 Discord 웹훅 URL이 된다.
 assert env["SSM_PARAMETER_NAME"] == os.environ["EXPECT_DUCKDNS_PARAM"], env
-assert env["DISCORD_WEBHOOK_PARAMETER_NAME"] == os.environ["EXPECT_DISCORD_PARAM"], env
+# Discord 웹훅 URL은 인스턴스가 읽지 않는다(ESO가 읽는다). 이름이 되살아나면 인스턴스 역할이 다시 읽으려 한다는 뜻이다.
+assert "DISCORD_WEBHOOK_PARAMETER_NAME" not in env, env
+# 발급자는 버킷 이름과 리전에서 나온 값이고, 둘이 어긋나면 k3s의 발급자와 IAM 공급자의 URL이 달라진다.
+assert env["OIDC_BUCKET"] == os.environ["EXPECT_OIDC_BUCKET"], env
+assert env["OIDC_ISSUER"] == os.environ["EXPECT_OIDC_ISSUER"], env
+assert env["OIDC_ISSUER"] == "https://" + env["OIDC_BUCKET"] + ".s3." + env["AWS_REGION"] + ".amazonaws.com", env
+script = rf["/usr/local/sbin/devops-bootstrap"]["content"]
+# Secret은 ESO가 만든다. 부트스트랩이 다시 만들면 ESO와 소유가 겹친다.
+assert "create secret" not in script, "부트스트랩이 아직 Secret을 만든다"
+for name in ("shortener-db", "grafana-admin", "--from-file=webhook-url", "discord.invalid"):
+    assert name not in script, name + " 흔적이 부트스트랩에 남아 있다"
+steps = [l.split('"')[1] for l in script.splitlines() if l.strip().startswith("step \"")]
+assert [s.split()[0] for s in steps] == ["%d/%d" % (i, len(steps)) for i in range(1, len(steps) + 1)], steps
+print("단계:", steps)
 assert env["ROOT_APP_URL"] == os.environ["EXPECT_ROOT_APP_URL"], env["ROOT_APP_URL"]
 print("bootstrap.env:", env)
 

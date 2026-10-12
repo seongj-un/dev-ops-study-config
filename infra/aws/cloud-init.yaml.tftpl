@@ -6,8 +6,10 @@
 # EC2 user data 한도(16384바이트)는 ec2.tf가 base64gzip으로 압축해 넘기는 gzip 바이트에 걸린다. 압축 전 원문은 16KB를 넘어도 된다.
 # test/render.sh가 Terraform과 같은 압축본을 만들어 그 크기와 압축을 푼 결과를 보고, 스크립트가 렌더링 전후로 같은지도 검사한다.
 write_files:
-# Terraform이 넘긴 값(스크립트가 source 한다). 비밀은 없다: DuckDNS 토큰과 Discord 웹훅 URL은 SSM 파라미터 이름만 적고 값은 부팅 때 읽는다.
-# SSM_PARAMETER_NAME은 DuckDNS 토큰, DISCORD_WEBHOOK_PARAMETER_NAME은 Discord 웹훅 URL(Alertmanager의 알림 주소)의 파라미터 이름이다.
+# Terraform이 넘긴 값(스크립트가 source 한다). 비밀은 없다: DuckDNS 토큰은 SSM 파라미터 이름만 적고 값은 부팅 때 읽는다.
+# SSM_PARAMETER_NAME은 DuckDNS 토큰의 파라미터 이름이다. Discord 웹훅 URL은 인스턴스가 읽지 않는다(ESO가 자기 역할로 읽는다).
+# OIDC_BUCKET·OIDC_ISSUER: 클러스터의 ServiceAccount 토큰 발급자(k3s 4단계의 service-account-issuer)와, 그 디스커버리 문서·JWKS를 올리는 공개 S3 버킷(5단계).
+# 버킷과 IAM 쪽 짝은 infra/bootstrap/eso_oidc.tf가 만든다. OIDC_ISSUER는 거기 local.oidc_issuer와 글자까지 같아야 한다(끝 슬래시 없음).
 # regex()는 값 전체가 패턴에 맞으면 그 값을, 아니면 plan에서 오류를 낸다: root가 source 하는 파일에 셸 문법이 끼어들지 못한다.
 # ROOT_APP_URL: https://github.com/<owner>/<repo>[.git]의 raw 주소 https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<경로>
 - path: /etc/devops/bootstrap.env
@@ -15,7 +17,8 @@ write_files:
   content: |
     AWS_REGION=${regex("^[a-z0-9-]+$", aws_region)}
     SSM_PARAMETER_NAME=${regex("^[A-Za-z0-9_./-]+$", ssm_parameter_name)}
-    DISCORD_WEBHOOK_PARAMETER_NAME=${regex("^[A-Za-z0-9_./-]+$", discord_webhook_parameter_name)}
+    OIDC_BUCKET=${regex("^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$", oidc_bucket)}
+    OIDC_ISSUER=${regex("^https://[a-z0-9][a-z0-9.-]+$", oidc_issuer)}
     DUCKDNS_SUBDOMAIN=${regex("^[a-z0-9-]+$", duckdns_subdomain)}
     K3S_VERSION=${regex("^v[0-9]+[.][0-9]+[.][0-9]+[+]k3s[0-9]+$", k3s_version)}
     HELM_VERSION=${regex("^v[0-9]+[.][0-9]+[.][0-9]+$", helm_version)}
@@ -91,7 +94,8 @@ write_files:
   permissions: "0755"
   content: |
     #!/bin/bash
-    # 이 인스턴스를 GitOps 노드로 만든다: AWS CLI → DuckDNS → k3s → Helm → ArgoCD → Secret(DB, 모니터링) → 루트 Application.
+    # 이 인스턴스를 GitOps 노드로 만든다: AWS CLI → DuckDNS → k3s → OIDC 공개 → Helm → ArgoCD → 루트 Application.
+    # Secret은 만들지 않는다. DB 비밀번호·Grafana admin 비밀번호·Discord 웹훅 URL은 ESO(External Secrets Operator)가 클러스터 안에서 만든다(5단계 주석).
     # devops-bootstrap.service가 부팅마다 돌린다. 단계마다 결과가 이미 있으면 건너뛰므로 손으로 다시 돌려도 된다.
     set -euo pipefail
     # 손으로 돌린 것과 서비스가 겹치면 helm 설치가 두 번 돌 수 있어서 한 번에 하나만 돌게 한다.
@@ -139,7 +143,7 @@ write_files:
       apt-get -o DPkg::Lock::Timeout=180 install -y -q unzip
     fi
 
-    # 2. AWS CLI v2(SSM에서 DuckDNS 토큰과 Discord 웹훅 URL을 읽는다): AWS가 배포하는 zip의 설치 스크립트가 /usr/local/aws-cli에 풀고 /usr/local/bin/aws를 만든다.
+    # 2. AWS CLI v2(SSM에서 DuckDNS 토큰을 읽고, 5단계에서 S3에 올린다): AWS가 배포하는 zip의 설치 스크립트가 /usr/local/aws-cli에 풀고 /usr/local/bin/aws를 만든다.
     # 버전을 고정하지 않은 최신 zip이라, 같은 주소에 .sig를 붙인 PGP 서명을 AWS CLI 팀 키(/etc/devops/aws-cli.asc)로 검사하고 틀리면 풀기 전에 멈춘다.
     # gpgv는 apt가 저장소 서명 검사에 쓰는 도구라 늘 있다. 키는 ASCII armor라서 머리줄(-----)·빈 줄·체크섬 줄(=)을 빼고 base64를 풀어 키링으로 만든다.
     step "2/8 AWS CLI"
@@ -167,11 +171,20 @@ write_files:
     # --tls-san: API 서버 인증서에 DuckDNS 이름을 넣어 맥에서 https://<sub>.duckdns.org:6443 으로 붙게 한다. 공인 IP는 넣지 않는다:
     # 멈췄다 켤 때마다 바뀌어 인증서의 IP가 곧 틀려지지만, 이름은 DuckDNS가 새 IP로 옮겨 주므로 계속 맞는다.
     # --write-kubeconfig-mode 0600: 관리자 자격 증명(/etc/rancher/k3s/k3s.yaml)을 root만 읽는다. Traefik·metrics-server·local-path는 켜 둔다(로컬과 같다).
+    # --kube-apiserver-arg=service-account-issuer-=$OIDC_ISSUER: ServiceAccount 토큰의 발급자(iss)를 이 공개 URL로 정한다. 인자 이름 끝의 -는 k3s 소스(GetArgs)의 인자 합치기 규칙에
+    # 따르면 "k3s 기본값 앞에 덧붙인다"는 뜻이다(+는 뒤에 덧붙임, 접미사가 없으면 기본값을 바꾼다). k3s v1.35.8+k3s1 소스(pkg/util/args.go의 GetArgs, pkg/daemons/control/server.go)로
+    # 확인했다: -는 기본값 앞에 덧붙이고, 값마다 --service-account-issuer를 따로 넘긴다. 실제 클러스터에서 한 번 더 확인한다(어긋나면 접미사 없는 service-account-issuer=로 바꾼다). kube-apiserver는 첫 발급자로 서명하고 나열한 모든 발급자의 토큰을 받아들이므로,
+    # 새 토큰은 이 URL로 서명되고 기본값(https://kubernetes.default.svc.cluster.local)으로 이미 나간 토큰(파드 안의 토큰 등)도 그대로 통한다.
+    # --kube-apiserver-arg=service-account-jwks-uri=$OIDC_ISSUER/openid/v1/jwks: kube-apiserver가 만드는 디스커버리 문서(/.well-known/openid-configuration)의
+    # jwks_uri에 적힐 주소다. 기본은 API 서버 주소라 STS가 닿지 못해서, 5단계가 올리는 S3 객체의 주소로 맞춘다. 서명 키는 새 클러스터마다 새로 생기므로 5단계가 부팅마다 다시 올린다.
+    # 이 두 인자는 k3s를 처음 설치할 때(또는 K3S_VERSION이 바뀔 때) 서비스 파일에 들어간다. user data가 바뀌면 인스턴스를 새로 만들기 때문에 이미 떠 있는 인스턴스에 소급되지 않는다.
     step "4/8 k3s"
     if [ "$(k3s --version 2>/dev/null | awk 'NR==1 {print $3}')" != "$K3S_VERSION" ]; then
       log "k3s $K3S_VERSION 설치"
       curl -fsSL --retry 5 -o "$WORK/k3s-install.sh" https://get.k3s.io
-      INSTALL_K3S_VERSION=$K3S_VERSION sh "$WORK/k3s-install.sh" server --tls-san "$DUCKDNS_SUBDOMAIN.duckdns.org" --write-kubeconfig-mode 0600
+      INSTALL_K3S_VERSION=$K3S_VERSION sh "$WORK/k3s-install.sh" server --tls-san "$DUCKDNS_SUBDOMAIN.duckdns.org" --write-kubeconfig-mode 0600 \
+        --kube-apiserver-arg="service-account-issuer-=$OIDC_ISSUER" \
+        --kube-apiserver-arg="service-account-jwks-uri=$OIDC_ISSUER/openid/v1/jwks"
     fi
     # k3s가 안정될 때까지 기다린다. API의 답 한 번으로는 부족하다: Node의 Ready 조건은 kubelet이 마지막으로 써 둔 값이고, 그것을 Unknown으로
     # 바꾸는 노드 수명 주기 컨트롤러는 kubelet 소식이 일정 시간(node-monitor-grace-period) 끊겨야 움직인다. k3s는 API 서버·컨트롤러·kubelet이
@@ -222,9 +235,72 @@ write_files:
     }
     k3s_settle
 
-    # 5. Helm: 고정한 버전의 공식 tarball을 get.helm.sh의 .sha256sum으로 검사한다. 같은 곳에서 받은 체크섬이라
+    # 5. OIDC 공개: 이 클러스터의 디스커버리 문서와 JWKS(서명 공개 키 목록)를 공개 S3 버킷에 올린다. ESO가 ServiceAccount 토큰으로 AWS에 들어갈 때(AssumeRoleWithWebIdentity)
+    # STS가 토큰의 iss(위 4단계의 발급자)로 이 두 문서를 익명으로 받아 서명을 확인한다(infra/bootstrap/eso_oidc.tf). Secret을 만드는 일은 그래서 이 스크립트에서
+    # ESO로 넘어갔다: DB·Grafana 비밀번호와 Discord 웹훅 URL은 클러스터 안에서 ESO가 만든다(platform/external-secrets-config, charts/shortener).
+    # 부팅마다 돈다. 멈췄다 켜면 서명 키가 그대로라 같은 문서를 다시 올릴 뿐이고, 클러스터를 새로 만들면(키가 새로 생긴다) 옛 JWKS를 덮어써야 STS가 새 토큰을 받아 준다.
+    # 그래서 "이미 올렸으니 건너뛴다"를 두지 않는다. ArgoCD보다 먼저 올려 ESO가 처음 STS를 부르기 전에 JWKS가 맞아 있게 한다.
+    # 두 문서는 공개 정보다(발급자 주소와 공개 키뿐이다). 그래서 로그에 크기와 kid를 남겨도 된다. 비밀은 다루지 않는다.
+    # 실패해도 부팅을 멈추지 않고 경고만 남긴다: 앱의 DB·Grafana 비밀번호는 STS 없이 ESO가 만들 수 있고(Password 생성기), STS가 필요한 것은 Discord 웹훅 URL뿐이다.
+    # ESO는 실패한 동기화를 다시 시도하므로, 이 단계가 다음 부팅에서 성공하면 저절로 이어진다.
+    # 확인(올리기 전): 디스커버리 문서의 issuer와 jwks_uri가 기대한 값과 같은지, JWKS에 키가 하나 이상 있는지. 통과하면 디스커버리 문서에 claims_supported(["sub","iss"])를 더해 그 파일을 올린다. python3로 읽는다(cloud-init이 python3 프로그램이라 Ubuntu에 늘 있다. jq는 없다).
+    # 확인(올린 뒤): 인증 없이 https로 받아서(STS와 같은 방식) 올린 파일과 같은지. 버킷 정책이나 계정의 퍼블릭 액세스 차단이 막고 있으면 여기서 걸린다.
+    # 업로드는 aws s3 cp(작은 파일 하나라 단일 PutObject): ACL을 보내지 않는다(버킷이 BucketOwnerEnforced). 시도마다 timeout을 두고 3번까지 다시 한다(최악 약 5분).
+    step "5/8 OIDC 공개"
+    oidc_check() {
+      python3 - "$OIDC_ISSUER" "$WORK/oidc-discovery.json" "$WORK/oidc-jwks.json" <<'PY'
+    import json, sys
+    issuer, disc_path, jwks_path = sys.argv[1:4]
+    disc = json.load(open(disc_path))
+    if disc.get("issuer") != issuer:
+        sys.exit("디스커버리 문서의 issuer가 다르다: " + str(disc.get("issuer")) + " (기대 " + issuer + ")")
+    if disc.get("jwks_uri") != issuer + "/openid/v1/jwks":
+        sys.exit("디스커버리 문서의 jwks_uri가 다르다: " + str(disc.get("jwks_uri")))
+    keys = json.load(open(jwks_path)).get("keys", [])
+    if not keys:
+        sys.exit("JWKS에 키가 없다")
+    # 확인이 끝난 문서에 claims_supported를 더해 파일을 다시 쓴다. 올린 뒤 공개 주소와 비교하는 기준도 이 파일이다.
+    # kube-apiserver의 디스커버리 문서에는 이 항목이 없는데, IAM 사용 설명서가 OIDC 공급자 문서의 필수 항목으로 꼽고
+    # aws/amazon-eks-pod-identity-webhook의 SELF_HOSTED_SETUP.md도 같은 값(sub, iss)을 직접 넣는다. issuer와 jwks_uri는 바꾸지 않는다.
+    disc["claims_supported"] = ["sub", "iss"]
+    with open(disc_path, "w") as f:
+        json.dump(disc, f)
+    print("확인: 디스커버리 issuer 일치, JWKS 키 %d개 kid=%s" % (len(keys), ",".join(str(k.get("kid")) for k in keys)))
+    PY
+    }
+    oidc_put() {
+      local rc=0
+      timeout 30 aws s3 cp --region "$AWS_REGION" --only-show-errors --content-type application/json "$2" "s3://$OIDC_BUCKET/$1" || rc=$?
+      if [ "$rc" != 0 ]; then
+        if [ "$rc" = 124 ]; then
+          echo "S3 업로드(s3://$OIDC_BUCKET/$1)가 30초 안에 끝나지 않아 중단했다(timeout, 종료 코드 124)"
+        else
+          echo "S3 업로드(s3://$OIDC_BUCKET/$1)에 실패했다(aws s3 cp 종료 코드 $rc, 이유는 위의 aws 출력)"
+        fi
+        return 1
+      fi
+      curl -fsS --max-time 10 -o "$WORK/oidc-public.json" "$OIDC_ISSUER/$1" &&
+        cmp -s "$2" "$WORK/oidc-public.json" || { echo "올린 뒤 공개 주소($OIDC_ISSUER/$1)에서 받은 내용이 올린 파일과 다르거나 받지 못했다"; return 1; }
+    }
+    oidc_publish() {
+      kubectl get --raw /.well-known/openid-configuration --request-timeout=10s >"$WORK/oidc-discovery.json" &&
+        kubectl get --raw /openid/v1/jwks --request-timeout=10s >"$WORK/oidc-jwks.json" &&
+        oidc_check &&
+        oidc_put .well-known/openid-configuration "$WORK/oidc-discovery.json" &&
+        oidc_put openid/v1/jwks "$WORK/oidc-jwks.json" &&
+        log "OIDC 공개: 디스커버리 $(wc -c <"$WORK/oidc-discovery.json")바이트, JWKS $(wc -c <"$WORK/oidc-jwks.json")바이트를 s3://$OIDC_BUCKET 버킷에 올렸다"
+    }
+    oidc_ok=
+    for n in 1 2 3; do
+      if oidc_publish; then oidc_ok=1; break; fi
+      log "OIDC 공개 시도 $n/3 실패(이유는 위의 출력)"
+      [ "$n" = 3 ] || sleep 5
+    done
+    [ -n "$oidc_ok" ] || log "경고: OIDC 디스커버리 문서와 JWKS를 올리지 못했다. ESO가 STS 인증을 받지 못해 Discord 웹훅 Secret이 만들어지지 않는다(DB·Grafana 비밀번호는 영향이 없다). 다음 부트스트랩 실행(재부팅, systemctl start devops-bootstrap)에서 다시 올린다"
+
+    # 6. Helm: 고정한 버전의 공식 tarball을 get.helm.sh의 .sha256sum으로 검사한다. 같은 곳에서 받은 체크섬이라
     # 전송 중 깨지거나 잘린 파일은 잡지만, 배포 서버의 파일이 통째로 바뀐 경우까지 막지는 못한다.
-    step "5/8 Helm"
+    step "6/8 Helm"
     if [ "$(helm version --template '{{.Version}}' 2>/dev/null)" != "$HELM_VERSION" ]; then
       log "Helm $HELM_VERSION 설치"
       f=helm-$HELM_VERSION-linux-amd64.tar.gz
@@ -235,7 +311,7 @@ write_files:
       install -m 0755 "$WORK/linux-amd64/helm" /usr/local/bin/helm
     fi
 
-    # 6. ArgoCD: 로컬과 같은 차트 버전·값으로 설치하되 두 값만 바꾼다.
+    # 7. ArgoCD: 로컬과 같은 차트 버전·값으로 설치하되 두 값만 바꾼다.
     # server.ingress.enabled=false: HTTPS(cert-manager)가 생기기 전에는 Ingress를 만들지 않는다. 80 포트는 인터넷에 열려 있어서 만들면
     # admin 비밀번호가 HTTP 평문으로 인터넷을 지나간다. Ingress가 없으면 argocd-server는 ClusterIP라 밖에서 닿지 않는다(그래서 공개 환경에
     # 쓰면 안 되는 server.insecure: true도 그대로 둔다).
@@ -254,7 +330,7 @@ write_files:
     #    uninstall한다: 되돌아갈 곳이 없으니 반쯤 만든 리소스를 지우고 첫 부팅과 같은 설치를 다시 한다. --wait는 지운 리소스가 실제로 사라질
     #    때까지 기다린다(지워지는 중인 같은 이름의 객체가 남아 있으면 설치가 실패한다). CRD는 차트가 남기게 표시해 둬서 지워지지 않는다.
     # 정리한 뒤 상태가 deployed가 아닐 때만 설치한다(rollback이 성공하면 이미 deployed다).
-    step "6/8 ArgoCD"
+    step "7/8 ArgoCD"
     argocd_status() {
       helm list -n argocd --filter '^argocd$' -o json |
         python3 -c 'import json, sys; r = json.load(sys.stdin); print(r[0]["status"] if r else "")'
@@ -284,64 +360,6 @@ write_files:
         --wait --timeout 10m
     fi
 
-    # 7. Secret: 앱의 DB 비밀번호, 모니터링의 Grafana admin 비밀번호와 Discord 웹훅 URL. 모두 없을 때만 만든다(자리표시자만 예외다. 아래). 있는 것을 새 값으로 바꾸면
-    # DB는 PostgreSQL 데이터(PVC)에 이미 들어간 비밀번호와 어긋나고, Grafana admin 비밀번호는 재시도·재부팅마다 달라진다.
-    # 값은 파이프로만 흐른다: 명령줄 인자(ps)·로그·임시 파일에 쓰지 않는다. tr은 openssl이 끝에 붙이는 줄바꿈을 뺀다.
-    # 저장은 된다: Secret은 k3s 데이터 저장소(/var/lib/rancher/k3s/server/db, 암호화된 EBS 볼륨)에 들어간다. k3s는 기본으로 Secret을
-    # 따로 암호화하지 않으므로(base64일 뿐이다) 이 값을 지키는 것은 EBS 암호화다.
-    # 네임스페이스를 미리 만드는 것은 ArgoCD가 앱을 띄우기 전에 Secret을 넣어 두려는 것이다(CreateNamespace=true는 있는 것을 건드리지 않는다).
-    step "7/8 Secret"
-    for ns in shortener-dev shortener-prod; do
-      kubectl get namespace "$ns" >/dev/null 2>&1 || kubectl create namespace "$ns"
-      if kubectl -n "$ns" get secret shortener-db >/dev/null 2>&1; then
-        log "건너뜀: $ns/shortener-db 있음"
-      else
-        openssl rand -hex 16 | tr -d '\n' | kubectl -n "$ns" create secret generic shortener-db --from-file=password=/dev/stdin
-      fi
-    done
-    # monitoring/grafana-admin: Grafana의 admin 계정이다. 비밀번호는 위 DB 비밀번호와 같은 방법으로 만든다(무작위 32자 hex).
-    # monitoring/alertmanager-discord: Alertmanager가 알림을 보낼 Discord 웹훅 URL이다. 이 URL을 아는 사람은 누구나 채널에 글을 올릴 수 있어서
-    # DuckDNS 토큰과 같게 다룬다: SSM의 SecureString에서 읽어 변수에만 담고(출력하지 않는다. set -x도 쓰지 않는다) kubectl의 표준 입력으로 넣는다.
-    # printf는 bash 내장 명령이라 exec되지 않아서 값이 ps(/proc/<pid>/cmdline)에 나타나지 않는다. aws가 실패하면 표준 오류에는 실패 이유만 있고
-    # 값은 없어서 로그에 그대로 남는다. timeout 120: SSM이 응답하지 않아도 여기서 2분 넘게 붙잡히지 않는다. 값을 담은 변수는 다 쓰면 바로 unset 한다.
-    # 못 읽으면(파라미터 없음, 권한·복호화 오류, 시간 초과, 빈 값) 부팅을 멈추지 않고 자리표시자 URL로 Secret을 만들고 경고를 남긴다. Alertmanager는 이 Secret을
-    # 볼륨으로 마운트해서 Secret이 없으면 파드가 뜨지 못한다. 자리표시자(.invalid는 예약된 최상위 도메인이라 어디에도 풀리지 않는다)가 있으면 뜨고 Discord 알림만 가지 않는다.
-    # 자리표시자 Secret에는 라벨 dev-ops-study.io/placeholder=true를 붙인다. 이 단계는 부팅마다 돌아서 라벨이 있으면 SSM을 다시 읽는다. 읽히면 replace로 Secret을
-    # 값으로 통째로 바꾸고(라벨도 없어진다) 못 읽으면 자리표시자를 두고 경고를 다시 남긴다. apply는 쓰지 않는다: 라벨을 지우지 않고 값을 last-applied 주석에도 남긴다.
-    # 라벨이 없는 Secret은 값이 있는 것이라 SSM을 읽지 않고 건너뛴다. am: missing(없음), placeholder(라벨 true), real(값이 있음). 조회가 실패하면 없는 것으로 본다(위의 확인들과 같다).
-    kubectl get namespace monitoring >/dev/null 2>&1 || kubectl create namespace monitoring
-    if kubectl -n monitoring get secret grafana-admin >/dev/null 2>&1; then
-      log "건너뜀: monitoring/grafana-admin 있음"
-    else
-      openssl rand -hex 16 | tr -d '\n' | kubectl -n monitoring create secret generic grafana-admin \
-        --from-literal=admin-user=admin --from-file=admin-password=/dev/stdin
-    fi
-    am=missing
-    if ph=$(kubectl -n monitoring get secret alertmanager-discord -o 'jsonpath={.metadata.labels.dev-ops-study\.io/placeholder}' 2>/dev/null); then
-      if [ "$ph" = true ]; then am=placeholder; else am=real; fi
-    fi
-    if [ "$am" = real ]; then
-      log "건너뜀: monitoring/alertmanager-discord 있음"
-    else
-      hook=$(timeout 120 aws ssm get-parameter --with-decryption --region "$AWS_REGION" --name "$DISCORD_WEBHOOK_PARAMETER_NAME" --query Parameter.Value --output text) || hook=
-      if [ -z "$hook" ]; then
-        log "경고: Discord 웹훅 URL을 SSM에서 읽지 못했다($DISCORD_WEBHOOK_PARAMETER_NAME. 이유는 위의 aws 오류, 없으면 시간 초과나 빈 값이다). alertmanager-discord는 자리표시자 URL이다: Alertmanager는 뜨지만 Discord 알림은 가지 않는다. 다음 부트스트랩 실행(재부팅 등)에서 SSM을 다시 읽는다"
-        if [ "$am" = missing ]; then
-          # 라벨은 만들 때 함께 붙인다(만든 뒤에 붙이면 그 사이에 멈출 때 라벨 없는 자리표시자가 남는다). kubectl create에는 라벨 옵션이 없어서 label --local로 붙인다.
-          kubectl -n monitoring create secret generic alertmanager-discord --from-literal=webhook-url=https://discord.invalid/webhook-not-configured --dry-run=client -o yaml |
-            kubectl label --local -f - dev-ops-study.io/placeholder=true -o yaml |
-            kubectl -n monitoring create -f -
-        fi
-      elif [ "$am" = missing ]; then
-        printf '%s' "$hook" | kubectl -n monitoring create secret generic alertmanager-discord --from-file=webhook-url=/dev/stdin
-      else
-        log "monitoring/alertmanager-discord: 자리표시자를 SSM의 값으로 바꾼다"
-        printf '%s' "$hook" | kubectl -n monitoring create secret generic alertmanager-discord --from-file=webhook-url=/dev/stdin --dry-run=client -o yaml |
-          kubectl -n monitoring replace -f -
-      fi
-      unset hook
-    fi
-
     # 8. 루트 Application: ArgoCD가 이것을 읽어 argocd/apps의 dev·prod Application을 만들고, 그 뒤 배포는 모두 ArgoCD가 한다.
     # CRD가 Established가 되기 전에 적용하면 "no matches for kind Application"으로 실패해서 먼저 기다린다.
     step "8/8 루트 Application"
@@ -353,7 +371,7 @@ write_files:
     fi
 
     date -u +%FT%TZ >"$DONE"
-    log "완료($(( $(date +%s) - START ))초). prod http://$DUCKDNS_SUBDOMAIN.duckdns.org, dev http://dev.$DUCKDNS_SUBDOMAIN.duckdns.org. ArgoCD UI는 port-forward로 본다(6단계 주석). 앱은 ArgoCD가 이어서 배포한다(kubectl -n argocd get applications)"
+    log "완료($(( $(date +%s) - START ))초). prod http://$DUCKDNS_SUBDOMAIN.duckdns.org, dev http://dev.$DUCKDNS_SUBDOMAIN.duckdns.org. ArgoCD UI는 port-forward로 본다(7단계 주석). 앱은 ArgoCD가 이어서 배포한다(kubectl -n argocd get applications)"
 # DuckDNS 갱신: 서비스는 한 번 돌고 끝나는 oneshot이고, 타이머가 부팅 30초 뒤와 마지막 실행 5분 뒤마다 서비스를 다시 시작한다.
 - path: /etc/systemd/system/duckdns-update.service
   content: |
@@ -379,9 +397,9 @@ write_files:
 # 3시간 안에 10번이 차지 않고, 3시간이 지나면 횟수를 처음부터 다시 세므로 재시도가 멈추지 않는다. 그 3시간 안에는 손으로 한
 # systemctl start도 시작 제한에 걸려 거부되므로, systemctl reset-failed devops-bootstrap으로 횟수를 지운 뒤 시작하거나
 # /usr/local/sbin/devops-bootstrap을 직접 돌린다. 진행은 /var/log/devops-bootstrap.log, 성공하면 /var/lib/devops-bootstrap.done이 생긴다.
-# oneshot은 시작 제한 시간이 기본으로 꺼져 있어서 60분으로 묶는다. 스크립트의 대기 상한을 다 더하면 약 49분이다: apt 약 7분, DuckDNS 2분,
+# oneshot은 시작 제한 시간이 기본으로 꺼져 있어서 60분으로 묶는다. 스크립트의 대기 상한을 다 더하면 약 52분이다: apt 약 7분, DuckDNS 2분,
 # k3s 안정 확인 약 10분, helm 정리와 설치 최대 25분(uninstall 5분. 설치의 --timeout 10m은 pre-install 훅 Job 대기와 리소스 대기에 따로 걸린다),
-# Discord 웹훅 URL 읽기 2분, CRD·루트 앱 약 3분. 내려받기·설치 시간을 더해도 60분 안에 들고, 60분에 끊기는 것은 상한이 없는 단계(내려받기, k3s 설치 스크립트)가 멈췄을 때다.
+# OIDC 공개 약 5분(시도 3번), CRD·루트 앱 약 3분. 내려받기·설치 시간을 더해도 60분 안에 들고, 60분에 끊기는 것은 상한이 없는 단계(내려받기, k3s 설치 스크립트)가 멈췄을 때다.
 # WantedBy=multi-user.target인 oneshot이라 재부팅마다 부팅 완료(multi-user.target)가 이 실행을 기다린다(k3s 안정 확인 30초를 포함해 보통 1분 안팎).
 # 의도한 것이고, k3s와 SSM 에이전트는 이 서비스를 기다리지 않고 함께 뜬다.
 - path: /etc/systemd/system/devops-bootstrap.service

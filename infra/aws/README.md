@@ -22,7 +22,9 @@ flowchart LR
     admin["관리자 PC<br/>(admin_cidr, /32)"] -->|"kubectl 6443"| igw
     ops["운영자<br/>(aws ssm send-command, start-session)"] -->|"Run Command, Session Manager<br/>(SSH 없음)"| ssm["SSM 서비스"]
     ssm -.->|"에이전트가 먼저 연결해 둔 채널"| ec2
-    ec2 -->|"ssm:GetParameter<br/>(DuckDNS 토큰, Discord 웹훅 URL)"| param["SSM Parameter Store<br/>/dev-ops-study/duckdns-token<br/>/dev-ops-study/discord-webhook-url"]
+    ec2 -->|"ssm:GetParameter<br/>(DuckDNS 토큰)"| param["SSM Parameter Store<br/>/dev-ops-study/duckdns-token<br/>/dev-ops-study/discord-webhook-url(ESO가 읽는다)"]
+    ec2 -->|"부팅마다 s3:PutObject<br/>(OIDC 디스커버리 문서, JWKS)"| oidc["공개 S3 버킷<br/>dev-ops-study-oidc-계정ID"]
+    sts["AWS STS"] -.->|"ESO 토큰 검증 때 익명 GET"| oidc
     ec2 -->|"부팅 때와 5분마다 IP 갱신"| duck["DuckDNS"]
     ec2 -->|"ArgoCD가 git으로 읽는다"| repo["GitHub<br/>dev-ops-study-config"]
 ```
@@ -41,15 +43,15 @@ flowchart LR
 | `variables.tf` | 입력 변수와 검증 |
 | `network.tf` | VPC(10.20.0.0/16), 공개 서브넷(10.20.1.0/24, `<리전>a`), 인터넷 게이트웨이, 라우트 테이블(0.0.0.0/0 → IGW), 연결 |
 | `security.tf` | 보안 그룹: 80·443은 전체, 6443은 `admin_cidr`만, 22 없음, 아웃바운드 전체 |
-| `iam.tf` | EC2용 역할, `AmazonSSMManagedInstanceCore` 연결, 인라인 정책(DuckDNS 토큰·Discord 웹훅 URL 읽기 허용, 다른 파라미터 읽기 거부, SSM을 거친 복호화), 인스턴스 프로파일 |
+| `iam.tf` | EC2용 역할, `AmazonSSMManagedInstanceCore` 연결, 인라인 정책(DuckDNS 토큰 읽기 허용, 다른 파라미터 읽기 거부, SSM을 거친 복호화, OIDC 문서 두 객체 `s3:PutObject`), 인스턴스 프로파일 |
 | `ec2.tf` | Ubuntu 24.04 AMI 조회(Canonical의 SSM 공개 파라미터), 인스턴스 1대(IMDSv2 필수, gp3 30 GiB 암호화) |
 | `up.sh`, `down.sh`, `lib.sh` | 만들기·지우기를 명령 한 번으로 하는 스크립트(`lib.sh`는 둘이 함께 쓰는 함수). [실행 순서](#실행-순서-명령-한-번) |
-| `cloud-init.yaml.tftpl` | 인스턴스가 첫 부팅에 쓰는 파일과 `devops-bootstrap.service`. 이 서비스가 부팅마다 AWS CLI(서명 검사), DuckDNS 갱신, k3s, Helm, ArgoCD, 네임스페이스와 Secret(DB 비밀번호, 모니터링의 Grafana admin 비밀번호와 Discord 웹훅 URL), 루트 Application을 맞춘다 |
+| `cloud-init.yaml.tftpl` | 인스턴스가 첫 부팅에 쓰는 파일과 `devops-bootstrap.service`. 이 서비스가 부팅마다 AWS CLI(서명 검사), DuckDNS 갱신, k3s(ServiceAccount 발급자 지정), OIDC 디스커버리 문서·JWKS 공개, Helm, ArgoCD, 루트 Application을 맞춘다. Secret은 만들지 않는다(ESO가 만든다. [Secret](#secret)) |
 | `test/` | 템플릿 렌더링 검사(`test/render.sh`, AWS에 접속하지 않는다. [오프라인 검증](#오프라인-검증)) |
 | `outputs.tf` | 인스턴스 ID, 공인 IP, 앱 주소, SSM 셸 명령, kubeconfig와 ArgoCD 접속 명령 |
 | `.terraform.lock.hcl` | 프로바이더 버전과 해시 고정(darwin_arm64, linux_amd64). 커밋한다 |
 
-Terraform이 만드는 리소스는 15개다: VPC, IGW, 서브넷, 라우트 테이블, 테이블 연결, 보안 그룹, 보안 그룹 규칙 4개, IAM 역할, 관리형 정책 연결, 인라인 정책, 인스턴스 프로파일, EC2 인스턴스.
+Terraform이 만드는 리소스는 15개다(OIDC 버킷·공급자·ESO 역할은 `infra/bootstrap`이 만들어서 여기 세지 않는다): VPC, IGW, 서브넷, 라우트 테이블, 테이블 연결, 보안 그룹, 보안 그룹 규칙 4개, IAM 역할, 관리형 정책 연결, 인라인 정책, 인스턴스 프로파일, EC2 인스턴스.
 
 입력 변수:
 
@@ -63,7 +65,7 @@ Terraform이 만드는 리소스는 15개다: VPC, IGW, 서브넷, 라우트 테
 | `helm_version` | `v4.3.0` | ArgoCD 설치에만 쓰는 도구 |
 | `argocd_chart_version` | `10.9.4` | `bootstrap/argocd/values.yaml`이 가정하는 차트 버전 |
 | `duckdns_token_parameter` | `/dev-ops-study/duckdns-token` | 토큰을 담은 SSM 파라미터 이름(`/`로 시작) |
-| `discord_webhook_parameter` | `/dev-ops-study/discord-webhook-url` | Discord 웹훅 URL(모니터링의 알림 주소)을 담은 SSM 파라미터 이름(`/`로 시작) |
+| `oidc_bucket` | `dev-ops-study-oidc-803879842357` | 클러스터의 OIDC 디스커버리 문서와 JWKS를 올리는 공개 S3 버킷(`infra/bootstrap`이 만든다). 이 이름에서 발급자 URL `https://<버킷>.s3.<리전>.amazonaws.com`이 나온다 |
 | `config_repo_url` | `https://github.com/seongj-un/dev-ops-study-config` | 부팅 중에 루트 Application을 가져올 저장소 |
 | `config_repo_ref` | `main` | 그 저장소의 브랜치 또는 태그 |
 
@@ -73,7 +75,7 @@ Terraform이 만드는 리소스는 15개다: VPC, IGW, 서브넷, 라우트 테
 
 ## 준비물
 
-1. **부트스트랩 스택을 적용해 둔다**(`infra/bootstrap`). 그 스택이 Terraform 상태를 담을 S3 버킷 `dev-ops-study-tfstate-<계정 ID>`와 예산 알림(월 $5 조기 경보, 월 $20 예산)을 만든다. **예산은 알림 메일만 보내고 지출을 막지 않는다.** 이 스택(`infra/aws`)은 그 버킷을 쓰기만 한다.
+1. **부트스트랩 스택을 적용해 둔다**(`infra/bootstrap`). 그 스택이 Terraform 상태를 담을 S3 버킷 `dev-ops-study-tfstate-<계정 ID>`와 예산 알림(월 $5 조기 경보, 월 $20 예산)을 만든다. **예산은 알림 메일만 보내고 지출을 막지 않는다.** 이 스택(`infra/aws`)은 그 버킷을 쓰기만 한다. 같은 스택이 클러스터 발급자용 공개 S3 버킷 `dev-ops-study-oidc-<계정 ID>`, IAM OIDC 공급자, ESO 역할도 만든다([클러스터 OIDC](../bootstrap/README.md)). 이 버킷이 없으면 부트스트랩 5단계의 업로드가 실패해 경고만 남기고 ESO가 AWS에 인증하지 못한다.
 2. **DuckDNS 서브도메인과 토큰.** https://www.duckdns.org 에 로그인해 서브도메인을 하나 만들면 페이지 위쪽에 토큰이 보인다.
 3. **DuckDNS 토큰을 SSM Parameter Store에 SecureString으로 저장한다.** 인스턴스가 부팅할 때 이 값을 읽는다. 토큰은 Terraform 변수나 `user_data`에 넣지 않으므로 상태에도 남지 않는다.
    `read -rs`는 입력을 화면에 보여 주지 않는다. 첫 줄을 실행한 뒤 토큰을 붙여 넣고 Enter를 누른다.
@@ -85,7 +87,7 @@ Terraform이 만드는 리소스는 15개다: VPC, IGW, 서브넷, 라우트 테
    ```
    - `--key-id`를 주지 않으면 기본 키(AWS 관리형 `aws/ssm`)로 암호화된다. `iam.tf`의 정책은 이 키를 전제로 한다.
    - 파라미터는 리전 단위라서 `var.region`과 같은 리전에 만든다.
-4. **Discord 웹훅 URL도 SSM Parameter Store에 SecureString으로 저장한다.** 모니터링(Alertmanager)이 알림을 보낼 주소다. 부트스트랩 7단계가 부팅할 때 이 값을 읽어 `monitoring/alertmanager-discord` Secret을 만든다([모니터링 Secret](#모니터링-secret)). Discord 서버의 채널 설정(연동 → 웹후크)에서 URL을 복사한다. 이 URL을 아는 사람은 누구나 그 채널에 글을 올릴 수 있으므로 토큰처럼 다룬다.
+4. **Discord 웹훅 URL도 SSM Parameter Store에 SecureString으로 저장한다.** 모니터링(Alertmanager)이 알림을 보낼 주소다. 인스턴스는 이 값을 읽지 않는다. ESO(External Secrets Operator)가 자기 IAM 역할로 읽어 `monitoring/alertmanager-discord` Secret을 만든다([Secret](#secret)). Discord 서버의 채널 설정(연동 → 웹후크)에서 URL을 복사한다. 이 URL을 아는 사람은 누구나 그 채널에 글을 올릴 수 있으므로 토큰처럼 다룬다.
    ```bash
    read -rs DISCORD_WEBHOOK_URL
    aws ssm put-parameter --region ap-northeast-2 --name /dev-ops-study/discord-webhook-url \
@@ -93,9 +95,9 @@ Terraform이 만드는 리소스는 15개다: VPC, IGW, 서브넷, 라우트 테
    unset DISCORD_WEBHOOK_URL
    ```
    - 이미 있으면 `put-parameter`가 `ParameterAlreadyExists`로 실패한다. 이미 만들어 두었다면 그대로 쓰고, 값을 바꿀 때는 `--overwrite`를 더한다([Discord 웹훅 URL 갱신](#discord-웹훅-url-갱신)).
-   - 기본 키(`aws/ssm`)로 암호화한 SecureString이어야 한다. `iam.tf`의 정책은 그 키의 복호화만 허용해서, 다른 키로 암호화하면 부팅 때 읽지 못한다.
-   - **없어도 부팅은 끝난다.** 읽지 못하면 부트스트랩이 경고를 남기고 자리표시자 URL로 Secret을 만들어서 Alertmanager는 뜨지만 Discord 알림은 가지 않는다. 파라미터를 나중에 만들면 부트스트랩이 다시 돌 때(다음 부팅 등) 자리표시자가 값으로 바뀐다([Discord 웹훅 URL 갱신](#discord-웹훅-url-갱신)). 그래도 `apply` 전에 아래 5번으로 확인한다.
-5. **`apply` 전에 두 파라미터가 있는지 확인한다.** 파라미터가 없거나 이름·리전이 틀려도 `plan`과 `apply`는 성공한다(`iam.tf`는 이름으로 ARN 문자열을 만들 뿐 파라미터를 읽지 않는다). 그 실수는 인스턴스가 부팅한 뒤 부트스트랩 로그의 `경고: DuckDNS 갱신 실패`(토큰)나 `경고: Discord 웹훅 URL을 SSM에서 읽지 못했다`(웹훅 URL)로만 드러난다.
+   - 기본 키(`aws/ssm`)로 암호화한 SecureString이어야 한다. ESO 역할은 `kms:Decrypt`를 따로 받지 않고 이 키의 기본 키 정책에 기댄다.
+   - **없어도 부팅은 끝난다.** 없으면 ESO의 ExternalSecret `alertmanager-discord`가 Ready가 되지 못하고 Secret이 만들어지지 않아서 Alertmanager 파드가 뜨지 못한다(Secret을 볼륨으로 마운트한다). 파라미터를 나중에 만들면 ESO가 다시 시도할 때 Secret이 생기고 파드가 이어서 뜬다. 그래도 `apply` 전에 아래 5번으로 확인한다.
+5. **`apply` 전에 두 파라미터가 있는지 확인한다.** 파라미터가 없거나 이름·리전이 틀려도 `plan`과 `apply`는 성공한다(`iam.tf`는 이름으로 ARN 문자열을 만들 뿐 파라미터를 읽지 않는다). 그 실수는 인스턴스가 부팅한 뒤 부트스트랩 로그의 `경고: DuckDNS 갱신 실패`(토큰)나 ExternalSecret `alertmanager-discord`가 Ready가 되지 못하는 것(웹훅 URL)으로만 드러난다. `up.sh`는 두 파라미터의 존재를 이름만 보고 없으면 경고한다.
    아래 명령은 값이 아니라 메타데이터(이름, 형식, 키, 수정 시각)만 보여 준다. 파라미터마다 `SecureString`과 `alias/aws/ssm`이 든 한 줄씩, 모두 두 줄이 나와야 한다.
    ```bash
    aws ssm describe-parameters --region ap-northeast-2 \
@@ -121,7 +123,7 @@ infra/aws/down.sh
 
 | 단계 | 하는 일 / 기다리는 것 |
 |---|---|
-| 사전 점검 | `aws sts get-caller-identity` 성공, Terraform 1.16.x, 현재 공인 IP(`checkip.amazonaws.com`, IPv4 확인), SSM 파라미터 두 개의 존재(이름만. 없으면 경고) |
+| 사전 점검 | `aws sts get-caller-identity` 성공, Terraform 1.16.x, 현재 공인 IP(`checkip.amazonaws.com`, IPv4 확인), SSM 파라미터 두 개의 존재(이름만. 없으면 경고), OIDC 버킷(`s3api head-bucket`)과 IAM OIDC 공급자의 존재(확실히 없으면 `infra/bootstrap`을 먼저 apply하라는 메시지로 멈춘다. 권한이 없어 확인하지 못하면 경고) |
 | 멈춘 인스턴스 | 이 스택의 인스턴스가 `stopped`면 먼저 시작한다([멈춘 인스턴스](#멈춘-인스턴스)) |
 | terraform | `init`, `plan -out`, 요약(개수, 주소, 동작, 이유. 값은 없다)을 보이고 확인을 받은 뒤 저장한 계획을 `apply`. 교체·삭제가 있으면 `--yes`만으로는 멈춘다(`--allow-replace`를 더해야 한다) |
 | 인스턴스 `running` | EC2 상태가 `running`이 될 때까지(10분) |
@@ -191,6 +193,7 @@ terraform apply aws.tfplan
 | 약 0:30~0:45 | cloud-init이 runcmd에서 `devops-bootstrap.service`를 시작한다 | `시작 (이전 완료: 없음)`, `STEP: 1/8 unzip` |
 | 약 1:30~2:30 | DuckDNS 이름이 새 IP를 가리킨다 | `STEP: 3/8 DuckDNS` 다음의 `DuckDNS: <서브도메인>.duckdns.org -> <IP>` |
 | 약 2:30~4:00 | k3s 설치, 안정 확인(5초 간격 6번 연속 통과, 약 30초) | `확인: k3s 안정(6번 연속 통과, NRestarts …)` |
+| 약 4:00~4:30 | OIDC 디스커버리 문서와 JWKS를 S3에 올린다(ESO가 STS에 인증하기 전에 맞아 있어야 한다) | `확인: 디스커버리 issuer 일치, JWKS 키 1개 kid=…`, `OIDC 공개: 디스커버리 …바이트, JWKS …바이트를 s3://… 버킷에 올렸다` |
 | 약 6~9분 | ArgoCD 설치와 루트 Application 적용이 끝나 부트스트랩 완료 | `완료(…초)`. `/var/lib/devops-bootstrap.done`이 생긴다 |
 | 약 9~13분 | ArgoCD가 dev·prod 앱을 동기화해 `Synced`가 된다(앱, PostgreSQL, Redis 이미지 내려받기 포함) | 로그에는 없다. `kubectl -n argocd get applications`로 본다 |
 
@@ -215,7 +218,7 @@ aws ssm get-command-invocation --region ap-northeast-2 --instance-id "$INSTANCE_
 
 - 인스턴스가 SSM에 등록되기 전(부팅 뒤 1~2분)에는 `send-command`가 `InvalidInstanceId`로 실패한다. 잠시 뒤 다시 한다.
 - 다른 명령도 같은 방법으로 보낸다. `--parameters`의 `commands` 목록만 바꾸고 나머지 두 줄은 그대로 쓴다. 명령은 root로 돈다.
-- 로그에는 단계마다 `STEP: <번호>/8 <이름>` 줄이 있어서 마지막 `STEP:`이 지금 단계다. `STEP: 4/8 k3s`와 `STEP: 6/8 ArgoCD`에서 오래 머무는 것은 정상이다(k3s 안정 확인이 최대 10분, ArgoCD 단계가 최대 약 25분이다: 끊긴 릴리스를 지우는 `uninstall` 5분, 설치의 `--timeout 10m`은 pre-install 훅 Job 대기와 리소스 대기에 따로 걸려 10분씩이다). k3s 안정 확인은 기다리는 이유가 바뀔 때마다 `대기: <이유>` 줄을 남긴다. 단계가 실패하면 `실패: STEP <단계>, <줄>번 줄, 종료 코드 <코드>: <명령>` 줄이 남는다(줄 번호는 인스턴스의 `/usr/local/sbin/devops-bootstrap` 기준).
+- 로그에는 단계마다 `STEP: <번호>/8 <이름>` 줄이 있어서 마지막 `STEP:`이 지금 단계다. `STEP: 4/8 k3s`와 `STEP: 7/8 ArgoCD`에서 오래 머무는 것은 정상이다(k3s 안정 확인이 최대 10분, ArgoCD 단계가 최대 약 25분이다: 끊긴 릴리스를 지우는 `uninstall` 5분, 설치의 `--timeout 10m`은 pre-install 훅 Job 대기와 리소스 대기에 따로 걸려 10분씩이다). k3s 안정 확인은 기다리는 이유가 바뀔 때마다 `대기: <이유>` 줄을 남긴다. 단계가 실패하면 `실패: STEP <단계>, <줄>번 줄, 종료 코드 <코드>: <명령>` 줄이 남는다(줄 번호는 인스턴스의 `/usr/local/sbin/devops-bootstrap` 기준).
 - `state:`와 `done:` 읽는 법:
 
 | 출력 | 뜻 |
@@ -243,7 +246,7 @@ aws ssm send-command --region ap-northeast-2 --instance-ids "$INSTANCE_ID" \
 
 ### 재부팅할 때
 
-인스턴스를 재부팅하거나 멈췄다 시작하면 부트스트랩이 다시 돈다. 이미 된 단계는 건너뛰고 DuckDNS 갱신과 k3s 안정 확인(5초 간격 6번 연속, 최소 약 30초)만 하므로 보통 1분 안팎 걸린다. `alertmanager-discord`가 자리표시자로 남아 있으면 그 Discord 웹훅 URL도 SSM에서 다시 읽는다([모니터링 Secret](#모니터링-secret)).
+인스턴스를 재부팅하거나 멈췄다 시작하면 부트스트랩이 다시 돈다. 이미 된 단계는 건너뛰고 DuckDNS 갱신과 k3s 안정 확인(5초 간격 6번 연속, 최소 약 30초)만 하므로 보통 1분 안팎 걸린다. k3s 서명 키는 멈췄다 시작해도 그대로지만 OIDC 문서는 부팅마다 다시 올린다(5단계. 클러스터를 새로 만들면 키가 바뀐다. [Secret](#secret)).
 이 서비스는 `WantedBy=multi-user.target`인 oneshot이라 **재부팅할 때마다 부팅 완료(`multi-user.target`)가 부트스트랩이 끝나기를 기다린다.** 보통 1분 안팎이고, 단계가 멈추면 최악에는 `TimeoutStartSec`(60분)까지 기다린다.
 의도한 동작이다. k3s와 SSM 에이전트는 이 서비스를 기다리지 않고 함께 뜨므로, 그동안에도 앱이 올라오고 SSM 명령이 된다.
 
@@ -274,43 +277,38 @@ terraform output -raw ssm_shell_command
   ```
   `terraform output public_ip`는 `apply` 때의 IP라서 멈췄다 시작한 뒤에는 틀릴 수 있어 EC2 API에서 지금 IP를 읽는다. DuckDNS가 따라잡으면 `--server=https://내서브도메인.duckdns.org:6443`으로 되돌린다(`tls-server-name`은 남겨 둬도 된다).
 
-## 모니터링 Secret
+## Secret
 
-부트스트랩 7단계가 `monitoring` 네임스페이스에 Secret 둘을 만든다. ArgoCD가 모니터링 앱을 올리기 전에 넣어 두려고 루트 Application보다 먼저 만든다. 값이 있는 Secret은 건너뛰므로 재시도·재부팅으로 값이 바뀌지 않는다. 자리표시자인 `alertmanager-discord`만 예외다(아래).
+부트스트랩은 Secret을 만들지 않는다. 비밀번호와 웹훅 URL은 클러스터 안의 ESO(External Secrets Operator)가 만든다. 어디서 오는지는 이렇다.
 
-| Secret | 키 | 값 |
+| Secret | 만드는 것 | 값의 출처 |
 |---|---|---|
-| `grafana-admin` | `admin-user`, `admin-password` | `admin`과, 인스턴스 안에서 `openssl rand -hex 16`으로 만든 32자(hex). 코드·SSM·Terraform 상태에 없다 |
-| `alertmanager-discord` | `webhook-url` | SSM `discord_webhook_parameter`의 값. 읽지 못하면 자리표시자 `https://discord.invalid/webhook-not-configured`를 넣고(라벨 `dev-ops-study.io/placeholder=true`를 붙인다) 로그에 `경고: Discord 웹훅 URL을 SSM에서 읽지 못했다`를 남긴다 |
+| `shortener-dev/shortener-db`, `shortener-prod/shortener-db` | ESO(`Password` 생성기, 한 번만 만든다) | 무작위. 코드·SSM·Terraform 상태에 없다 |
+| `monitoring/grafana-admin` | ESO(`Password` 생성기, 한 번만 만든다) | `admin-user`는 `admin`, `admin-password`는 무작위. 코드·SSM·Terraform 상태에 없다 |
+| `monitoring/alertmanager-discord` | ESO(SSM에서 가져온다) | SSM `/dev-ops-study/discord-webhook-url`. ESO 역할 `dev-ops-study-eso-monitoring`만 읽는다 |
 
-자리표시자를 두는 이유: Alertmanager는 이 Secret을 볼륨으로 마운트하므로 Secret이 없으면 파드가 뜨지 못한다. 자리표시자가 있으면 Alertmanager는 뜨고 Discord 알림만 가지 않는다(`.invalid`는 예약된 최상위 도메인이라 어디에도 풀리지 않는다).
-값은 명령줄 인자·로그·임시 파일에 쓰지 않고 파이프로 `kubectl`의 표준 입력에만 넣는다.
+ESO가 AWS(SSM)에 들어가는 길에는 AWS 액세스 키가 없다. `monitoring/eso-ssm` ServiceAccount의 토큰을 STS에 내밀어 역할을 맡는다(AssumeRoleWithWebIdentity). STS는 토큰의 발급자(`iss`)를 보고 그 발급자의 디스커버리 문서와 JWKS를 **익명으로** 받아 서명을 확인한다. 클러스터는 인터넷에서 닿지 않아도 되도록 이 두 문서를 공개 S3 버킷에 둔다. 부트스트랩이 맡는 일은 그 앞부분 둘이다.
 
-**자리표시자는 부트스트랩이 다시 돌 때 저절로 값으로 바뀐다.** 부트스트랩은 부팅마다, 그리고 `systemctl start devops-bootstrap`으로 다시 돌릴 때마다 7단계에서 `alertmanager-discord`를 이렇게 다룬다.
+- **4단계(k3s)**: kube-apiserver의 `service-account-issuer`를 `https://dev-ops-study-oidc-<계정 ID>.s3.ap-northeast-2.amazonaws.com`로, `service-account-jwks-uri`를 그 뒤에 `/openid/v1/jwks`를 붙인 주소로 정한다. 발급자 인자 이름 끝의 `-`는 k3s v1.35.8+k3s1 소스(`pkg/util/args.go`의 `GetArgs`, `pkg/daemons/control/server.go`)로 확인한 인자 합치기 규칙에 따라 k3s 기본 발급자 앞에 덧붙이고, 값마다 `--service-account-issuer`를 따로 넘긴다. 다시 만든 실제 클러스터에서 한 번 더 확인한다(어긋나면 접미사 없는 `service-account-issuer=`로 바꾼다). 덧붙여지면 새 토큰은 이 발급자로 서명되고 기본 발급자로 나간 토큰도 계속 통한다.
+- **5단계(OIDC 공개)**: `kubectl get --raw`로 디스커버리 문서(`/.well-known/openid-configuration`)와 JWKS(`/openid/v1/jwks`)를 받아 `issuer`·`jwks_uri`가 기대한 값과 같고 키가 하나 이상인지 `python3`로 확인한 뒤, 버킷의 `.well-known/openid-configuration`, `openid/v1/jwks` 두 키에 `application/json`으로 올린다. 통과하면 디스커버리 문서에 `"claims_supported": ["sub", "iss"]`를 더해(IAM이 필수 항목으로 꼽고 `aws/amazon-eks-pod-identity-webhook`의 `SELF_HOSTED_SETUP.md`도 넣는다. `issuer`·`jwks_uri`는 그대로) 올리고, 올린 뒤 인증 없이 `https`로 다시 받아 올린 파일(더한 뒤의 것)과 같은지도 본다. 인스턴스 역할의 `s3:PutObject`는 이 두 객체에만 있다.
 
-| `alertmanager-discord`의 상태 | 7단계가 하는 일 |
-|---|---|
-| 없다 | SSM을 읽어 만든다. 못 읽으면 라벨이 붙은 자리표시자를 만든다 |
-| 라벨 `dev-ops-study.io/placeholder=true`가 있다(자리표시자) | SSM을 다시 읽는다. 읽히면 Secret을 그 값으로 바꾸고(라벨도 없어진다) 못 읽으면 그대로 두고 경고를 다시 남긴다 |
-| 라벨이 없다(값이 있다) | SSM을 읽지 않고 건너뛴다 |
+두 문서에는 발급자 주소와 공개 키만 있어서 로그에 크기와 `kid`를 남긴다(비밀이 아니다).
 
-그래서 파라미터를 늦게 만들었거나 이름·권한을 고쳤다면 Secret을 지우지 않아도 다음 부팅이나 부트스트랩 재실행 때 반영된다([Discord 웹훅 URL 갱신](#discord-웹훅-url-갱신)).
+**부팅마다 다시 올린다.** 멈췄다 시작하면 서명 키가 그대로라 같은 문서가 올라가지만, 클러스터를 새로 만들면(`destroy` 뒤 `apply`) k3s가 새 서명 키를 만들어서 옛 JWKS로는 새 토큰의 서명을 확인하지 못한다. 그래서 "이미 올렸다"로 건너뛰지 않는다. ArgoCD보다 먼저 올려, ESO가 STS를 처음 부르기 전에 맞아 있게 한다.
+**올리지 못해도 부팅은 끝난다.** 시도마다 `timeout`을 두고 3번까지 다시 한 뒤, 그래도 안 되면 `경고: OIDC 디스커버리 문서와 JWKS를 올리지 못했다`를 남기고 계속한다. 이때 영향은 STS가 필요한 `alertmanager-discord`뿐이다(`Password` 생성기는 STS 없이 클러스터 안에서 돈다). ESO는 실패한 동기화를 다시 시도하고, 다음 부트스트랩 실행(재부팅, `systemctl start devops-bootstrap`)에서 5단계가 다시 올린다.
 
-kubeconfig를 받은 뒤([접속하기](#접속하기)) 아래로 읽는다. 둘째 줄은 Grafana admin 비밀번호를 출력한다. 셋째 줄은 `alertmanager-discord`가 있는지 보여 주고 라벨을 함께 출력한다: Secret이 없으면 `NotFound` 오류가 나고, `LABELS`에 `dev-ops-study.io/placeholder=true`가 있으면 자리표시자다. 넷째 줄은 웹훅 URL을 출력하지 않고 자리표시자인지만 센다: `1`이면 자리표시자(Discord 알림이 가지 않는다), `0`이면 다른 값이다. **셋째 줄이 Secret을 보여 줄 때만 넷째 줄의 `0`을 믿는다.** Secret이 없어도 넷째 줄은 `kubectl`의 오류 뒤에 `0`을 출력한다.
+kubeconfig를 받은 뒤([접속하기](#접속하기)) 아래로 읽는다. 첫째 줄은 ExternalSecret의 상태(`READY`가 `True`여야 한다)를 보여 준다. 둘째 줄은 Grafana admin 비밀번호를 출력한다. 셋째 줄은 웹훅 URL을 출력하지 않고 길이만 센다(0이면 비어 있다).
 
 ```bash
 export KUBECONFIG=$HOME/.kube/dev-ops-study-aws.yaml
+kubectl get externalsecret -A
 kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d; echo
-kubectl -n monitoring get secret alertmanager-discord --show-labels
-kubectl -n monitoring get secret alertmanager-discord -o jsonpath='{.data.webhook-url}' | base64 -d | grep -c discord.invalid
+kubectl -n monitoring get secret alertmanager-discord -o jsonpath='{.data.webhook-url}' | base64 -d | wc -c
 ```
 
 ### Discord 웹훅 URL 갱신
 
-자리표시자가 들어갔을 때(파라미터를 늦게 만들었다, 이름·키·권한이 틀렸다)나 웹훅을 바꿀 때 쓴다. 어느 쪽인지는 위 셋째 줄의 `LABELS`로 안다.
-
-- **자리표시자**(라벨 있음): Secret을 지울 필요가 없다. SSM만 고치고 부트스트랩을 다시 돌리면(다음 재부팅도 된다) 7단계가 SSM을 다시 읽어 Secret을 바꾼다.
-- **값이 있는 Secret**(라벨 없음): 7단계가 SSM을 읽지 않고 건너뛰므로 SSM 값만 바꿔서는 반영되지 않는다. Secret을 지우고 부트스트랩을 다시 돌리면 7단계가 SSM의 현재 값으로 Secret을 다시 만든다.
+SSM 값만 새로 쓰면 된다. 인스턴스를 건드리지 않는다.
 
 1. SSM 값을 새로 쓴다. 파라미터가 이미 있으면 `--overwrite`가 필요하다.
    ```bash
@@ -319,38 +317,11 @@ kubectl -n monitoring get secret alertmanager-discord -o jsonpath='{.data.webhoo
      --type SecureString --overwrite --value "$DISCORD_WEBHOOK_URL"
    unset DISCORD_WEBHOOK_URL
    ```
-2. 인스턴스에서 부트스트랩을 다시 시작한다. 보내기 직전의 시각을 적어 둔다(3번에서 쓴다). `INSTANCE_ID`는 [진행 확인](#진행-확인)의 첫 줄로 정한다. `reset-failed`가 먼저인 이유는 [실패한 부트스트랩 다시 돌리기](#실패한-부트스트랩-다시-돌리기)와 같다. 이미 된 단계는 건너뛰므로 1분 안팎에 끝난다.
-   자리표시자일 때는 Secret을 지우지 않는다.
+2. ESO가 다음 동기화 때(ExternalSecret의 `refreshInterval`마다) 새 값을 가져온다. 바로 가져오게 하려면 ExternalSecret에 주석을 달아 동기화를 깨운다.
    ```bash
-   date -u +%FT%TZ
-   aws ssm send-command --region ap-northeast-2 --instance-ids "$INSTANCE_ID" \
-     --document-name AWS-RunShellScript \
-     --parameters '{"commands":["systemctl reset-failed devops-bootstrap","systemctl start --no-block devops-bootstrap"]}' \
-     --query Command.CommandId --output text
+   kubectl -n monitoring annotate externalsecret alertmanager-discord force-sync=$(date +%s) --overwrite
    ```
-   값이 있는 Secret을 바꿀 때는 먼저 Secret을 지운다.
-   ```bash
-   date -u +%FT%TZ
-   aws ssm send-command --region ap-northeast-2 --instance-ids "$INSTANCE_ID" \
-     --document-name AWS-RunShellScript \
-     --parameters '{"commands":["KUBECONFIG=/etc/rancher/k3s/k3s.yaml /usr/local/bin/kubectl -n monitoring delete secret alertmanager-discord","systemctl reset-failed devops-bootstrap","systemctl start --no-block devops-bootstrap"]}' \
-     --query Command.CommandId --output text
-   ```
-3. 결과를 읽는다. 아래 명령은 로그에서 **마지막 `STEP: 7/8` 줄부터 끝까지**와 서비스 상태, 완료 표시를 출력한다.
-   ```bash
-   CMD_ID=$(aws ssm send-command --region ap-northeast-2 --instance-ids "$INSTANCE_ID" \
-     --document-name AWS-RunShellScript \
-     --parameters '{"commands":["tac /var/log/devops-bootstrap.log | sed \"/STEP: 7[/]8/q\" | tac","echo state: $(systemctl is-active devops-bootstrap)","echo done: $(cat /var/lib/devops-bootstrap.done 2>/dev/null)"]}' \
-     --query Command.CommandId --output text)
-   aws ssm wait command-executed --region ap-northeast-2 --instance-id "$INSTANCE_ID" --command-id "$CMD_ID"
-   aws ssm get-command-invocation --region ap-northeast-2 --instance-id "$INSTANCE_ID" --command-id "$CMD_ID" \
-     --query StandardOutputContent --output text
-   ```
-   로그는 부팅·재시작마다 이어 붙는다. `tail -n 40`처럼 끝부분만 보면 옛 실행의 `secret/... created`나 `경고` 줄이 이번 실행의 결과로 보일 수 있어서, 위 명령은 마지막 `STEP: 7/8` 줄부터만 보여 준다. 아래를 모두 만족할 때만 이번 실행의 결과로 믿는다.
-   - 출력 첫 줄이 `STEP: 7/8` 줄이고(아니면 로그에 그 줄이 없는 것이다) 그 시각과 `done:`의 시각이 둘 다 2번에서 적어 둔 시각보다 뒤다. `done:`이 비어 있거나 더 이르면 이번 실행이 아직 끝나지 않았거나(`state: activating`) 실패했거나(`실패:` 줄) 시작하지 않은 것이다. 이때 위 로그 줄은 옛 실행의 것일 수 있으니 믿지 말고 잠시 뒤 다시 본다.
-   - 자리표시자를 바꿨다면 `secret/alertmanager-discord replaced`가, Secret을 지우고 다시 만들었다면 `secret/alertmanager-discord created`가 있고 `경고: Discord 웹훅 URL`은 없다. 경고가 있으면 SSM을 아직 읽지 못한 것이다(경고 바로 위의 `aws` 오류 줄이 이유다). 원인을 고치고 2번부터 다시 한다.
-   - Secret이 있다. 위 읽기 명령의 셋째 줄(`kubectl -n monitoring get secret alertmanager-discord --show-labels`)이 Secret을 보여 주고 `LABELS`가 `<none>`이다(`dev-ops-study.io/placeholder`가 있으면 아직 자리표시자다). 이것을 먼저 본다: Secret이 없어도 넷째 줄(`grep -c`)은 `0`을 출력해서 성공처럼 보인다. Secret이 있을 때 `grep -c`가 `0`이면 자리표시자가 아닌 값이다.
-4. Alertmanager 파드가 이미 떠 있으면 다시 띄운다. 새 파드가 Secret의 지금 값을 마운트한다(StatefulSet이 파드를 새로 띄운다). Alertmanager 문서에는 `webhook_url_file`을 언제 다시 읽는지 나와 있지 않아서, 파드를 다시 띄우는 것을 기준 절차로 둔다. 파드가 아직 없으면 할 일이 없다(새로 뜨는 파드가 지금 값을 쓴다).
+3. Alertmanager 파드를 다시 띄운다. 새 파드가 Secret의 지금 값을 마운트한다(StatefulSet이 파드를 새로 띄운다). Alertmanager 문서에는 `webhook_url_file`을 언제 다시 읽는지 나와 있지 않아서, 파드를 다시 띄우는 것을 기준 절차로 둔다.
    ```bash
    kubectl -n monitoring delete pod -l app.kubernetes.io/name=alertmanager
    ```
@@ -406,11 +377,13 @@ terraform destroy \
   인증서가 처음 나오기 전(새로 만든 직후 몇 분)에는 Traefik의 자체 서명 기본 인증서로 응답한다. HTTPS는 내용을 숨길 뿐 누가 들어오는지는 막지 않으므로, 앱에는 여전히 실제 개인 정보나 중요한 비밀번호를 넣지 않는다.
 - **CI는 읽기 전용 역할로만 AWS에 들어온다.** PR의 `terraform plan`은 GitHub OIDC로 역할 `dev-ops-study-github-plan`을 잠깐 맡는다. 저장소에 AWS 키는 없고, 그 역할은 쓰기와 이 프로젝트의 비밀 읽기가 막혀 있다([GitHub Actions에서 plan (OIDC)](#github-actions에서-plan-oidc)).
 - **IMDSv2 필수, 홉 제한 1.** 파드 안에서는 인스턴스 메타데이터에 닿지 못해서, 파드가 침해되어도 인스턴스 역할을 가져갈 수 없다(호스트 네트워크를 쓰는 `hostNetwork: true` 파드는 예외이므로 띄우지 않는다).
-- **인스턴스 역할은 파라미터 둘(DuckDNS 토큰, Discord 웹훅 URL)만 읽는다.** SSM 에이전트용 관리형 정책 `AmazonSSMManagedInstanceCore`는 `ssm:GetParameter`·`ssm:GetParameters`를 모든 파라미터(`Resource "*"`)에 허용하고, `aws/ssm` 키의 키 정책은 같은 계정의 모든 주체에게 SSM을 거친 복호화를 허용한다. 그대로 두면 이 역할이 계정의 다른 파라미터와 SecureString까지 읽는다.
-  그래서 인라인 정책에 명시적 Deny(`DenyOtherParameters`)를 넣어, 그 둘이 아닌 모든 파라미터에 대해 값을 돌려주는 API 넷(`GetParameter`, `GetParameters`, `GetParametersByPath`, `GetParameterHistory`)을 막는다. 명시적 Deny는 어느 Allow보다 우선한다. Session Manager 셸과 Run Command는 파라미터를 읽지 않으므로 영향이 없다.
-  그 밖의 허용은 그 두 파라미터에 대한 `ssm:GetParameter`와, SSM을 거칠 때만 `aws/ssm` 키로 하는 `kms:Decrypt`뿐이다. 허용과 거부가 같은 ARN 목록(`iam.tf`의 `readable_parameter_arns`)을 써서 둘이 어긋나지 않는다.
-- **비밀은 코드·상태에 없다.** DuckDNS 토큰과 Discord 웹훅 URL은 SSM에만 있고, DB 비밀번호와 Grafana admin 비밀번호는 인스턴스 안에서 생성된다. 이 값들은 명령줄 인자·로그·임시 파일에 쓰지 않지만 Secret으로 k3s 데이터 저장소(암호화된 EBS 볼륨)에 저장된다. k3s는 Secret을 따로 암호화하지 않아서(base64일 뿐이다) 그 보호는 EBS 암호화다.
-  웹훅 URL을 아는 사람은 누구나 그 Discord 채널에 글을 올릴 수 있으므로 DuckDNS 토큰처럼 다룬다([모니터링 Secret](#모니터링-secret)).
+- **인스턴스 역할은 SSM 파라미터 하나(DuckDNS 토큰)만 읽는다.** SSM 에이전트용 관리형 정책 `AmazonSSMManagedInstanceCore`는 `ssm:GetParameter`·`ssm:GetParameters`를 모든 파라미터(`Resource "*"`)에 허용하고, `aws/ssm` 키의 키 정책은 같은 계정의 모든 주체에게 SSM을 거친 복호화를 허용한다. 그대로 두면 이 역할이 계정의 다른 파라미터와 SecureString까지 읽는다.
+  그래서 인라인 정책에 명시적 Deny(`DenyOtherParameters`)를 넣어, 그것이 아닌 모든 파라미터(Discord 웹훅 URL 포함, 그건 ESO 역할의 몫이다)에 대해 값을 돌려주는 API 넷(`GetParameter`, `GetParameters`, `GetParametersByPath`, `GetParameterHistory`)을 막는다. 명시적 Deny는 어느 Allow보다 우선한다. Session Manager 셸과 Run Command는 파라미터를 읽지 않으므로 영향이 없다.
+  그 밖의 허용은 그 파라미터에 대한 `ssm:GetParameter`, SSM을 거칠 때만 `aws/ssm` 키로 하는 `kms:Decrypt`, 그리고 OIDC 버킷의 객체 두 개(`.well-known/openid-configuration`, `openid/v1/jwks`)에 대한 `s3:PutObject`뿐이다. 객체 둘은 버킷 정책이 익명 읽기를 여는 키와 같아서, 이 역할은 버킷의 다른 키를 쓰지 못하고 읽거나 지우지도 못한다. 파라미터 허용과 거부는 같은 ARN 목록(`iam.tf`의 `readable_parameter_arns`)을 써서 둘이 어긋나지 않는다.
+- **비밀은 코드·상태에 없다.** DuckDNS 토큰과 Discord 웹훅 URL은 SSM에만 있고, DB 비밀번호와 Grafana admin 비밀번호는 클러스터 안에서 ESO가 생성한다. 이 값들은 부트스트랩 스크립트·로그·`user_data`를 지나가지 않지만 Secret으로 k3s 데이터 저장소(암호화된 EBS 볼륨)에 저장된다. k3s는 Secret을 따로 암호화하지 않아서(base64일 뿐이다) 그 보호는 EBS 암호화다.
+  웹훅 URL을 아는 사람은 누구나 그 Discord 채널에 글을 올릴 수 있으므로 DuckDNS 토큰처럼 다룬다([Secret](#secret)).
+  이 역할의 자격 증명을 가진 쪽은 두 객체를 자기 키의 JWKS와 디스커버리 문서로 바꾸고 `sub=system:serviceaccount:monitoring:eso-ssm`인 토큰을 직접 서명해, STS에서 ESO 역할의 자격 증명을 받을 수 있다. 그러면 노드 역할 자신의 Deny를 우회해 ESO 역할이 읽는 것(지금은 Discord 웹훅 URL 파라미터)을 읽는다. 파드는 인스턴스 역할에 닿지 못하므로(IMDS 홉 제한 1) 호스트 수준의 침해(또는 hostNetwork 파드)가 있어야 하고, 이 변경 전에는 노드 역할이 그 파라미터를 직접 읽었으므로 노출 범위는 거의 같다. 다만 이 발급자를 믿는 역할에 나중에 권한을 더 주면 그것도 같은 길로 닿는다.
+  OIDC 버킷의 두 객체는 일부러 공개다(발급자 주소와 공개 키뿐이다). 버킷의 나머지는 막혀 있고 쓰기는 인스턴스 역할만 한다.
   `user_data`(cloud-init 전체)는 암호화되지 않아 인스턴스에 접속한 사람과 EC2 API로 조회할 권한이 있는 누구나 읽을 수 있고 Terraform 상태에도 들어가므로, 그 안에는 비밀을 넣지 않는다.
 - **내려받는 도구를 검사한다.** AWS CLI는 최신 zip과 그 `.sig`를 받아, `user_data`에 넣어 둔 AWS CLI 팀 PGP 공개 키([AWS CLI 설치 문서](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)의 블록, 지문 `FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C`, 만료 2027-07-01)로 `gpgv` 서명 검사를 통과해야 푼다.
   k3s 바이너리는 설치 스크립트가 같은 릴리스의 sha256 목록으로, Helm은 `get.helm.sh`의 `.sha256sum`으로 검사한다. 이 둘은 같은 곳에서 받은 체크섬이라 전송 중 손상은 잡지만 배포 서버가 통째로 바뀐 경우는 막지 못한다.
@@ -423,11 +396,12 @@ terraform destroy \
 | 증상 | 원인과 해결 |
 |---|---|
 | 부트스트랩 로그에 `경고: DuckDNS 갱신 실패`가 있고 이름이 새 IP를 가리키지 않는다 | 토큰 파라미터가 없거나 이름·리전이 틀렸거나(`ParameterNotFound`), 토큰이나 서브도메인이 틀렸다(DuckDNS가 `KO`). `plan`·`apply`는 이것을 잡지 못한다. [준비물](#준비물) 5번의 `describe-parameters`로 파라미터를 확인한다. 오류 내용은 첫 실행분이 부트스트랩 로그에, 그 뒤 타이머 실행분이 `journalctl -u duckdns-update -n 20 --no-pager`에 있다. 고치면 타이머가 5분 안에 다시 갱신한다. |
-| 부트스트랩 로그에 `경고: Discord 웹훅 URL을 SSM에서 읽지 못했다`가 있다 | 웹훅 URL 파라미터가 없거나 이름·리전이 틀렸거나(`ParameterNotFound`), 기본 키(`aws/ssm`)가 아닌 키로 암호화했거나 권한이 틀렸다(`AccessDeniedException`). 이유는 경고 바로 위의 `aws` 오류 줄에 있고, 그 줄이 없으면 120초 시간 초과나 빈 값이다. 부팅은 계속되어 Alertmanager는 자리표시자 URL로 뜨고 Discord 알림만 가지 않는다. 부트스트랩이 다시 돌 때마다 SSM을 다시 읽고 못 읽으면 이 경고를 다시 남긴다. [준비물](#준비물) 5번의 `describe-parameters`로 확인해 고친 뒤 [Discord 웹훅 URL 갱신](#discord-웹훅-url-갱신)대로 부트스트랩을 다시 돌린다(자리표시자는 Secret을 지울 필요가 없다). |
+| 부트스트랩 로그에 `경고: OIDC 디스커버리 문서와 JWKS를 올리지 못했다`가 있다 | 그 위의 줄이 이유다. `디스커버리 문서의 issuer가 다르다`는 k3s의 `service-account-issuer`와 `OIDC_ISSUER`가 어긋난 것이다(`/etc/devops/bootstrap.env`와 k3s 서비스의 인자를 비교한다). `AccessDenied`는 `s3:PutObject` 권한이나 버킷 이름이 틀린 것이고(`oidc_bucket`이 `infra/bootstrap`의 버킷과 같은지 본다), `NoSuchBucket`은 `infra/bootstrap`의 버킷이 아직 없는 것이다. `올린 뒤 공개 주소에서 받은 내용이 … 다르거나 받지 못했다`는 버킷 정책이 익명 읽기를 허용하지 않는 것이다(계정 수준 퍼블릭 액세스 차단이 켜져 있으면 버킷 쪽을 꺼도 소용없다. [infra/bootstrap/README.md](../bootstrap/README.md)). 고치면 다음 부트스트랩 실행에서 다시 올린다(`systemctl reset-failed devops-bootstrap`, `systemctl start devops-bootstrap`). |
+| `kubectl get externalsecret -A`의 `alertmanager-discord`가 `READY=False`다 | `kubectl -n monitoring describe externalsecret alertmanager-discord`의 이벤트를 본다. `AssumeRoleWithWebIdentity`나 `InvalidIdentityToken`/`Couldn't retrieve verification key` 오류면 STS가 JWKS를 받지 못하거나 서명이 맞지 않는 것이다: 위 OIDC 경고 행을 먼저 본다. 클러스터를 새로 만들었다면 새 JWKS가 올라갔는지 `curl -s https://dev-ops-study-oidc-<계정 ID>.s3.ap-northeast-2.amazonaws.com/openid/v1/jwks`의 `kid`와 인스턴스의 `kubectl get --raw /openid/v1/jwks`가 같은지 본다(공개 정보다). `ParameterNotFound`는 SSM 파라미터가 없는 것, `AccessDenied`는 ESO 역할의 권한 문제다. |
 | 로그 끝이 `실패: STEP 2/8 AWS CLI, … gpgv …`이고 그 위에 `BAD signature` 또는 `Can't check signature: No public key`가 있다 | AWS CLI zip의 서명 검사가 실패했다. 내려받기가 깨진 것이면 systemd의 재시작에서 풀린다. `No public key`가 계속되면 AWS가 서명 키를 바꾼 것이다: [AWS CLI 설치 문서](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)의 공개 키 블록으로 `cloud-init.yaml.tftpl`의 `/etc/devops/aws-cli.asc`와 `test/container-checks.sh`의 지문을 고친다. `user_data`가 바뀌므로 인스턴스가 교체된다. |
 | 로그 끝이 `실패: k3s가 600초 안에 안정되지 않았다(마지막 이유: …)`다 | k3s가 뜨지 않거나 재시작을 되풀이한다. [k3s가 재시작을 되풀이할 때](#k3s가-재시작을-되풀이할-때)를 본다. |
-| 로그에 `ArgoCD 릴리스가 pending-install: uninstall하고 다시 설치`(또는 `… rollback`)가 있다 | 정상이다. 앞선 시도의 helm이 작업 도중 끊겨(k3s API가 끊김, 재부팅, 시간 초과) 릴리스가 `pending-*`나 `failed`로 남은 것을 6단계가 정리했다. Helm은 마지막 리비전이 `pending-*`이면 upgrade를 `another operation (install/upgrade/rollback) is in progress`로 거부하고, 그 helm이 이미 없어도 상태가 남아 저절로 풀리지 않는다. 그래서 `deployed` 리비전이 있으면 그 가운데 마지막 것으로 `rollback`하고, 없으면(예: 첫 설치가 끊기거나 실패했다) `uninstall`한 뒤 다시 설치한다. `superseded`는 한때 성공했다는 뜻이 아니라서 고르지 않는다: `rollback`의 적용이 실패하면 Helm이 `rollback`을 시작할 때의 마지막 리비전(`pending-*`나 `failed`라 성공한 적 없다)을 `superseded`로 바꾼다. 성공한 install·upgrade·rollback은 `deployed`를 하나만 남기고, 실패한 upgrade·rollback은 이전 `deployed`를 그대로 둔다. 지워도 ArgoCD의 CRD는 남고(차트가 지우지 않게 표시해 둔다), 다시 설치할 때 그대로 이어받는다. 릴리스 기록은 `export HOME=/root KUBECONFIG=/etc/rancher/k3s/k3s.yaml` 뒤 `helm -n argocd history argocd`로 본다. |
-| 로그 끝이 `실패: STEP 6/8 ArgoCD, …`이고 그 위에 `another operation (install/upgrade/rollback) is in progress`가 있다 | 6단계가 릴리스 상태를 본 뒤에 다른 helm 작업이 시작됐다. 부트스트랩은 잠금으로 한 번에 하나만 돌므로 손으로 돌린 helm이 겹친 것이다. 그 작업이 끝나면 systemd의 재시도(90초 뒤)가 이어서 한다. |
+| 로그에 `ArgoCD 릴리스가 pending-install: uninstall하고 다시 설치`(또는 `… rollback`)가 있다 | 정상이다. 앞선 시도의 helm이 작업 도중 끊겨(k3s API가 끊김, 재부팅, 시간 초과) 릴리스가 `pending-*`나 `failed`로 남은 것을 7단계가 정리했다. Helm은 마지막 리비전이 `pending-*`이면 upgrade를 `another operation (install/upgrade/rollback) is in progress`로 거부하고, 그 helm이 이미 없어도 상태가 남아 저절로 풀리지 않는다. 그래서 `deployed` 리비전이 있으면 그 가운데 마지막 것으로 `rollback`하고, 없으면(예: 첫 설치가 끊기거나 실패했다) `uninstall`한 뒤 다시 설치한다. `superseded`는 한때 성공했다는 뜻이 아니라서 고르지 않는다: `rollback`의 적용이 실패하면 Helm이 `rollback`을 시작할 때의 마지막 리비전(`pending-*`나 `failed`라 성공한 적 없다)을 `superseded`로 바꾼다. 성공한 install·upgrade·rollback은 `deployed`를 하나만 남기고, 실패한 upgrade·rollback은 이전 `deployed`를 그대로 둔다. 지워도 ArgoCD의 CRD는 남고(차트가 지우지 않게 표시해 둔다), 다시 설치할 때 그대로 이어받는다. 릴리스 기록은 `export HOME=/root KUBECONFIG=/etc/rancher/k3s/k3s.yaml` 뒤 `helm -n argocd history argocd`로 본다. |
+| 로그 끝이 `실패: STEP 7/8 ArgoCD, …`이고 그 위에 `another operation (install/upgrade/rollback) is in progress`가 있다 | 7단계가 릴리스 상태를 본 뒤에 다른 helm 작업이 시작됐다. 부트스트랩은 잠금으로 한 번에 하나만 돌므로 손으로 돌린 helm이 겹친 것이다. 그 작업이 끝나면 systemd의 재시도(90초 뒤)가 이어서 한다. |
 | `kubectl get pods -A`에 `ErrImagePull`이나 `ImagePullBackOff`가 있고 `kubectl describe pod`의 이벤트에 `toomanyrequests`가 보인다 | Docker Hub가 로그인하지 않은 내려받기를 IP마다 횟수로 제한한다. Docker Hub에서 받는 것은 k3s 기본 구성 요소(`rancher/...`: Traefik, CoreDNS 등)와 앱의 PostgreSQL·Redis다(ArgoCD 이미지는 quay.io와 ECR Public이라 무관하다). 기다리면 된다: 제한이 풀리면 kubelet이 다시 받아 저절로 뜬다. |
 | [진행 확인](#진행-확인)의 상태가 `state: failed`다 | 3시간 안에 10번 시작해 모두 실패해서 systemd가 재시작을 멈췄다. 로그의 마지막 `STEP:`·`실패:` 줄로 원인을 고친 뒤 [실패한 부트스트랩 다시 돌리기](#실패한-부트스트랩-다시-돌리기)의 명령을 쓴다(`systemctl reset-failed`가 먼저다). |
 | `send-command`가 `InvalidInstanceId`로 실패한다 | 인스턴스가 아직 SSM에 등록되지 않았다(부팅 뒤 1~2분). `aws ssm describe-instance-information --region ap-northeast-2`에 인스턴스가 `Online`으로 나올 때까지 기다린다. |

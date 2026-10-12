@@ -1,6 +1,6 @@
 # infra/bootstrap
 
-Terraform이 쓸 **원격 state 저장소(S3 버킷)** 와 **비용 알림(AWS Budgets)**, 그리고 **GitHub Actions가 AWS에 들어오는 길(OIDC 공급자와 plan 전용 역할)** 을 만드는 스택이다. 처음에 **한 번만** 실행한다.
+Terraform이 쓸 **원격 state 저장소(S3 버킷)** 와 **비용 알림(AWS Budgets)**, **GitHub Actions가 AWS에 들어오는 길(OIDC 공급자와 plan 전용 역할)**, 그리고 **클러스터의 ESO가 AWS에 들어오는 길(클러스터 발급자용 공개 S3 버킷, OIDC 공급자, ESO 역할)** 을 만드는 스택이다. 처음에 **한 번만** 실행한다.
 
 - 다른 스택(`infra/aws`)은 이 스택이 만든 버킷에 자기 state를 저장한다.
 - PR의 `terraform plan`(`.github/workflows/terraform-plan.yml`)은 이 스택이 만든 읽기 전용 역할을 OIDC로 맡는다. 저장소에 AWS 키를 두지 않는다([GitHub Actions용 OIDC](#github-actions용-oidc)).
@@ -15,7 +15,7 @@ Terraform은 자기가 만든 리소스의 목록과 속성을 state 파일에 �
 - 버전 관리 덕에 state를 잘못 덮어써도 이전 버전으로 되돌릴 수 있다.
 - 잠금으로 동시 실행을 막는다. DynamoDB 테이블은 쓰지 않는다. S3의 조건부 쓰기로 잠금 파일(`.tflock`)을 만드는 방식이다(backend의 `use_lockfile = true`, Terraform 1.10 이상).
 
-## 만드는 것 (리소스 13개)
+## 만드는 것 (리소스 21개)
 
 | 리소스 | 설정 | 이유 |
 |---|---|---|
@@ -32,8 +32,14 @@ Terraform은 자기가 만든 리소스의 목록과 속성을 state 파일에 �
 | IAM 역할 `dev-ops-study-github-plan` | 신뢰: 이 저장소의 PR과 `main`만, 최대 1시간 | CI의 `terraform plan`이 맡는 역할 |
 | 역할에 `ReadOnlyAccess` 연결 | AWS 관리형 정책 | `plan`에 필요한 읽기 |
 | 인라인 정책 `deny-secrets-and-writes` | 명시적 Deny 넷 | 이 프로젝트의 SSM 파라미터·Run Command 출력 읽기와 S3 쓰기를 막는다 |
+| S3 버킷 `dev-ops-study-oidc-<계정 ID>` | 버전 관리 없음, SSE-S3, `BucketOwnerEnforced`, `force_destroy = false` | 클러스터 발급자의 디스커버리 문서와 JWKS를 올린다(아래 "클러스터 OIDC (ESO용)") |
+| 위 버킷의 퍼블릭 액세스 차단 | `block_public_acls`·`ignore_public_acls`만 켬 | 정책으로 공개하는 두 객체를 STS가 익명으로 읽게 한다 |
+| 위 버킷의 정책 | 객체 둘의 `s3:GetObject`만 공개 + TLS 아니면 거절 | 공개 범위를 `.well-known/openid-configuration`과 `openid/v1/jwks`로 한정한다 |
+| OIDC 공급자 `<버킷>.s3.ap-northeast-2.amazonaws.com` | audience `sts.amazonaws.com`, 지문은 발급자 주소의 인증서에서 읽은 값 | 이 클러스터의 ServiceAccount 토큰을 AWS가 믿게 한다 |
+| IAM 역할 `dev-ops-study-eso-monitoring` | 신뢰: `monitoring/eso-ssm` ServiceAccount 하나, 최대 1시간 | ESO가 맡는 역할 |
+| 역할의 인라인 정책 `read-discord-webhook-parameter` | `ssm:GetParameter` 한 파라미터 | Discord 웹훅 URL 파라미터 하나만 읽는다(DuckDNS 토큰은 못 읽는다) |
 
-각 설정이 왜 그런지는 `state_bucket.tf`, `budgets.tf`, `github_oidc.tf`의 주석에 적혀 있다. 변수(`variables.tf`)는 다음과 같고 `terraform apply -var budget_limit_usd=30`처럼 덮어쓸 수 있다.
+각 설정이 왜 그런지는 `state_bucket.tf`, `budgets.tf`, `github_oidc.tf`, `eso_oidc.tf`의 주석에 적혀 있다. 변수(`variables.tf`)는 다음과 같고 `terraform apply -var budget_limit_usd=30`처럼 덮어쓸 수 있다.
 
 | 변수 | 기본값 | 뜻 |
 |---|---|---|
@@ -56,7 +62,7 @@ Terraform은 자기가 만든 리소스의 목록과 속성을 state 파일에 �
 
 - 로컬 state 파일은 `.gitignore`가 제외한다(`*.tfstate*`, 그리고 provider를 받아 두는 `.terraform/`). state에는 리소스의 모든 속성이 평문으로 들어 있어서 저장소에 올리지 않는다.
 - **이 파일을 잃으면** Terraform이 이 스택의 리소스를 잊는다(AWS의 버킷과 예산은 그대로 남는다). 이때 `terraform apply`는 이미 존재한다는 오류로 실패하므로 리소스마다 `terraform import`로 state에 되돌려 넣어야 한다.
-  리소스가 13개라 감당할 만하지만 번거로우니, `apply`가 끝나면 `terraform.tfstate`를 다른 곳에 한 벌 복사해 두는 것이 좋다.
+  리소스가 21개라 감당할 만하지만 번거로우니, `apply`가 끝나면 `terraform.tfstate`를 다른 곳에 한 벌 복사해 두는 것이 좋다.
 
 ## 실행 순서
 
@@ -67,12 +73,13 @@ aws login                     # 브라우저로 AWS에 로그인해 임시 자�
 aws sts get-caller-identity   # 지금 어느 계정인지 확인한다. 이 계정 ID가 버킷 이름에 들어간다
 
 terraform init                # provider를 내려받는다(.terraform.lock.hcl이 고정한 버전)
-terraform apply               # 만들 리소스(처음이면 13개)를 보여 주고 yes를 기다린다
+terraform apply               # 만들 리소스(처음이면 21개)를 보여 주고 yes를 기다린다
 ```
 
 - `aws login`을 프로필 이름을 붙여서 했다면(`--profile NAME`) 먼저 `export AWS_PROFILE=NAME`을 한다.
 - Terraform이 자격 증명을 찾지 못하면 `eval "$(aws configure export-credentials --format env)"`로 현재 셸의 환경 변수로 내보낸다(그 셸에서만 유효하다).
 - 적용하는 자격 증명에는 S3 버킷 설정, Budgets 생성, IAM(OIDC 공급자·역할·정책) 권한이 필요하다(관리자 권한이면 충분하다).
+- 공개 버킷을 만들므로 apply 전에 **계정 수준의 퍼블릭 액세스 차단**을 확인한다(아래 "클러스터 OIDC (ESO용)"). 이미 이 스택을 적용한 뒤라면 `terraform apply`는 새 리소스 8개만 더한다.
 - 계정에 같은 URL(`https://token.actions.githubusercontent.com`)의 OIDC 공급자가 이미 있으면 `apply`가 `EntityAlreadyExists`로 실패한다. 계정마다 하나만 만들 수 있어서다. 그때는 `terraform import aws_iam_openid_connect_provider.github <공급자 ARN>`으로 가져온다(`aws iam list-open-id-connect-providers`로 ARN을 본다).
 
 끝나면 출력을 확인한다. `123456789012`는 예시 계정 ID다.
@@ -80,7 +87,10 @@ terraform apply               # 만들 리소스(처음이면 13개)를 보여 �
 ```bash
 terraform output
 # backend_config_arg   = "-backend-config=bucket=dev-ops-study-tfstate-123456789012"
+# eso_role_arn         = "arn:aws:iam::123456789012:role/dev-ops-study-eso-monitoring"
 # github_plan_role_arn = "arn:aws:iam::123456789012:role/dev-ops-study-github-plan"
+# oidc_bucket          = "dev-ops-study-oidc-123456789012"
+# oidc_issuer          = "https://dev-ops-study-oidc-123456789012.s3.ap-northeast-2.amazonaws.com"
 # region               = "ap-northeast-2"
 # state_bucket         = "dev-ops-study-tfstate-123456789012"
 ```
@@ -107,6 +117,38 @@ terraform init "$(terraform -chdir=../bootstrap output -raw backend_config_arg)"
 
 왜 이렇게 했는지(왜 `*`가 아닌가, 왜 `main`도 믿는가, 무엇을 읽을 수 있고 무엇을 막았나), 저장소 변수·시크릿을 넣는 법은 [`infra/aws/README.md`의 "GitHub Actions에서 plan (OIDC)"](../aws/README.md#github-actions에서-plan-oidc)에 있다.
 이 스택에 둔 이유: 역할을 `infra/aws`에 두면 그 스택을 `destroy`할 때 역할도 사라지고, 역할을 바꾸는 PR의 `plan`을 그 역할 자신이 돌리게 된다. 상태 버킷처럼 다른 스택보다 먼저 있고 오래 남는 것이라 여기에 둔다.
+
+## 클러스터 OIDC (ESO용)
+
+`eso_oidc.tf`는 클러스터 안의 External Secrets Operator(ESO)가 AWS 액세스 키 없이 SSM 파라미터를 읽는 길을 만든다. ESO는 `monitoring/eso-ssm` ServiceAccount의 토큰을 STS의 `AssumeRoleWithWebIdentity`에 내밀고, 임시 자격 증명을 받아 파라미터 하나를 읽는다.
+
+- **발급자 URL**: `https://dev-ops-study-oidc-<계정 ID>.s3.ap-northeast-2.amazonaws.com`(가상 호스트 방식, 끝 슬래시 없음). k3s의 `service-account-issuer`, 디스커버리 문서의 `issuer`, IAM 공급자의 URL, 신뢰 정책의 조건 키가 이 문자열과 글자 하나까지 같아야 한다. `terraform output -raw oidc_issuer`로 본다.
+- **OIDC 공급자의 지문(`thumbprint_list`)**: `data "tls_certificate"`로 발급자 주소의 인증서 체인에서 읽어 넣는다(plan 때 인터넷 접속이 필요하다). 지문을 비워 두면 IAM이 공급자를 만들 때 디스커버리 문서를 받으러 접속하는데, 그 문서는 인스턴스가 처음 부팅할 때 올리므로 첫 `apply` 시점에는 없다. 값 자체는 대조되지 않는다(S3 주소는 AWS가 신뢰 CA 목록으로 검증한다). 그래도 공급자 생성이 `OpenIdIdpCommunicationError`로 실패하면 `infra/aws/up.sh`를 한 번 실행해 문서가 올라간 뒤 `terraform apply`를 다시 한다.
+- **역할 `dev-ops-study-eso-monitoring`**: `sub`가 `system:serviceaccount:monitoring:eso-ssm`이고 `aud`가 `sts.amazonaws.com`인 토큰만 받는다(`StringEquals`). 권한은 Discord 웹훅 URL 파라미터(`/dev-ops-study/discord-webhook-url`)의 `ssm:GetParameter` 하나다. DuckDNS 토큰은 읽지 못한다.
+
+### 왜 버킷이 공개인가, 무엇이 공개인가
+
+STS는 토큰을 확인하려고 발급자의 디스커버리 문서(`/.well-known/openid-configuration`)와 거기 적힌 JWKS(`/openid/v1/jwks`)를 **인증 없이** 내려받는다. 클러스터는 인터넷에서 닿지 않으므로 이 두 문서를 STS가 읽을 수 있는 곳에 올려 둬야 한다.
+
+- 공개되는 것은 **객체 둘의 읽기(`s3:GetObject`)뿐**이다. 버킷 정책이 두 키를 정확히 적고, 목록(`s3:ListBucket`)과 쓰기는 익명에게 주지 않는다. 버킷에 다른 객체가 생겨도 공개되지 않는다.
+- 내용은 발급자 주소와 **공개 키**(JWKS)다. 공개 키로는 서명을 확인할 수만 있고 토큰을 만들 수 없다. 서명 키(개인 키)는 노드의 `/var/lib/rancher/k3s/server/tls/`에만 있다.
+- 버킷의 퍼블릭 액세스 차단에서 `block_public_policy`와 `restrict_public_buckets`를 끈다. 그래야 `Principal "*"`를 허용하는 정책이 붙고 읽힌다. 나머지 둘(`block_public_acls`, `ignore_public_acls`)은 켠다. 소유권도 `BucketOwnerEnforced`라 ACL로는 공개할 수 없다.
+- 객체를 올리는 것은 `infra/aws`의 인스턴스 역할이다(부팅마다 덮어쓴다. 새 클러스터는 새 서명 키를 만들기 때문이다). 이 스택은 객체를 만들지 않는다.
+
+### apply 전에 계정 수준 퍼블릭 액세스 차단을 확인한다
+
+가장 엄격한 설정이 이긴다. 계정 수준에서 `BlockPublicPolicy`나 `RestrictPublicBuckets`가 켜져 있으면 버킷 쪽을 꺼도 정책이 거절되거나 익명 읽기가 막힌다.
+
+```bash
+aws s3control get-public-access-block --account-id "$(aws sts get-caller-identity --query Account --output text)"
+# BlockPublicPolicy와 RestrictPublicBuckets가 false여야 한다. 설정이 없다고(NoSuchPublicAccessBlockConfiguration) 나오면 계정 수준 차단이 없는 것이라 괜찮다.
+```
+
+`BlockPublicPolicy`가 true면 `apply`가 `AccessDenied`로 정책 붙이기에서 실패한다. `RestrictPublicBuckets`만 true면 `apply`는 성공하지만 익명 읽기가 조용히 막혀서, `infra/aws`의 부팅 5단계가 올린 뒤 "공개 주소에서 받은 내용이 올린 파일과 다르거나 받지 못했다"라고 경고한다. 계정 수준 설정을 풀지, CloudFront(Origin Access Control)로 공개 버킷 없이 하는 방법으로 바꿀지는 사용자가 정한다.
+
+### 비용
+
+S3 저장과 요청은 객체가 둘이고 수 KB라 한 달에 1센트에도 못 미친다. STS의 `AssumeRoleWithWebIdentity`, IAM 공급자·역할에는 요금이 없다. 이 부분도 사실상 0원이다.
 
 ## 비용
 
@@ -135,11 +177,12 @@ terraform init "$(terraform -chdir=../bootstrap output -raw backend_config_arg)"
 이 스택은 프로젝트를 **완전히 정리할 때 맨 마지막에** 지운다.
 
 1. **이 버킷을 쓰는 스택을 먼저 모두 `terraform destroy`한다**(`infra/aws` 등). 그 스택들의 state가 이 버킷에 있어서, 버킷을 먼저 지우면 그 스택이 만든 리소스가 state 없이 AWS에 남아 계속 과금된다.
-2. **버킷을 비운다.** `force_destroy = false`라서 객체가 하나라도 남아 있으면 destroy가 버킷 삭제를 거부한다. 이것이 안전장치다. 버전 관리가 켜져 있으므로 "비운다"는 현재 객체뿐 아니라 **모든 이전 버전과 삭제 마커(delete marker)까지** 지운다는 뜻이다.
+2. **버킷을 비운다.** 상태 버킷은 `force_destroy = false`라서 객체가 하나라도 남아 있으면 destroy가 버킷 삭제를 거부한다. 이것이 안전장치다. 버전 관리가 켜져 있으므로 "비운다"는 현재 객체뿐 아니라 **모든 이전 버전과 삭제 마커(delete marker)까지** 지운다는 뜻이다.
    `aws s3 rm --recursive`는 삭제 마커만 더할 뿐 이전 버전을 지우지 않아서 충분하지 않다. 다음 둘 중 하나를 쓴다.
    - 콘솔: S3 → 버킷 → "비우기(Empty)".
    - Terraform: `state_bucket.tf`의 `force_destroy`를 `true`로 바꾸고 `terraform apply`를 한 번 한다(이 값이 state에 기록되어야 destroy가 적용한다). 그 뒤 3번으로 간다.
-3. `terraform destroy`. 예산 2개도 함께 사라진다(비용 알림이 끝난다). OIDC 공급자와 plan 역할도 사라져서 PR의 `terraform-plan` 워크플로는 역할을 맡지 못해 실패한다(필수 검사가 아니라 PR을 막지는 않는다).
+   OIDC 버킷(`dev-ops-study-oidc-<계정 ID>`)도 `force_destroy = false`라서 비워야 한다. 객체는 `.well-known/openid-configuration`과 `openid/v1/jwks` 둘이고 버전 관리가 꺼져 있어 `aws s3 rm`으로 지우면 된다.
+3. `terraform destroy`. 예산 2개도 함께 사라진다(비용 알림이 끝난다). OIDC 공급자(GitHub용과 클러스터용)와 plan 역할, ESO 역할(`dev-ops-study-eso-monitoring`)도 사라져서 PR의 `terraform-plan` 워크플로는 역할을 맡지 못해 실패한다(필수 검사가 아니라 PR을 막지는 않는다).
 4. 로컬의 `terraform.tfstate`는 지워도 된다.
 
 버킷을 비우면 모든 스택의 state와 그 이전 버전이 영구 삭제되어 되돌릴 수 없다. 1번이 끝났는지 확인한 뒤에 한다.
@@ -156,8 +199,8 @@ terraform validate
 docker run --rm -v "$PWD":/w aquasec/trivy:0.70.0 config /w/infra/bootstrap
 ```
 
-trivy는 두 가지를 지적한다. S3 서버 액세스 로깅이 꺼져 있다(AWS-0089)와 암호화가 고객 관리형 KMS 키가 아니다(AWS-0132)이다.
-둘 다 이 프로젝트에서 일부러 택한 것이라 이유를 `state_bucket.tf`의 주석에 적고 `#trivy:ignore`로 예외 처리했다.
+trivy는 몇 가지를 지적한다. S3 서버 액세스 로깅이 꺼져 있다(AWS-0089), 암호화가 고객 관리형 KMS 키가 아니다(AWS-0132), OIDC 버킷에서 퍼블릭 액세스 차단의 정책 항목을 껐다(AWS-0087, AWS-0093), 그리고 OIDC 버킷의 버전 관리가 꺼져 있다(AWS-0090)이다. 마지막 것은 두 객체가 부팅마다 클러스터에서 다시 만들어지는 파생 파일이라 이력이 필요 없어서다.
+모두 이 프로젝트에서 일부러 택한 것이라 이유를 `state_bucket.tf`와 `eso_oidc.tf`의 주석에 적고 `#trivy:ignore`로 예외 처리했다.
 
 ## 파일
 
@@ -169,6 +212,7 @@ trivy는 두 가지를 지적한다. S3 서버 액세스 로깅이 꺼져 있다
 | `state_bucket.tf` | state 버킷과 그 설정 |
 | `budgets.tf` | 예산 2개 |
 | `github_oidc.tf` | GitHub Actions OIDC 공급자, plan 역할(신뢰 정책, `ReadOnlyAccess`, Deny 인라인 정책) |
-| `outputs.tf` | `state_bucket`, `region`, `backend_config_arg`, `github_plan_role_arn` |
+| `eso_oidc.tf` | 클러스터 발급자용 공개 S3 버킷과 정책, OIDC 공급자, ESO 역할(신뢰 정책, SSM 읽기 인라인 정책) |
+| `outputs.tf` | `state_bucket`, `region`, `backend_config_arg`, `github_plan_role_arn`, `oidc_issuer`, `oidc_bucket`, `eso_role_arn` |
 | `.terraform.lock.hcl` | provider 버전과 해시(맥 darwin_arm64, 리눅스 linux_amd64). 커밋한다 |
 | `.gitignore` | `.terraform/`, `*.tfstate*` 등 |
