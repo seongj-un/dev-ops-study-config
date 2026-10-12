@@ -135,7 +135,8 @@ preflight_ip() {
   say "현재 IP/32 확인 완료 (값은 출력하지 않는다)"
 }
 
-# SSM 파라미터가 있는지 이름만 본다(값은 읽지 않는다). 없어도 부팅은 끝나지만 DuckDNS 갱신과 Discord 알림이 빠지므로 경고한다.
+# SSM 파라미터가 있는지 이름만 본다(값은 읽지 않는다). 없어도 부팅은 끝나지만 DuckDNS 갱신(인스턴스가 읽는다)과 Discord 알림(ESO가 읽는다. 없으면 ExternalSecret이 Ready가 되지 못해
+# Alertmanager의 Secret이 만들어지지 않는다)이 빠지므로 경고한다.
 preflight_ssm_params() {
   local found p missing=0
   if ! found=$(awsr ssm describe-parameters \

@@ -77,16 +77,17 @@ resource "aws_instance" "k3s" {
   # 주의: 압축 결과의 바이트는 Terraform을 빌드한 Go 버전에 따라 달라질 수 있다. Terraform을 올린 뒤 살아 있는 인스턴스에 plan하면, 내용이 같아도 user_data_base64가 바뀐 것으로 보여
   # 교체가 제안될 수 있다. 이 실습은 쓸 때 만들고 끝나면 destroy하므로 감수한다: 원인이 압축 결과뿐인 교체 제안은 apply하지 말고, 그 세션이 끝난 뒤 destroy한다.
   user_data_base64 = base64gzip(templatefile("${path.module}/cloud-init.yaml.tftpl", {
-    aws_region                     = var.region
-    duckdns_subdomain              = var.duckdns_subdomain
-    ssm_parameter_name             = var.duckdns_token_parameter
-    discord_webhook_parameter_name = var.discord_webhook_parameter
-    k3s_version                    = var.k3s_version
-    helm_version                   = var.helm_version
-    argocd_chart_version           = var.argocd_chart_version
-    argocd_values                  = file("${path.module}/../../bootstrap/argocd/values.yaml")
-    config_repo_url                = var.config_repo_url
-    config_repo_ref                = var.config_repo_ref
+    aws_region           = var.region
+    duckdns_subdomain    = var.duckdns_subdomain
+    ssm_parameter_name   = var.duckdns_token_parameter
+    oidc_bucket          = var.oidc_bucket
+    oidc_issuer          = local.oidc_issuer
+    k3s_version          = var.k3s_version
+    helm_version         = var.helm_version
+    argocd_chart_version = var.argocd_chart_version
+    argocd_values        = file("${path.module}/../../bootstrap/argocd/values.yaml")
+    config_repo_url      = var.config_repo_url
+    config_repo_ref      = var.config_repo_ref
   }))
 
   # user_data(여기서는 user_data_base64)가 바뀌면 인스턴스를 교체(삭제 후 재생성)한다. cloud-init은 user_data를 인스턴스의 첫 부팅 때 한 번만 실행하므로(인스턴스가 바뀔 때만 다시 실행한다),
@@ -98,7 +99,7 @@ resource "aws_instance" "k3s" {
   # 아래 리소스와의 순서는 보장하지 않는다(이들을 이 리소스가 참조하지 않기 때문이다). 순서가 어긋나면 인스턴스가 먼저 떠서 첫 네트워크 호출이 실패할 수 있어서 명시한다:
   #  - 라우트 테이블 연결: 기본 경로(0.0.0.0/0 → IGW)가 이 서브넷에 적용된 뒤여야 인터넷에 나간다.
   #  - 아웃바운드 규칙: Terraform이 기본 "모두 허용" 아웃바운드를 지웠으므로 이 규칙이 생기기 전에는 나가는 트래픽이 모두 막힌다.
-  #  - 역할의 정책 둘: 부팅 중에 SSM에서 DuckDNS 토큰(3단계)과 Discord 웹훅 URL(7단계)을 읽고, SSM 에이전트가 등록하려면 권한이 먼저 붙어 있어야 한다.
+  #  - 역할의 정책 둘: 부팅 중에 SSM에서 DuckDNS 토큰(3단계)을 읽고 OIDC 문서를 S3에 올리며(5단계), SSM 에이전트가 등록하려면 권한이 먼저 붙어 있어야 한다.
   depends_on = [
     aws_route_table_association.public,
     aws_vpc_security_group_egress_rule.all,
