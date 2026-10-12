@@ -140,7 +140,7 @@ data "tls_certificate" "oidc_issuer" {
 #  - client_id_list(audience): 토큰의 aud가 이 목록에 있어야 STS가 받는다. ESO가 투영하는 토큰의 audience가 sts.amazonaws.com이다.
 #  - thumbprint_list를 적는 이유: 비워 두면 IAM이 공급자를 만드는 순간 발급자 주소의 디스커버리 문서를 받으러 접속해 지문을 스스로 채운다(OpenIdIdpCommunicationError가 나올 수 있다).
 #    그런데 이 문서는 인스턴스가 처음 부팅할 때 올리므로(infra/aws의 cloud-init 5단계) 이 스택의 첫 apply 때는 버킷에 아직 없다(익명 요청은 403).
-#    지문을 미리 주면 IAM이 생성 시점의 이 접속을 건너뛴다. 값 자체는 쓰이지 않는다. S3 주소의 JWKS는 AWS가 자기의 신뢰 루트 CA 목록으로 TLS 인증서를 검증하므로 지문이 대조되지 않는다
+#    AWS IAM 문서는 지문이 없으면 IdP에서 가져오고, 주면 그 값을 쓴다고 적는다(생성 시점의 접속이 실제로 생략되는지는 이 문서로 확인하지 못했다). 이 값 자체는 쓰이지 않는다. S3 주소의 JWKS는 AWS가 자기의 신뢰 루트 CA 목록으로 TLS 인증서를 검증하므로 지문이 대조되지 않는다
 #    (aws provider 문서도 S3에 올린 JWKS에는 지문이 쓰이지 않는다고 적는다).
 #    그래서 데이터 소스로 읽은 값을 그대로 넣는다.
 #  - depends_on: 버킷과 정책이 먼저 있어야 발급자 주소가 이 계정의 실제 버킷을 가리킨다. url이 local이라 Terraform이 이 순서를 스스로 알지 못한다.
