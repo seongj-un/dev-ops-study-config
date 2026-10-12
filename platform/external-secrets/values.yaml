@@ -9,7 +9,7 @@
 # 이미지는 차트 버전이 정하는 태그를 그대로 쓴다(ghcr.io/external-secrets/external-secrets:v2.12.0). 값 파일 맨 위의 차트 버전과 argocd/apps/external-secrets.yaml의 targetRevision은 함께 바꾼다.
 # CRD가 차트에 들어 있어서 고정의 단위가 차트 버전인 것은 kube-prometheus-stack 값 파일 맨 위와 같은 이유다.
 # 리소스: 모든 컨테이너에 요청과 메모리 한도를 두고 CPU 한도는 두지 않는다(앱 차트와 같은 이유: CPU 한도는 CFS 쿼터 스로틀링을 부른다). 차트 기본값은 셋 모두 아무것도 정하지 않는다.
-# 값은 클러스터에서 잰 것이 아니라 이 규모(ExternalSecret 3개)를 가정한 추정이다. 띄운 뒤 kubectl top pods -n external-secrets로 보고 고친다.
+# 값은 클러스터에서 잰 사용량(2026-10-12, 이 규모: ExternalSecret 3개)에 맞췄다. 잰 값과 근거는 파드별 주석에 있다. 규모나 차트 버전이 바뀌면 kubectl top pods -n external-secrets 또는 Prometheus의 container_memory_working_set_bytes로 다시 잰다.
 #
 # 이 파일에는 빈 줄을 두지 않는다(환경 값 파일과 같은 yq 모양. validate 워크플로가 yq '.'로 다시 써도 그대로인지 검사한다).
 #
@@ -19,7 +19,7 @@
 installCRDs: true
 # --- 컨트롤러 ---
 # 파드 1개(차트 기본값). 컨트롤러가 잠시 없어도 이미 만든 Secret은 그대로 남는다. 새 Secret의 생성과 갱신만 컨트롤러가 돌아올 때까지 미뤄진다.
-# 요청 64Mi는 이 규모의 평소 사용량으로 짐작한 값(추정)이고, 한도 128Mi는 그 두 배다: 시작할 때 감시 대상을 한꺼번에 읽어 캐시를 채우는 때의 여유다.
+# 잰 값(인스턴스를 다시 띄운 직후 30분 동안 Prometheus의 최댓값): 시작 직후 최대 75.0MiB, 안정 상태 약 38MiB. 요청 64Mi는 안정 상태보다 넉넉한 값이고, 한도 128Mi는 시작 최대치의 약 1.7배다(시작할 때 감시 대상을 한꺼번에 읽어 캐시를 채우는 때의 여유). 그대로 둔다.
 resources:
   requests:
     cpu: 10m
@@ -29,24 +29,27 @@ resources:
 # --- 웹훅 ---
 webhook:
   # 파드 1개(차트 기본값). 웹훅이 없으면 ExternalSecret·SecretStore를 만들거나 고치는 요청이 실패한다(웹훅 설정의 failurePolicy: Fail). 이미 만든 Secret에는 영향이 없다.
-  # 요청 32Mi는 차트 values.yaml의 예시 값과 같고, 한도 64Mi는 그 두 배다(추정).
+  # 잰 값(인스턴스를 다시 띄운 직후 30분 동안 Prometheus의 최댓값): 시작 직후 최대 52.9MiB로 예전 한도 64Mi의 83%였고, 안정 상태는 약 30MiB다.
+  # 시작 최대치가 한도에 가까우면 시작할 때 조금만 더 써도 OOM으로 죽고 재시작이 반복될 수 있어서(웹훅이 죽으면 ExternalSecret·SecretStore 적용이 실패한다) 한도를 128Mi로 올렸다(시작 최대치의 약 2.4배).
+  # 요청 48Mi는 안정 상태(약 30MiB)보다 위이고 시작 최대치(52.9MiB)에 가깝다. 요청은 스케줄러가 노드의 남은 메모리를 계산할 때 쓰는 값이라 한도처럼 올리지 않았다(노드 메모리 사용률은 같은 때 68%였다).
   resources:
     requests:
       cpu: 10m
-      memory: 32Mi
+      memory: 48Mi
     limits:
-      memory: 64Mi
+      memory: 128Mi
 # --- cert-controller ---
 certController:
   # 파드 1개(차트 기본값). 하는 일은 웹훅 서버가 쓸 TLS 인증서를 Secret(external-secrets-webhook)에 만들고, 그 CA를 웹훅 설정과 CRD의 caBundle에 넣는 것뿐이다.
   # caBundle은 Git에 없는 값이지만 ArgoCD는 OutOfSync로 보지 않는다(argocd/apps/cert-manager.yaml의 ServerSideApply 주석과 같은 이유).
-  # 요청 32Mi, 한도 64Mi는 웹훅과 같은 추정이다.
+  # 잰 값(웹훅과 같은 때, 같은 방법): 시작 직후 최대 59.2MiB로 예전 한도 64Mi의 93%였고, 안정 상태는 약 52MiB다. 시작 최대치가 한도에 거의 닿아 있어서 OOM 위험이 가장 컸다.
+  # 한도를 128Mi로 올렸다(시작 최대치의 약 2.2배). 요청 64Mi는 안정 상태(약 52MiB)와 시작 최대치(59.2MiB)를 덮는 값이다.
   resources:
     requests:
       cpu: 10m
-      memory: 32Mi
-    limits:
       memory: 64Mi
+    limits:
+      memory: 128Mi
 # --- 지표 ---
 serviceMonitor:
   # 컨트롤러·웹훅·cert-controller의 /metrics(포트 metrics)를 Prometheus가 수집하게 하는 ServiceMonitor와 그것이 고르는 Service를 만든다(차트 기본값은 꺼짐).
