@@ -166,7 +166,7 @@ database:
   # Secret의 이름은 위와 같은 규칙이다: existingSecret이 있으면 그 이름(dev·prod는 shortener-db), 없으면 <릴리스>-database. 키는 항상 password라서 앱과 PostgreSQL은 어느 경우든 같은 곳을 읽는다.
   # password와 함께 쓰면 템플릿이 실패한다(어느 값이 PostgreSQL에 들어가는지 모호해진다).
   # ESO가 설치된 클러스터에서만 켠다: Password·ExternalSecret의 CRD가 없으면 동기화가 실패한다. 그래서 기본값은 false이고, ESO가 없는 클러스터에 차트를 직접 렌더링할 때는 existingSecret이나 password 경로를 쓴다. argocd/apps로 배포하면 환경 값 파일이 켜므로(로컬 k3d 포함) ESO가 필요하다.
-  # 켜는 곳은 environments/dev, prod의 values.yaml이다. 한 번 만든 비밀번호는 바뀌지 않는다(refreshPolicy: CreatedOnce). Secret이 없어지면 새 값이 나오는데, PostgreSQL의 PVC가 남아 있으면 DB 안의 비밀번호와 어긋난다.
+  # 켜는 곳은 environments/dev, prod의 values.yaml이다. 한 번 만든 비밀번호는 바뀌지 않는다(refreshPolicy: CreatedOnce). Secret이 없어지거나 그 데이터를 손으로 고치면(ESO v2.12.0 소스 기준 해시 불일치) 새 값이 나오는데, PostgreSQL의 PVC가 남아 있으면 DB 안의 비밀번호와 어긋난다.
   generatePassword: false
 
 # 클러스터 안의 PostgreSQL (StatefulSet 1개). 이미지는 앱 저장소의 compose.yaml과 같은 postgres 18 alpine이다.

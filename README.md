@@ -3,7 +3,7 @@
 데브옵스 공부용 URL 단축 서비스([seongj-un/dev-ops-study](https://github.com/seongj-un/dev-ops-study))의 **배포 설정 저장소**다.
 Helm 차트, 환경별 값, 모니터링 플랫폼의 값, ArgoCD 정의가 여기에 있고, 클러스터에는 ArgoCD가 이 저장소를 읽어서 반영한다(GitOps).
 앱과 플랫폼은 사람이나 CI가 클러스터에 `helm install`·`kubectl apply`로 직접 밀어 넣지 않는다. 클러스터에 무엇이 떠 있어야 하는지는 이 저장소의 `main`이 말해 준다
-(손으로 하는 것은 ArgoCD 설치와 루트 Application 적용뿐이고 EC2에서는 이것도 부트스트랩 스크립트가 한다. Git에 둘 수 없는 Secret(DB 비밀번호, Grafana 관리자, Discord 웹훅)은 External Secrets Operator가 클러스터 안에서 만든다. 아래 "Secret". 로컬 k3d에는 ESO가 없어서 Secret을 `kubectl create secret`으로 만든다).
+(손으로 하는 것은 ArgoCD 설치와 루트 Application 적용뿐이고 EC2에서는 이것도 부트스트랩 스크립트가 한다. Git에 둘 수 없는 Secret(DB 비밀번호, Grafana 관리자, Discord 웹훅)은 External Secrets Operator가 클러스터 안에서 만든다. 아래 "Secret". 로컬 k3d에서도 ESO가 비밀번호를 만들고, SSM을 못 읽는 Discord 웹훅 Secret만 손으로 만든다).
 
 ## 왜 앱 저장소와 분리했나
 
@@ -78,7 +78,7 @@ infra/aws/up.sh, down.sh           명령 한 번으로 EC2/k3s 환경을 만들
 - 주소는 DuckDNS 이름 `dev-ops-study`다. DuckDNS가 그 아래의 하위 이름도 같은 IP로 해석하므로 dev 주소(`dev.dev-ops-study.duckdns.org`)는 따로 등록하지 않는다.
   두 주소가 같은 노드의 443 포트로 들어오고, Traefik이 Host 헤더(TLS의 SNI)로 dev와 prod를 나눈다. 인증서는 cert-manager가 Let's Encrypt에서 받고,
   80 포트(평문 HTTP)로 온 요청은 Traefik이 https로 돌려보낸다(아래 "HTTPS").
-- DB 비밀번호 Secret `shortener-db`(키 `password`)는 **Git에 없다.** dev·prod에서는 ESO가 무작위로 만들어 각 네임스페이스에 둔다(아래 "Secret"). 로컬 k3d만 손으로 만든다(아래 부트스트랩).
+- DB 비밀번호 Secret `shortener-db`(키 `password`)는 **Git에 없다.** dev·prod에서는 ESO가 무작위로 만들어 각 네임스페이스에 둔다(아래 "Secret"). 로컬 k3d에서도 ESO가 만든다(아래 부트스트랩).
 - 리소스 이름은 ArgoCD가 Application 이름을 Helm 릴리스 이름으로 쓰기 때문에 `shortener-dev`, `shortener-dev-postgresql`, `shortener-dev-redis`처럼 환경 이름으로 시작한다(prod도 같다).
 - ArgoCD는 Helm을 `helm template`으로 렌더링하는 도구로만 쓴다. Helm 릴리스를 만들지 않으므로 `helm ls`에 보이지 않고 `helm rollback`·`helm test`는 쓸 수 없다
   ([ArgoCD FAQ](https://argo-cd.readthedocs.io/en/stable/faq/#after-deploying-my-helm-application-with-argo-cd-i-cannot-see-it-with-helm-ls-and-other-helm-commands)).
@@ -152,19 +152,11 @@ helm repo update argo
 helm upgrade --install argocd argo/argo-cd --version 10.9.4 \
   -n argocd --create-namespace -f bootstrap/argocd/values.yaml --wait --timeout 10m
 
-# 3. (로컬 k3d만) Secret. 아래 설명대로 ESO가 같은 이름의 shortener-db를 덮어쓰므로 사실상 필요 없다. EC2에서는 이 단계가 없다: ESO가 클러스터 안에서 만든다(아래 "Secret")
-#    비밀번호는 Git에 넣지 않고 클러스터에만 둔다. 환경마다 다른 값이 만들어진다
-for env in dev prod; do
-  kubectl create namespace shortener-$env
-  kubectl -n shortener-$env create secret generic shortener-db --from-literal=password="$(openssl rand -base64 24)"
-done
-
-# 3-1. (로컬 k3d만) 모니터링 Secret 두 개. 이름과 키는 EC2에서 ESO가 만드는 것과 같다(platform/kube-prometheus-stack/values.yaml이 읽는다):
-#      grafana-admin(키 admin-user, admin-password), alertmanager-discord(키 webhook-url). 비밀번호는 무작위로 두고,
-#      웹훅은 실제 주소 대신 가짜 주소로 둔다(Alertmanager는 뜨고 Discord 알림만 실패한다). 비밀번호는 파이프로 넘긴다(명령줄 인자는 ps로 보인다)
+# 3. (로컬 k3d만) 모니터링 Secret 하나. EC2에서는 이 단계가 없다: ESO가 클러스터 안에서 만든다(아래 "Secret")
+#    shortener-db와 grafana-admin은 만들지 않는다: 로컬에서도 ESO가 무작위로 만든다(아래 설명).
+#    alertmanager-discord(키 webhook-url)는 로컬에 SSM 접근이 없어 ESO가 못 만드니 가짜 주소로 손수 만든다(platform/kube-prometheus-stack/values.yaml이 읽는다).
+#    Alertmanager는 뜨고 Discord 알림만 실패한다
 kubectl create namespace monitoring
-openssl rand -hex 16 | tr -d '\n' | kubectl -n monitoring create secret generic grafana-admin \
-  --from-literal=admin-user=admin --from-file=admin-password=/dev/stdin
 kubectl -n monitoring create secret generic alertmanager-discord --from-literal=webhook-url=https://discord.invalid/webhook-not-configured
 
 # 4. 루트 Application 적용: 여기서부터 ArgoCD가 argocd/apps를 읽어 dev·prod와 모니터링을 만든다 (손으로 하는 마지막 단계)
@@ -172,18 +164,19 @@ kubectl apply -f argocd/root.yaml
 ```
 
 - 2번은 ArgoCD 이미지(약 200MB)를 처음 내려받아서 몇 분 걸린다. 진행은 `kubectl -n argocd get pods`로 본다.
-- 3·3-1번은 로컬 k3d에서 Secret을 손으로 만드는 절차다(`shortener-db`·`grafana-admin`은 ESO가 같은 이름으로 덮어쓰므로 아래 설명대로 사실상 `alertmanager-discord`만 필요하다). EC2에서는 하지 않는다(부트스트랩 스크립트도 더는 Secret을 만들지 않는다. 아래 "Secret").
-  Secret이 없으면 앱·PostgreSQL 파드가 `CreateContainerConfigError`로, `grafana-admin`이 없으면 Grafana 파드가 같은 상태로(환경 변수로 읽는다),
+- 3번은 로컬 k3d에서 `alertmanager-discord` Secret을 손으로 만드는 절차다. EC2에서는 하지 않는다(부트스트랩 스크립트도 더는 Secret을 만들지 않는다. 아래 "Secret").
+  `shortener-db`·`grafana-admin`은 로컬에서도 ESO가 만든다(아래 설명). 이 Secret이 없으면 앱·PostgreSQL 파드가 `CreateContainerConfigError`로, `grafana-admin`이 없으면 Grafana 파드가 같은 상태로(환경 변수로 읽는다),
   `alertmanager-discord`가 없으면 Alertmanager 파드가 `ContainerCreating`에(볼륨으로 붙인다) 머문다. Secret이 생기면 시작한다.
 - 루트 Application은 `argocd/apps`를 모두 배포하고 환경 값 파일이 `database.generatePassword: true`를 켜므로 로컬 k3d에도 ESO와 ExternalSecret이 생긴다. 로컬에는 OIDC 발급자 버킷도 IAM 역할도 없어서
   SSM을 읽는 `alertmanager-discord`는 동기화에 실패한다(아래 "막혔을 때" 표의 ExternalSecret 행). Password 생성기는 AWS를 쓰지 않으므로 `shortener-db`·`grafana-admin`은 ESO가 만든다.
   `creationPolicy: Owner`인 ExternalSecret은 주인(controller ownerReference)이 없는 같은 이름의 Secret을 자기 것으로 가져가 값을 덮어쓴다(ESO v2.12.0 소스로 확인. 다른 컨트롤러가 주인이면 실패한다).
-  그래서 3·3-1번에서 손으로 만든 `shortener-db`·`grafana-admin`은 ESO가 새 무작위 값으로 바꾼다. 앱 워크로드는 sync-wave -1의 ExternalSecret이 Ready가 될 때까지 적용되지 않아
-  PostgreSQL이 처음 시작하기 전에 바뀌므로 문제가 없다(그래서 이 둘은 만들 필요가 없다). 필요한 것은 `alertmanager-discord`뿐이다: ESO가 SSM에서 값을 읽지 못하면 Secret을 쓰기 전에 실패하므로
+  그래서 `shortener-db`·`grafana-admin`은 손으로 만들지 않는다(이전 절차로 만들어 둔 것이 있으면 ESO가 새 무작위 값으로 바꾼다). 앱 워크로드는 sync-wave -1의 ExternalSecret이 Ready가 될 때까지 적용되지 않아
+  `shortener-db`는 PostgreSQL이 처음 시작하기 전에 정해지므로 문제가 없다. 이 웨이브 보장은 `shortener-db`에만 해당한다: `grafana-admin`은 kube-prometheus-stack과 external-secrets-config가 서로 독립적으로 동기화돼
+  순서가 없으니, 손으로 만든 값이 있다면 ESO가 덮어쓰기 전에 Grafana가 그 값으로 먼저 시작할 수 있다(그래서 만들지 않는다). `alertmanager-discord`는 ESO가 SSM에서 값을 읽지 못하면 Secret을 쓰기 전에 실패하므로
   손으로 만든 가짜 웹훅 Secret이 그대로 남는다. 상태는 `kubectl -n monitoring describe externalsecret`로 본다.
 - 모니터링(kube-prometheus-stack·Loki·Alloy, 메모리 요청만 약 1.4GiB)은 EC2 클러스터(메모리 8GiB)를 위한 것이다. 로컬 k3d의 Docker VM(2.84GiB)은 앱만으로도 메모리가 모자라
   EC2로 옮겼으므로(아래 메모리 메모) 그 위에는 자리가 없다. 루트 Application은 argocd/apps를 모두 배포하므로 로컬 k3d에서도 모니터링 Application이 생긴다.
-  그래도 로컬에서 띄운다면 3-1의 Secret을 위처럼 무작위 비밀번호와 가짜 웹훅 주소로 만든다.
+  그래도 로컬에서 띄운다면 3번의 `alertmanager-discord`(가짜 웹훅 주소)를 만든다. 비밀번호 Secret은 ESO가 만든다.
 - 로컬 k3d에 이전 단계에서 `helm install`로 직접 설치한 `shortener` 릴리스(`shortener` 네임스페이스)가 남아 있으면 먼저 지운다. 로컬용으로 덮어쓴 prod 호스트(`shortener.localhost`)와
   같은 호스트를 쓰는 Ingress가 둘이 되면 요청이 어느 쪽으로 갈지 보장되지 않는다. EC2에는 그런 릴리스가 없다.
 
@@ -249,8 +242,10 @@ monitoring/ServiceAccount eso-ssm 의 토큰(aud sts.amazonaws.com, sub system:s
   안전한 순서는 새로 만드는 것이다: 옛 인스턴스를 `infra/aws/down.sh`로 없애거나 다시 켜지 않은 채로 병합하고(인프라 PR과 이 PR을 이어서), 부트스트랩을 적용한 뒤 `up.sh`로 띄운다.
   둘 중 하나만 병합된 채로 띄우면 안 된다(인프라만 있으면 Secret이 없어 `CreateContainerConfigError`, 매니페스트만 있으면 OIDC 발급자가 없어 ESO가 STS에 닿지 못한다).
   이미 덮어쓴 클러스터를 지켜야 한다면: 병합 전에 옛 비밀번호를 적어 둔다(`kubectl -n shortener-<환경> get secret shortener-db -o jsonpath='{.data.password}' | base64 -d`).
-  덮어쓴 뒤에는 둘 중 하나로 맞춘다. (a) 아래 "shortener-db를 지웠을 때"의 `ALTER USER`로 DB를 새 Secret 값에 맞춘다. (b) Secret의 `password`를 옛 값으로 되돌리고(`kubectl patch`) 앱·PostgreSQL 파드를 다시 띄운다.
-  (b)는 ESO의 `CreatedOnce`가 status가 채워진 뒤에는 값을 다시 쓰지 않는다는 점에 기댄다. 먼저 dev에서 시험한다.
+  덮어쓴 뒤에는 DB 쪽을 Secret에 맞추는 방법뿐이다: 아래 "shortener-db를 지웠을 때"의 `ALTER USER`로 PostgreSQL의 비밀번호를 ESO가 지금 가진 Secret 값으로 바꾼다
+  (비밀번호는 그 절차의 `\getenv`로만 다루고 명령줄에 쓰지 않는다. 먼저 dev에서 시험한다).
+  Secret의 `password`를 옛 값으로 `kubectl patch`해 되돌리는 방법은 **통하지 않는다**: ESO v2.12.0 소스 기준으로 ESO는 Secret의 데이터가 자기가 적어 둔 해시 어노테이션(`reconcile.external-secrets.io/data-hash`)과 어긋나면
+  `CreatedOnce`여도 다시 동기화하고, Password 생성기는 그때마다 새 무작위 값을 내놓아 되돌린 값을 덮어쓴다.
 - 배포 순서: 앱 차트에서 Password(sync-wave -2) → ExternalSecret(-1) → 나머지(0)다. ArgoCD는 ExternalSecret이 Ready가 될 때까지 기다린 뒤 앱과 PostgreSQL을 적용한다. ESO가 아직 없으면 동기화는 `retry`로 다시 시도한다.
 
 ### 강제 동기화
@@ -262,13 +257,16 @@ kubectl -n monitoring annotate externalsecret alertmanager-discord force-sync=$(
 kubectl -n monitoring get externalsecret                      # STATUS SecretSynced, READY True
 ```
 
-`shortener-db`·`grafana-admin`은 `CreatedOnce`라서 강제 동기화로도 값이 다시 만들어지지 않는다(Secret이 있는 동안은 건드리지 않는다).
+`shortener-db`·`grafana-admin`은 `CreatedOnce`라서 Secret이 손대지 않은 채 있는 동안에는 강제 동기화로도 값이 다시 만들어지지 않는다. 다만 Secret의 데이터를 손으로 바꿨다면 얘기가 다르다(아래 "생성된 Secret은 손으로 고치지 않는다").
 
 ### shortener-db를 지웠을 때 (PVC는 남아 있다)
 
-`CreatedOnce`에서 값이 다시 만들어지는 때는 Secret이 없어졌을 때뿐이다(지웠거나, ExternalSecret이나 네임스페이스가 새로 만들어졌을 때). 그때 Password 생성기가 **새 무작위 비밀번호**를 내놓는데,
+`CreatedOnce`에서 값이 다시 만들어지는 때는 두 가지다(ESO v2.12.0 소스 기준). 하나는 Secret이 없어졌을 때다(지웠거나, ExternalSecret이나 네임스페이스가 새로 만들어졌을 때).
+다른 하나는 Secret의 데이터를 손으로 바꿨을 때다: ESO는 Secret의 데이터가 자기가 적어 둔 해시 어노테이션(`reconcile.external-secrets.io/data-hash`)과 다르면 동기화를 건너뛰지 않고 다시 만든다.
+그래서 **생성된 Secret(`shortener-db`·`grafana-admin`)은 손으로 고치지 않는다**(`kubectl edit`·`patch`·`create --dry-run | apply` 모두). 고친 값은 곧 새 무작위 값으로 덮인다.
+어느 쪽이든 Password 생성기가 **새 무작위 비밀번호**를 내놓는데,
 PostgreSQL의 데이터 디렉터리(PVC `data-shortener-<환경>-postgresql-0`)에는 옛 비밀번호가 그대로 있다. `POSTGRES_PASSWORD`는 빈 볼륨을 처음 만들 때만 쓰이므로 둘이 어긋나고, 앱이 DB 인증에 실패한다.
-손으로 만든 Secret을 지웠을 때와 같은 문제다. 복구는 둘 중 하나다.
+손으로 만든 Secret을 지웠을 때와 같은 문제다. 복구는 둘 중 하나다(데이터를 지키는 쪽은 Secret을 되돌리는 것이 아니라 DB를 Secret에 맞추는 것이다).
 
 - 데이터를 버려도 되면(dev): PVC를 지우고 파드를 다시 띄운다. 새 볼륨이 새 비밀번호로 초기화된다.
 - 데이터를 지키려면: PostgreSQL 안의 비밀번호를 새 Secret의 값으로 바꾼다. 파드가 새 Secret을 환경 변수로 읽고 있어야 하므로 파드를 한 번 다시 띄운 뒤 한다
@@ -1071,15 +1069,15 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | 증상 | 원인과 조치 |
 |---|---|
 | Application이 `Unknown`이거나 `ComparisonError` | ArgoCD가 저장소를 읽지 못한다. 저장소가 GitHub에 올라가 있고 공개인지, `targetRevision: main`이 있는지 본다 |
-| 앱·PostgreSQL 파드가 `CreateContainerConfigError` | 그 네임스페이스에 `shortener-db` Secret이 없다. EC2에서는 ESO가 만든다: `kubectl -n shortener-<환경> get externalsecret,password`로 ExternalSecret이 `SecretSynced`인지 보고, 아니면 아래 ExternalSecret 행을 본다. 로컬 k3d는 부트스트랩 3번대로 만든다 |
+| 앱·PostgreSQL 파드가 `CreateContainerConfigError` | 그 네임스페이스에 `shortener-db` Secret이 없다. EC2에서는 ESO가 만든다: `kubectl -n shortener-<환경> get externalsecret,password`로 ExternalSecret이 `SecretSynced`인지 보고, 아니면 아래 ExternalSecret 행을 본다. 로컬 k3d에서도 ESO가 만든다(루트 Application이 ESO를 함께 배포한다) |
 | 동기화가 `Failed`로 멈춘 채 그대로다 | `syncPolicy.retry`를 두지 않아도 자동 동기화는 실패하면 ArgoCD의 기본 재시도를 한다(ArgoCD v3.5.3 소스 기준 최대 5번, 대기는 5초에서 시작해 2배씩 늘고 최대 3분. 진행 중에는 상태 메시지에 `Retrying attempt #N`이 보인다). 이 재시도까지 모두 실패하면 같은 커밋으로는 새 동기화를 시작하지 않는다(selfHeal이 켜져 있어도 같다). 상태 메시지에서 원인을 읽고, 원인을 고친 커밋을 올리거나 UI에서 직접 Sync한다 |
 | 고친 커밋을 올렸는데 반영되지 않고 동기화 작업이 `Running`이며 상태 메시지에 `Retrying attempt #N`이 보인다 | 다시 시도를 기다리는 동안 동기화 작업이 `Running`으로 남아 있고, 자동 동기화는 그동안 새 커밋으로 새 동기화를 시작하지 않는다(다시 시도도 처음 커밋을 쓴다). 고친 커밋을 바로 적용하려면 UI에서 그 작업을 Terminate한 뒤 Sync한다. 기다리는 시간은 argo-rollouts·external-secrets-config·shortener-dev·prod가 최대 약 8분(6번)이고(ESO가 늦으면 자동 커밋이 없는 shortener-prod는 Sync를 눌러야 올라온다), 다른 Application은 ArgoCD 기본값으로 약 2분 반(5번)이다 |
 | Application이 오래 `Progressing` | ArgoCD는 Ingress의 `status.loadBalancer.ingress`가 채워져야 Healthy로 본다. `kubectl -n shortener-dev get ingress`의 ADDRESS를 확인한다 |
 | 앱이 DB 인증에 실패한다 | `shortener-db`가 새로 만들어졌는데(지웠거나 ExternalSecret이 새로 생겼거나, 손으로 만든 Secret을 ESO가 덮어썼다. 위 "Secret"의 롤아웃 순서) PostgreSQL 볼륨이 옛 비밀번호로 이미 초기화되어 있다(위 "shortener-db를 지웠을 때"). `POSTGRES_PASSWORD`는 빈 볼륨을 처음 만들 때만 쓰인다. 데이터를 버려도 되면 PVC(`data-shortener-<환경>-postgresql-0`)를 지우고 파드를 다시 띄운다 |
 | 커밋했는데 반영이 안 된다 | 폴링을 기다린다(60초 안팎, 길면 2분 가까이). 바로 보려면 위의 `argocd.argoproj.io/refresh` 어노테이션으로 새로고침한다 |
 | ArgoCD 파드가 `OOMKilled` | 위 메모리 메모 참고 |
-| Grafana 파드가 `CreateContainerConfigError` | `monitoring`에 `grafana-admin` Secret이 없다. ESO가 만든다: `kubectl -n monitoring get externalsecret grafana-admin`과 ESO 파드(`external-secrets` 네임스페이스)를 본다. 로컬 k3d는 부트스트랩 3-1대로 만든다 |
-| Alertmanager 파드가 `ContainerCreating`에 머문다 | `monitoring`에 `alertmanager-discord` Secret이 없어 볼륨을 붙이지 못한다(`kubectl -n monitoring describe pod`의 이벤트에 `FailedMount`). `alertmanager-discord`는 SSM에서 읽어 만든다: 아래 ExternalSecret 행을 본다. 로컬 k3d는 부트스트랩 3-1대로 만든다 |
+| Grafana 파드가 `CreateContainerConfigError` | `monitoring`에 `grafana-admin` Secret이 없다. ESO가 만든다: `kubectl -n monitoring get externalsecret grafana-admin`과 ESO 파드(`external-secrets` 네임스페이스)를 본다. 로컬 k3d에서도 ESO가 만든다 |
+| Alertmanager 파드가 `ContainerCreating`에 머문다 | `monitoring`에 `alertmanager-discord` Secret이 없어 볼륨을 붙이지 못한다(`kubectl -n monitoring describe pod`의 이벤트에 `FailedMount`). `alertmanager-discord`는 SSM에서 읽어 만든다: 아래 ExternalSecret 행을 본다. 로컬 k3d는 SSM을 읽지 못하므로 부트스트랩 3번대로 가짜 주소의 Secret을 손으로 만든다 |
 | ExternalSecret이 `SecretSyncedError`(READY False) | `kubectl -n <네임스페이스> describe externalsecret <이름>`의 Events와 status 조건의 메시지가 원인이다. 아래 STS 행들(SSM을 읽는 `alertmanager-discord`)이거나, SecretStore가 Ready가 아니거나(`kubectl -n monitoring get secretstore`), SSM 파라미터가 없거나(`ParameterNotFound`), ESO 웹훅·CRD가 아직 준비되지 않았다(새 클러스터에서는 잠시 그렇고 retry가 다시 시도한다). 고친 뒤에는 강제 동기화(위 "Secret")로 바로 다시 시도한다 |
 | ExternalSecret 메시지에 STS `InvalidIdentityToken` | S3에 올린 JWKS가 지금 클러스터의 서명 키와 맞지 않는다(클러스터를 새로 만들면 키가 바뀐다). 부트스트랩 로그의 "OIDC 공개" 단계가 성공했는지 본다(`infra/aws/README.md`). 올린 문서는 누구나 읽을 수 있으니 `curl -s <발급자 주소>/openid/v1/jwks`의 `kid`를 클러스터의 `kubectl get --raw /openid/v1/jwks`와 비교한다 |
 | ExternalSecret 메시지에 `AccessDenied` (`AssumeRoleWithWebIdentity`) | 역할의 신뢰 정책 조건이 토큰과 맞지 않는다. `sub`는 `system:serviceaccount:monitoring:eso-ssm`, `aud`는 `sts.amazonaws.com`이어야 하고, ServiceAccount 이름이나 네임스페이스를 바꿨다면 신뢰 정책(`infra/bootstrap`)도 함께 바꿔야 한다. ServiceAccount가 `monitoring/eso-ssm`인지, 역할 ARN이 `platform/external-secrets-config/serviceaccount.yaml`의 값과 같은지 본다 |
