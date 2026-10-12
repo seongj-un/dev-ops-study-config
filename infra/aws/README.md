@@ -289,7 +289,7 @@ terraform output -raw ssm_shell_command
 
 ESO가 AWS(SSM)에 들어가는 길에는 AWS 액세스 키가 없다. `monitoring/eso-ssm` ServiceAccount의 토큰을 STS에 내밀어 역할을 맡는다(AssumeRoleWithWebIdentity). STS는 토큰의 발급자(`iss`)를 보고 그 발급자의 디스커버리 문서와 JWKS를 **익명으로** 받아 서명을 확인한다. 클러스터는 인터넷에서 닿지 않아도 되도록 이 두 문서를 공개 S3 버킷에 둔다. 부트스트랩이 맡는 일은 그 앞부분 둘이다.
 
-- **4단계(k3s)**: kube-apiserver의 `service-account-issuer`를 `https://dev-ops-study-oidc-<계정 ID>.s3.ap-northeast-2.amazonaws.com`로, `service-account-jwks-uri`를 그 뒤에 `/openid/v1/jwks`를 붙인 주소로 정한다. 발급자 인자 이름 끝의 `-`는 k3s 기본 발급자 앞에 덧붙인다는 뜻이다. 새 토큰은 이 발급자로 서명되고 기본 발급자로 나간 토큰도 계속 통한다.
+- **4단계(k3s)**: kube-apiserver의 `service-account-issuer`를 `https://dev-ops-study-oidc-<계정 ID>.s3.ap-northeast-2.amazonaws.com`로, `service-account-jwks-uri`를 그 뒤에 `/openid/v1/jwks`를 붙인 주소로 정한다. 발급자 인자 이름 끝의 `-`는 k3s 소스(`GetArgs`)의 인자 합치기 규칙에 따르면 k3s 기본 발급자 앞에 덧붙인다는 뜻이다. 문서가 아니라 소스를 읽고 안 규칙이라 실제 클러스터에서 확인한다(어긋나면 접미사 없는 `service-account-issuer=`로 바꾼다). 덧붙여지면 새 토큰은 이 발급자로 서명되고 기본 발급자로 나간 토큰도 계속 통한다.
 - **5단계(OIDC 공개)**: `kubectl get --raw`로 디스커버리 문서(`/.well-known/openid-configuration`)와 JWKS(`/openid/v1/jwks`)를 받아 `issuer`·`jwks_uri`가 기대한 값과 같고 키가 하나 이상인지 `python3`로 확인한 뒤, 버킷의 `.well-known/openid-configuration`, `openid/v1/jwks` 두 키에 `application/json`으로 올린다. 올린 뒤 인증 없이 `https`로 다시 받아 같은지도 본다. 인스턴스 역할의 `s3:PutObject`는 이 두 객체에만 있다.
 
 두 문서에는 발급자 주소와 공개 키만 있어서 로그에 크기와 `kid`를 남긴다(비밀이 아니다).

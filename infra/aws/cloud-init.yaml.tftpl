@@ -171,8 +171,9 @@ write_files:
     # --tls-san: API 서버 인증서에 DuckDNS 이름을 넣어 맥에서 https://<sub>.duckdns.org:6443 으로 붙게 한다. 공인 IP는 넣지 않는다:
     # 멈췄다 켤 때마다 바뀌어 인증서의 IP가 곧 틀려지지만, 이름은 DuckDNS가 새 IP로 옮겨 주므로 계속 맞는다.
     # --write-kubeconfig-mode 0600: 관리자 자격 증명(/etc/rancher/k3s/k3s.yaml)을 root만 읽는다. Traefik·metrics-server·local-path는 켜 둔다(로컬과 같다).
-    # --kube-apiserver-arg=service-account-issuer-=$OIDC_ISSUER: ServiceAccount 토큰의 발급자(iss)를 이 공개 URL로 정한다. 인자 이름 끝의 -는 k3s의 규칙으로
-    # "k3s 기본값 앞에 덧붙인다"는 뜻이다(+는 뒤에 덧붙임, 접미사가 없으면 기본값을 바꾼다). kube-apiserver는 첫 발급자로 서명하고 나열한 모든 발급자의 토큰을 받아들이므로,
+    # --kube-apiserver-arg=service-account-issuer-=$OIDC_ISSUER: ServiceAccount 토큰의 발급자(iss)를 이 공개 URL로 정한다. 인자 이름 끝의 -는 k3s 소스(GetArgs)의 인자 합치기 규칙에
+    # 따르면 "k3s 기본값 앞에 덧붙인다"는 뜻이다(+는 뒤에 덧붙임, 접미사가 없으면 기본값을 바꾼다). 문서가 아니라 소스를 읽고 안 규칙이라 실제 클러스터에서 확인한다
+    # (확인 전까지는 가정이다. 어긋나면 접미사 없는 service-account-issuer=로 바꾼다). kube-apiserver는 첫 발급자로 서명하고 나열한 모든 발급자의 토큰을 받아들이므로,
     # 새 토큰은 이 URL로 서명되고 기본값(https://kubernetes.default.svc.cluster.local)으로 이미 나간 토큰(파드 안의 토큰 등)도 그대로 통한다.
     # --kube-apiserver-arg=service-account-jwks-uri=$OIDC_ISSUER/openid/v1/jwks: kube-apiserver가 만드는 디스커버리 문서(/.well-known/openid-configuration)의
     # jwks_uri에 적힐 주소다. 기본은 API 서버 주소라 STS가 닿지 못해서, 5단계가 올리는 S3 객체의 주소로 맞춘다. 서명 키는 새 클러스터마다 새로 생기므로 5단계가 부팅마다 다시 올린다.
@@ -262,8 +263,17 @@ write_files:
     PY
     }
     oidc_put() {
-      timeout 30 aws s3 cp --region "$AWS_REGION" --only-show-errors --content-type application/json "$2" "s3://$OIDC_BUCKET/$1" &&
-        curl -fsS --max-time 10 -o "$WORK/oidc-public.json" "$OIDC_ISSUER/$1" &&
+      local rc=0
+      timeout 30 aws s3 cp --region "$AWS_REGION" --only-show-errors --content-type application/json "$2" "s3://$OIDC_BUCKET/$1" || rc=$?
+      if [ "$rc" != 0 ]; then
+        if [ "$rc" = 124 ]; then
+          echo "S3 업로드(s3://$OIDC_BUCKET/$1)가 30초 안에 끝나지 않아 중단했다(timeout, 종료 코드 124)"
+        else
+          echo "S3 업로드(s3://$OIDC_BUCKET/$1)에 실패했다(aws s3 cp 종료 코드 $rc, 이유는 위의 aws 출력)"
+        fi
+        return 1
+      fi
+      curl -fsS --max-time 10 -o "$WORK/oidc-public.json" "$OIDC_ISSUER/$1" &&
         cmp -s "$2" "$WORK/oidc-public.json" || { echo "올린 뒤 공개 주소($OIDC_ISSUER/$1)에서 받은 내용이 올린 파일과 다르거나 받지 못했다"; return 1; }
     }
     oidc_publish() {
