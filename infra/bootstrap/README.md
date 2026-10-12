@@ -197,7 +197,7 @@ terraform validate
 docker run --rm -v "$PWD":/w aquasec/trivy:0.70.0 config /w/infra/bootstrap
 ```
 
-trivy는 몇 가지를 지적한다. S3 서버 액세스 로깅이 꺼져 있다(AWS-0089), 암호화가 고객 관리형 KMS 키가 아니다(AWS-0132), 그리고 OIDC 버킷에서 퍼블릭 액세스 차단의 정책 항목을 껐다(AWS-0087, AWS-0093)이다.
+trivy는 몇 가지를 지적한다. S3 서버 액세스 로깅이 꺼져 있다(AWS-0089), 암호화가 고객 관리형 KMS 키가 아니다(AWS-0132), OIDC 버킷에서 퍼블릭 액세스 차단의 정책 항목을 껐다(AWS-0087, AWS-0093), 그리고 OIDC 버킷의 버전 관리가 꺼져 있다(AWS-0090)이다. 마지막 것은 두 객체가 부팅마다 클러스터에서 다시 만들어지는 파생 파일이라 이력이 필요 없어서다.
 모두 이 프로젝트에서 일부러 택한 것이라 이유를 `state_bucket.tf`와 `eso_oidc.tf`의 주석에 적고 `#trivy:ignore`로 예외 처리했다.
 
 ## 파일

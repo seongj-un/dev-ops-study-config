@@ -14,7 +14,7 @@
 
 locals {
   # 발급자 URL. 아래 모든 곳에서 이 한 값을 쓴다. k3s의 service-account-issuer, 디스커버리 문서의 issuer, 토큰의 iss, IAM 공급자의 url, 신뢰 정책의 조건 키가
-  # 글자 하나까지 같아야 한다. 대소문자를 가리고, 끝 슬래시와 포트가 없어야 한다. 버킷 이름과 리전이 들어가므로 둘 중 하나가 바뀌면 URL도 바뀐다.
+  # 글자 하나까지 같아야 한다. 대소문자를 구분하고, 끝 슬래시와 포트가 없어야 한다. 버킷 이름과 리전이 들어가므로 둘 중 하나가 바뀌면 URL도 바뀐다.
   # 가상 호스트 방식(버킷.s3.리전.amazonaws.com)이다. S3의 현재 기본 주소 형식이라 이 방식 하나로 정했다(경로 방식 s3.리전.amazonaws.com/버킷과 섞어 쓰면 URL이 달라진다).
   oidc_bucket = "dev-ops-study-oidc-${data.aws_caller_identity.current.account_id}"
   oidc_issuer = "https://${local.oidc_bucket}.s3.${var.region}.amazonaws.com"
@@ -29,9 +29,11 @@ locals {
 # 서버 액세스 로깅은 켜지 않는다(trivy AWS-0089). state 버킷과 같은 이유다. 이 버킷에는 공개 JSON 둘뿐이고 접근 기록을 볼 일이 없다.
 # 퍼블릭 액세스 차단의 두 항목을 일부러 끈다(trivy AWS-0087, AWS-0093). STS가 익명으로 읽어야 하는 버킷이라 아래 설명대로 필요하다.
 # 객체 둘만 공개하고 나머지는 막혀 있다.
+# 버전 관리를 켜지 않는다(trivy AWS-0090). 두 객체가 부팅마다 클러스터에서 다시 만들어지는 파생 파일이라 이력이 필요 없다(아래 설명).
 #trivy:ignore:AVD-AWS-0089
 #trivy:ignore:AVD-AWS-0087
 #trivy:ignore:AVD-AWS-0093
+#trivy:ignore:AVD-AWS-0090
 resource "aws_s3_bucket" "oidc" {
   # 계정 ID를 붙이는 이유는 state_bucket.tf와 같다(이름 공간이 모든 계정에 걸쳐 하나라서 겹침을 피한다).
   bucket = local.oidc_bucket
@@ -144,7 +146,7 @@ resource "aws_iam_role" "eso_monitoring" {
   # IAM 역할의 description은 라틴 문자만 받는다(github_oidc.tf 참고). 한글 설명은 이 주석에 있다.
   description = "External Secrets Operator reads the Discord webhook URL from SSM (cluster OIDC)"
 
-  # max_session_duration은 기본값(3600초)을 그대로 쓴다. ESO는 만료 전에 토큰을 바꿔 다시 맡는다.
+  # max_session_duration은 기본값(3600초)을 그대로 쓴다. ESO는 ServiceAccount 토큰을 요청해 AssumeRoleWithWebIdentity로 임시 자격 증명을 받는다.
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
