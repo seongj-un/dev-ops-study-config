@@ -48,7 +48,7 @@ spec:
       selfHeal: true
     syncOptions:
       # destination.namespace(shortener-dev)가 없으면 동기화할 때 만든다. 이 옵션이 없으면 네임스페이스가 없을 때 동기화가 실패한다.
-      # 이미 있으면 건드리지 않는다: 부트스트랩에서 DB 비밀번호 Secret을 넣으려고 네임스페이스를 미리 만들어 두어도 충돌하지 않는다.
+      # 이미 있으면 건드리지 않는다.
       # ArgoCD가 만든 네임스페이스는 추적하지 않으므로 Application을 지우거나 prune해도 네임스페이스는 남는다.
       - CreateNamespace=true
       # Git에서 사라진 리소스를 동기화의 맨 끝에, 그 앞에 적용한 리소스가 모두 Healthy가 된 뒤에 지운다. 기본은 같은 웨이브 안에서 다른 리소스를 적용하기 전에 먼저 지운다.

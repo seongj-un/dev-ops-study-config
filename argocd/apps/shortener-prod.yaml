@@ -41,7 +41,7 @@ spec:
       # 그래서 HPA가 파드를 늘려도 Git과 어긋난 것으로 보이지 않아 selfHeal이 HPA와 다투지 않는다.
       selfHeal: true
     syncOptions:
-      # destination.namespace(shortener-prod)가 없으면 동기화할 때 만든다. 이미 있으면 건드리지 않는다(부트스트랩에서 Secret을 넣으려고 미리 만들어 둔 경우).
+      # destination.namespace(shortener-prod)가 없으면 동기화할 때 만든다. 이미 있으면 건드리지 않는다.
       - CreateNamespace=true
       # Git에서 사라진 리소스를 동기화의 맨 끝에, 그 앞에 적용한 리소스가 모두 Healthy가 된 뒤에 지운다. 앱이 Deployment에서 Rollout으로 바뀔 때
       # 옛 Deployment가 Rollout의 파드가 Ready가 되기 전에 지워지지 않게 하려는 것이다(이유는 dev 파일 참고).

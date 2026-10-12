@@ -83,7 +83,7 @@ dashboard:
 # --- 끈 것 ---
 # 알림(Slack 등): 차트에는 끄는 스위치가 없다. 컨트롤러의 알림 기능은 설정(서비스·템플릿·트리거를 적는 ConfigMap, 토큰을 담는 Secret)이 있어야 무엇이든 보내는데,
 # 둘 다 만들지 않는다. 둘이 없으면 컨트롤러는 빈 설정으로 읽는다(notifications-engine). 업스트림의 기본 설치 파일(install.yaml)도 알림 ConfigMap 없이 설치한다.
-# 알림을 쓰게 되면 토큰은 Git에 두지 않는다(Grafana 관리자 Secret처럼 부트스트랩이 만든다).
+# 알림을 쓰게 되면 토큰은 Git에 두지 않는다(Grafana 관리자 Secret처럼 ESO가 클러스터 안에서 만든다).
 notifications:
   configmap:
     create: false
