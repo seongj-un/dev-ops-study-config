@@ -221,6 +221,75 @@ jobs:
             '[select(.kind == "HorizontalPodAutoscaler") | .spec.scaleTargetRef | .apiVersion + "/" + .kind + "/" + .name] | join(",")' "$RUNNER_TEMP/prod.yaml"
           exit "$status"
 
+      # DB 비밀번호가 앱과 PostgreSQL에 이르는 세 갈래를 확인한다. 어느 갈래든 두 워크로드가 같은 Secret의 같은 키(password)를 읽어야 한다. 그렇지 않으면 앱이 접속하지 못한다.
+      # 환경 값 파일은 generatePassword를 켜 두므로(위 렌더링 단계는 이 갈래를 이미 kubeconform으로 검사했다) 나머지 두 갈래는 값을 --set으로 덮어 렌더링한다.
+      # Rollout은 쓰지 않는다(Argo Rollouts의 kind를 넘기지 않아 앱은 Deployment). 비밀번호를 읽는 파드 템플릿은 두 갈래가 같기 때문이다(앞 단계가 확인한다).
+      #   - 생성(generatePassword): Password 하나와 ExternalSecret 하나가 있고 차트가 만드는 Secret은 없다. 둘의 이름과 Secret의 이름(target.name), 생성기를 가리키는 이름이
+      #     existingSecret(shortener-db)과 같다. Password는 sync-wave -2, ExternalSecret은 -1이라서 생성기가 먼저 적용되고 ArgoCD가 Secret이 만들어지길 기다린 뒤 웨이브 0의 워크로드를 적용한다.
+      #     ExternalSecret에 refreshPolicy: CreatedOnce와 target.template.metadata(ArgoCD 추적 정보가 Secret에 복사되지 않게 하는 것)가 있다.
+      #   - 기존 Secret(existingSecret): Secret도 ExternalSecret도 없고 워크로드가 그 이름을 읽는다.
+      #   - 비밀번호 값(password): 차트가 Secret <릴리스>-database를 하나 만들고 워크로드가 그 이름을 읽는다. ESO 리소스는 없다.
+      #   - 생성과 비밀번호 값을 함께 주면 렌더링이 실패한다(어느 쪽이 PostgreSQL에 들어갈지 모호해서 차트가 거부한다).
+      # 기대와 다른 것이 있어도 바로 멈추지 않고 모두 오류로 남긴 뒤 실패한다.
+      - name: DB 비밀번호 갈래 확인 (생성, 기존 Secret, 비밀번호 값)
+        run: |
+          status=0
+          # 인자: 설명, 기대값, yq ea 식, 파일
+          expect() {
+            actual="$(yq ea "$3" "$4")"
+            if [ "$actual" != "$2" ]; then
+              echo "::error::${1}: ${2}이어야 하는데 ${actual}이다"
+              status=1
+            fi
+          }
+          # 앱 Deployment와 PostgreSQL StatefulSet이 읽는 Secret의 이름/키 (중복 없이 쉼표로 이은 것)
+          readers='[.. | select(tag == "!!map") | select(has("secretKeyRef")) | .secretKeyRef | .name + "/" + .key] | unique | join(",")'
+          for environment in dev prod; do
+            release="shortener-$environment"
+            render() {
+              helm template "$release" charts/shortener --namespace "$release" --kube-version "$KUBERNETES_VERSION" \
+                --api-versions external-secrets.io/v1 --api-versions generators.external-secrets.io/v1alpha1 \
+                -f "environments/$environment/values.yaml" "$@"
+            }
+            # 1) 생성: 환경 값 파일 그대로
+            name="$(yq '.database.existingSecret' "environments/$environment/values.yaml")"
+            generated="$RUNNER_TEMP/$environment-db-generated.yaml"
+            render > "$generated"
+            expect "$environment 생성 갈래의 Password 이름" "$name" '[select(.kind == "Password") | .metadata.name] | join(",")' "$generated"
+            expect "$environment 생성 갈래의 ExternalSecret 이름" "$name" '[select(.kind == "ExternalSecret") | .metadata.name] | join(",")' "$generated"
+            expect "$environment 생성 갈래 ExternalSecret의 target.name" "$name" 'select(.kind == "ExternalSecret") | .spec.target.name' "$generated"
+            expect "$environment 생성 갈래 ExternalSecret의 생성기 이름" "$name" 'select(.kind == "ExternalSecret") | .spec.dataFrom[0].sourceRef.generatorRef.name' "$generated"
+            expect "$environment 생성 갈래 ExternalSecret의 생성기 kind" Password 'select(.kind == "ExternalSecret") | .spec.dataFrom[0].sourceRef.generatorRef.kind' "$generated"
+            expect "$environment 생성 갈래의 차트 Secret 수" 0 '[select(.kind == "Secret")] | length' "$generated"
+            expect "$environment 생성 갈래 Password의 sync-wave" -2 'select(.kind == "Password") | .metadata.annotations."argocd.argoproj.io/sync-wave"' "$generated"
+            expect "$environment 생성 갈래 ExternalSecret의 sync-wave" -1 'select(.kind == "ExternalSecret") | .metadata.annotations."argocd.argoproj.io/sync-wave"' "$generated"
+            expect "$environment 생성 갈래 ExternalSecret의 refreshPolicy" CreatedOnce 'select(.kind == "ExternalSecret") | .spec.refreshPolicy' "$generated"
+            expect "$environment 생성 갈래 ExternalSecret의 template.metadata 유무" true 'select(.kind == "ExternalSecret") | (.spec.target.template.metadata != null)' "$generated"
+            expect "$environment 생성 갈래 Password의 길이와 기호 수" "32 0" 'select(.kind == "Password") | (.spec.length | tostring) + " " + (.spec.symbols | tostring)' "$generated"
+            expect "$environment 생성 갈래에서 워크로드가 읽는 Secret/키" "$name/password" "$readers" "$generated"
+            # 2) 기존 Secret: 생성만 끈다
+            existing="$RUNNER_TEMP/$environment-db-existing.yaml"
+            render --set database.generatePassword=false > "$existing"
+            expect "$environment 기존 Secret 갈래의 Secret·Password·ExternalSecret 수" 0 '[select(.kind == "Secret" or .kind == "Password" or .kind == "ExternalSecret")] | length' "$existing"
+            expect "$environment 기존 Secret 갈래에서 워크로드가 읽는 Secret/키" "$name/password" "$readers" "$existing"
+            # 3) 비밀번호 값: 생성을 끄고 existingSecret을 비운 뒤 password를 준다(렌더링 결과를 읽기만 하는 값이라 비밀이 아니다)
+            plain="$RUNNER_TEMP/$environment-db-password.yaml"
+            render --set database.generatePassword=false --set database.existingSecret= --set database.password=study-only > "$plain"
+            expect "$environment 비밀번호 값 갈래의 Secret 이름" "$release-database" '[select(.kind == "Secret") | .metadata.name] | join(",")' "$plain"
+            expect "$environment 비밀번호 값 갈래의 Password·ExternalSecret 수" 0 '[select(.kind == "Password" or .kind == "ExternalSecret")] | length' "$plain"
+            expect "$environment 비밀번호 값 갈래에서 워크로드가 읽는 Secret/키" "$release-database/password" "$readers" "$plain"
+            # 4) 생성과 비밀번호 값을 함께 주면 실패해야 한다
+            if render --set database.password=study-only > /dev/null 2>"$RUNNER_TEMP/db-conflict.err"; then
+              echo "::error::$environment: generatePassword와 password를 함께 주었는데 렌더링이 성공했다"
+              status=1
+            elif ! grep -q "함께 쓸 수 없다" "$RUNNER_TEMP/db-conflict.err"; then
+              echo "::error::$environment: generatePassword와 password를 함께 준 렌더링이 다른 이유로 실패했다"
+              cat "$RUNNER_TEMP/db-conflict.err"
+              status=1
+            fi
+          done
+          exit "$status"
+
       # 앱 Ingress의 HTTPS 설정을 yq로 확인한다. kubeconform은 리소스 하나하나의 모양만 보고, 이름으로 서로를 가리키는 것이 맞는지는 보지 않는다.
       #   - 위 렌더링 단계의 네 결과(dev·prod × 두 갈래)마다: Ingress와 리다이렉트 Middleware(redirectScheme)가 하나씩 있고, Ingress의 TLS 호스트가 규칙의 호스트와 같으며 Secret이 <릴리스>-tls다.
       #     HSTS Middleware(headers)는 환경 값 파일의 ingress.hsts.enabled가 true일 때만 하나 있다(지금은 prod). 그 헤더는 max-age가 1 이상의 정수이고 includeSubDomains·preload가 꺼져 있다

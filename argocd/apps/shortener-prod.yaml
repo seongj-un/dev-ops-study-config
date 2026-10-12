@@ -32,9 +32,9 @@ spec:
     namespace: shortener-prod
   syncPolicy:
     # 자동 동기화: Git이 바뀌어 클러스터와 달라지면(OutOfSync) ArgoCD가 사람 손 없이 동기화한다. 실패하면 ArgoCD의 기본 재시도(최대 5번, 대기는 5초에서 시작해 2배씩, 최대 3분)를 하고,
-    # 그래도 실패하면 같은 커밋으로는 새 동기화를 시작하지 않는다(dev 파일 참고).
+    # 그래도 실패하면 같은 커밋으로는 새 동기화를 시작하지 않는다(dev 파일 참고). 이 Application은 아래 syncPolicy.retry로 재시도를 늘렸다(이유는 그 주석).
     automated:
-      # Git에서 사라진 리소스를 클러스터에서도 지운다. 지워지는 것은 ArgoCD가 추적하는 리소스뿐이다: 손으로 만든 Secret(shortener-db)과 PostgreSQL의 PVC는 남는다.
+      # Git에서 사라진 리소스를 클러스터에서도 지운다. 지워지는 것은 ArgoCD가 추적하는 리소스뿐이다: DB 비밀번호 Secret(shortener-db)은 ESO가 만들어 ArgoCD가 추적하지 않고(ExternalSecret만 추적한다), PostgreSQL의 PVC도 남는다.
       prune: true
       # 클러스터의 라이브 상태를 누가 손으로 바꿔도 Git의 내용으로 되돌린다. prod에서는 kubectl로 임시 조치한 것이 조용히 되돌려진다는 뜻이니 조치는 Git으로 한다.
       # prod는 HPA가 켜져 있어(environments/prod/values.yaml) 차트가 Rollout(Argo Rollouts가 없으면 Deployment)에 replicas를 적지 않는다(charts/shortener/templates/rollout.yaml).
@@ -46,4 +46,18 @@ spec:
       # Git에서 사라진 리소스를 동기화의 맨 끝에, 그 앞에 적용한 리소스가 모두 Healthy가 된 뒤에 지운다. 앱이 Deployment에서 Rollout으로 바뀔 때
       # 옛 Deployment가 Rollout의 파드가 Ready가 되기 전에 지워지지 않게 하려는 것이다(이유는 dev 파일 참고).
       - PruneLast=true
+    # 새 클러스터에서 이 Application이 ESO(argocd/apps/external-secrets.yaml)보다 먼저 동기화되면 DB 비밀번호의 Password·ExternalSecret(charts/shortener/templates/externalsecret.yaml)이 두 가지로 실패한다.
+    # 웨이브(sync-wave)는 한 Application 안의 순서라서 Application 사이에는 쓰지 못한다(argocd/apps/external-secrets-config.yaml 참고).
+    #   1) CRD가 아직 없다: 두 리소스의 SkipDryRunOnMissingResource=true가 동기화 전 검증을 건너뛰지만, 적용이 "kind를 모른다"로 실패한다.
+    #   2) CRD는 있는데 ESO의 웹훅이 아직 준비되지 않았다: 웹훅 호출이 실패해 적용이 거부된다.
+    #   두 경우 모두 아래 retry가 다시 시도하고, ESO가 준비되면 적용된다. 기본 재시도(합쳐 약 2분 반)는 새 노드에서 ESO 이미지를 받고 웹훅이 뜨기까지보다 짧을 수 있어서
+    #   external-secrets-config와 같은 값으로 늘린다: 10초에서 시작해 2배씩, 3분을 넘지 않게 6번(합쳐 약 8분). 대가도 같다: 기다리는 동안 동기화 작업이 Running으로 남아 새 커밋을 적용하지 않고,
+    #   다시 시도를 모두 쓰면 사람이 Sync를 눌러야 한다(README의 막혔을 때).
+    #   ExternalSecret(웨이브 -1)이 Healthy(Ready=True)가 될 때까지 웨이브 0의 앱과 PostgreSQL은 적용되지 않는다. 그동안 이 Application은 Progressing으로 보인다.
+    retry:
+      limit: 6
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
 # 삭제 finalizer는 붙이지 않았다(dev 파일 참고): 이 Application을 지워도 배포된 리소스는 클러스터에 남는다. prod 리소스가 실수로 함께 지워지지 않게 하려는 것이기도 하다.

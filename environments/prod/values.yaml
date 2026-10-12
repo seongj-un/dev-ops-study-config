@@ -74,8 +74,11 @@ resources:
   limits:
     memory: 512Mi
 database:
-  # DB 비밀번호가 든 Secret의 이름 (키는 password). Secret은 Git에 없다: 클러스터의 shortener-prod 네임스페이스에 손으로 만든다 (README의 부트스트랩).
+  # DB 비밀번호가 든 Secret의 이름 (키는 password). Secret은 Git에 없다: generatePassword가 켜져 있어 ESO가 shortener-prod 네임스페이스에 이 이름으로 만든다.
+  # 앱(DB_PASSWORD)과 PostgreSQL(POSTGRES_PASSWORD)이 이 이름의 password 키를 읽는다.
   existingSecret: shortener-db
+  # 비밀번호를 ESO의 Password 생성기가 만든다(차트 values.yaml의 database.generatePassword, templates/externalsecret.yaml). 손으로 Secret을 만들지 않는다.
+  generatePassword: true
 # 클러스터 안의 PostgreSQL을 prod 크기로 키운다. 차트 기본값(max_connections=30)은 앱 파드 최대 2개(커넥션 20개)에 맞춘 값이라서, 최대 3개에 배포(카나리) 중 1개가 더 뜨는 prod를 받지 못한다.
 # dev도 파드 2개에 배포 중 1개가 더 떠서 차트 기본값으로는 모자라 커넥션 상한만 덮어쓴다(environments/dev/values.yaml의 postgresql, max_connections=50).
 postgresql:
