@@ -23,3 +23,20 @@ output "github_plan_role_arn" {
   description = "GitHub Actions의 terraform-plan 워크플로가 맡는 역할의 ARN(저장소 변수 AWS_PLAN_ROLE_ARN)"
   value       = aws_iam_role.github_plan.arn
 }
+
+# 클러스터의 발급자 URL. infra/aws가 k3s의 service-account-issuer 인자와 디스커버리 문서에 쓰는 값이다(같은 문자열이어야 한다).
+output "oidc_issuer" {
+  description = "클러스터 ServiceAccount 토큰의 발급자 URL(S3 가상 호스트 방식, 끝 슬래시 없음)"
+  value       = local.oidc_issuer
+}
+
+output "oidc_bucket" {
+  description = "디스커버리 문서와 JWKS를 올리는 S3 버킷 이름"
+  value       = aws_s3_bucket.oidc.bucket
+}
+
+# monitoring/eso-ssm ServiceAccount의 eks.amazonaws.com/role-arn 어노테이션에 넣는 값이다. 계정 ID가 들어 있지만 비밀은 아니다.
+output "eso_role_arn" {
+  description = "ESO가 맡는 역할(dev-ops-study-eso-monitoring)의 ARN"
+  value       = aws_iam_role.eso_monitoring.arn
+}
