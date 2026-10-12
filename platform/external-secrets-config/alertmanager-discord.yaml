@@ -1,0 +1,33 @@
+# Secret alertmanager-discord: Alertmanager가 알림을 보낼 Discord 웹훅 URL. SSM 파라미터 /dev-ops-study/discord-webhook-url(SecureString)의 값을 키 webhook-url에 담는다.
+# 읽는 쪽은 platform/kube-prometheus-stack/values.yaml의 alertmanager다: 이 Secret을 /etc/alertmanager/secrets/alertmanager-discord/에 마운트하고 receiver가 webhook_url_file로 webhook-url 파일을 읽는다.
+# 웹훅 URL은 Git에 두지 않는다(URL만 알면 누구나 그 채널에 글을 쓸 수 있다). 값은 Terraform이 만든 SSM 파라미터에 있고(infra/aws/README.md), 이 파일에는 파라미터 이름만 있다.
+# refreshInterval: 1h마다 SSM을 다시 읽는다. SSM의 값을 바꾸면 늦어도 1시간 뒤 Secret이 바뀌고, 마운트된 파일에는 kubelet이 Secret 볼륨을 갱신하는 시간만큼 더 늦게 반영된다.
+# 읽기는 1시간에 1번이라 SSM의 기본 처리량(초당 40번)에 비해 무시할 수 있고, 표준 파라미터는 요금이 없다.
+# target.creationPolicy: Owner: ESO가 Secret을 만들고 소유한다(Secret의 소유자 참조가 이 ExternalSecret). ExternalSecret을 지우면 Secret도 함께 지워진다. 이미 같은 이름의 Secret이 있고
+# 소유자가 다르면 ESO는 덮어쓰지 않고 실패한다.
+# target.template.metadata: 템플릿이 있으면 ESO는 Secret의 레이블과 어노테이션을 이 템플릿에서만 가져오고, ExternalSecret의 것은 복사하지 않는다(템플릿이 없을 때만 복사한다).
+# ArgoCD가 ExternalSecret에 붙인 추적 정보(레이블·어노테이션)가 Secret에 복사되면 ArgoCD가 Secret을 자기 리소스로 보고 Git에 없다며 prune할 수 있다. 그래서 템플릿을 두고 레이블 하나만 명시한다.
+# 동기화 순서와 SkipDryRunOnMissingResource: secretstore.yaml 맨 위와 같다.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: alertmanager-discord
+  namespace: monitoring
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: SecretStore
+    name: aws-ssm
+  target:
+    name: alertmanager-discord
+    creationPolicy: Owner
+    template:
+      metadata:
+        labels:
+          app.kubernetes.io/managed-by: external-secrets
+  data:
+    - secretKey: webhook-url
+      remoteRef:
+        key: /dev-ops-study/discord-webhook-url
