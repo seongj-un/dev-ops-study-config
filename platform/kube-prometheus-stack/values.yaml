@@ -244,7 +244,9 @@ alertmanager:
             send_resolved: true
   alertmanagerSpec:
     # 위 discord 수신자가 읽는 Secret. Operator가 /etc/alertmanager/secrets/alertmanager-discord/에 키 이름을 파일 이름으로 붙인다.
-    # Secret이 없으면 파드가 볼륨을 붙이지 못해 뜨지 않는다. ESO가 SSM을 읽지 못하면(OIDC·역할 문제, 파라미터 없음) Secret이 만들어지지 않아 파드가 ContainerCreating에 머문다(README의 막혔을 때).
+    # Secret이 없으면 파드가 볼륨을 붙이지 못해 뜨지 않는다. 예전에는 부트스트랩이 만든 가짜 Secret으로라도 떴지만 지금은 AWS 경로(OIDC 발급자 → STS → SSM)에 의존한다:
+    # 그 경로의 어디가 막혀도 Alertmanager가 뜨지 않아 알림이 어디로도 가지 않는다(경보는 Prometheus에 남는다). 새로 만든 뒤 kube-prometheus-stack이 Degraded이면 차트보다 이 경로를 먼저 의심한다
+    # (확인: kubectl -n monitoring get externalsecret alertmanager-discord, Alertmanager 파드의 FailedMount 이벤트). ESO가 SSM을 읽지 못하면(OIDC·역할 문제, 파라미터 없음) Secret이 만들어지지 않아 파드가 ContainerCreating에 머문다(README의 막혔을 때).
     secrets:
       - alertmanager-discord
     # Alertmanager가 밖에서 닿는 주소. 알림 템플릿의 .ExternalURL(Slack 같은 다른 수신자의 기본 템플릿이 만드는 경보 목록 링크)과 UI의 링크가 이 값으로 시작한다.
@@ -319,7 +321,7 @@ kube-state-metrics:
 # 노드의 CPU·메모리·디스크·파일시스템·네트워크를 지표로 내놓는다(DaemonSet이라 노드마다 하나. 네트워크 지표의 일부는 아래 hostNetwork 참고).
 prometheus-node-exporter:
   # 하위 차트 기본값(true)은 파드가 노드의 네트워크 네임스페이스를 같이 쓰게 한다. 그러면 IMDSv2의 홉 제한 1(파드 네트워크에서는 토큰 응답이 한 홉 더 건너야 해서
-  # 닿지 못한다)이 이 파드를 막지 못하고, 인스턴스 메타데이터에서 인스턴스 역할의 자격 증명을 얻어 SSM의 DuckDNS 토큰과 Discord 웹훅 주소를 읽을 수 있게 된다.
+  # 닿지 못한다)이 이 파드를 막지 못하고, 인스턴스 메타데이터에서 인스턴스 역할의 자격 증명을 얻게 된다. 인스턴스 역할은 SSM의 DuckDNS 토큰을 읽고, OIDC 발급자 버킷의 discovery 문서·JWKS를 덮어쓸 수 있다(ESO가 STS에서 역할을 맡는 신뢰의 근거가 그 문서라서, 덮어쓰면 신뢰를 바꿀 수 있다).
   # 이 클러스터는 hostNetwork 파드를 띄우지 않는다는 전제로 지켜진다(infra/aws/ec2.tf의 metadata_options). 그래서 끈다.
   # 대가는 네트워크 지표의 일부다. 수집기가 어디서 읽느냐에 따라 갈린다:
   #   - 이 파드의 네트워크 네임스페이스(eth0, lo)를 보이게 되는 것: netdev 수집기의 송수신·오류 카운터(node_network_receive_bytes_total 등. 기본으로

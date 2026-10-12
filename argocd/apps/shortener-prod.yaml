@@ -52,7 +52,8 @@ spec:
     #   2) CRD는 있는데 ESO의 웹훅이 아직 준비되지 않았다: 웹훅 호출이 실패해 적용이 거부된다.
     #   두 경우 모두 아래 retry가 다시 시도하고, ESO가 준비되면 적용된다. 기본 재시도(합쳐 약 2분 반)는 새 노드에서 ESO 이미지를 받고 웹훅이 뜨기까지보다 짧을 수 있어서
     #   external-secrets-config와 같은 값으로 늘린다: 10초에서 시작해 2배씩, 3분을 넘지 않게 6번(합쳐 약 8분). 대가도 같다: 기다리는 동안 동기화 작업이 Running으로 남아 새 커밋을 적용하지 않고,
-    #   다시 시도를 모두 쓰면 사람이 Sync를 눌러야 한다(README의 막혔을 때).
+    #   다시 시도를 모두 쓰면 사람이 Sync를 눌러야 한다(README의 막혔을 때). 합쳐 약 8분은 10+20+40+80+160+180초다. ESO는 이미지 하나이고 cert-controller가 웹훅에 CA를 넣기까지 1~2분쯤 걸려 보통 넉넉하다.
+    #   ESO가 그보다 늦으면 자동으로 올라오는 커밋이 없는 prod는 사람이 Sync를 눌러야 올라온다.
     #   ExternalSecret(웨이브 -1)이 Healthy(Ready=True)가 될 때까지 웨이브 0의 앱과 PostgreSQL은 적용되지 않는다. 그동안 이 Application은 Progressing으로 보인다.
     retry:
       limit: 6

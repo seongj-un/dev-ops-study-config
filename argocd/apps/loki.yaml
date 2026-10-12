@@ -36,5 +36,5 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-      # monitoring 네임스페이스가 없으면 만든다. 이미 있으면(kube-prometheus-stack이나 external-secrets-config가 먼저 만든 경우) 건드리지 않는다.
+      # monitoring 네임스페이스가 없으면 만든다. 이미 있으면(kube-prometheus-stack이 먼저 만든 경우) 건드리지 않는다. kube-prometheus-stack과 loki 중 먼저 동기화된 쪽이 만든다(external-secrets-config는 만들지 않는다).
       - CreateNamespace=true

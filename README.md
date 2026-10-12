@@ -152,7 +152,7 @@ helm repo update argo
 helm upgrade --install argocd argo/argo-cd --version 10.9.4 \
   -n argocd --create-namespace -f bootstrap/argocd/values.yaml --wait --timeout 10m
 
-# 3. (로컬 k3d만) Secret. ESO가 없는 클러스터라서 손으로 만든다. EC2에서는 이 단계가 없다: ESO가 클러스터 안에서 만든다(아래 "Secret")
+# 3. (로컬 k3d만) Secret. 아래 설명대로 ESO가 같은 이름의 shortener-db를 덮어쓰므로 사실상 필요 없다. EC2에서는 이 단계가 없다: ESO가 클러스터 안에서 만든다(아래 "Secret")
 #    비밀번호는 Git에 넣지 않고 클러스터에만 둔다. 환경마다 다른 값이 만들어진다
 for env in dev prod; do
   kubectl create namespace shortener-$env
@@ -172,12 +172,15 @@ kubectl apply -f argocd/root.yaml
 ```
 
 - 2번은 ArgoCD 이미지(약 200MB)를 처음 내려받아서 몇 분 걸린다. 진행은 `kubectl -n argocd get pods`로 본다.
-- 3·3-1번은 ESO가 없는 로컬 k3d에서 Secret을 손으로 만드는 절차다. EC2에서는 하지 않는다(부트스트랩 스크립트도 더는 Secret을 만들지 않는다. 아래 "Secret").
+- 3·3-1번은 로컬 k3d에서 Secret을 손으로 만드는 절차다(`shortener-db`·`grafana-admin`은 ESO가 같은 이름으로 덮어쓰므로 아래 설명대로 사실상 `alertmanager-discord`만 필요하다). EC2에서는 하지 않는다(부트스트랩 스크립트도 더는 Secret을 만들지 않는다. 아래 "Secret").
   Secret이 없으면 앱·PostgreSQL 파드가 `CreateContainerConfigError`로, `grafana-admin`이 없으면 Grafana 파드가 같은 상태로(환경 변수로 읽는다),
   `alertmanager-discord`가 없으면 Alertmanager 파드가 `ContainerCreating`에(볼륨으로 붙인다) 머문다. Secret이 생기면 시작한다.
-- 루트 Application은 `argocd/apps`를 모두 배포하므로 로컬 k3d에도 ESO와 ExternalSecret이 생긴다. 로컬에는 OIDC 발급자 버킷도 IAM 역할도 없어서 SSM을 읽는 `alertmanager-discord`는 동기화에 실패한다
-  (아래 "막혔을 때" 표의 ExternalSecret 행). Password 생성기는 AWS를 쓰지 않으므로 `shortener-db`·`grafana-admin`은 만들어질 것이다. 그 경우 위 3·3-1번이 필요한 것은 `alertmanager-discord`뿐인데,
-  ESO가 이미 있는 같은 이름의 Secret을 어떻게 다루는지(`creationPolicy: Owner`)는 확인하지 않았다. 로컬에서 띄운다면 `kubectl -n monitoring describe externalsecret`의 상태부터 본다.
+- 루트 Application은 `argocd/apps`를 모두 배포하고 환경 값 파일이 `database.generatePassword: true`를 켜므로 로컬 k3d에도 ESO와 ExternalSecret이 생긴다. 로컬에는 OIDC 발급자 버킷도 IAM 역할도 없어서
+  SSM을 읽는 `alertmanager-discord`는 동기화에 실패한다(아래 "막혔을 때" 표의 ExternalSecret 행). Password 생성기는 AWS를 쓰지 않으므로 `shortener-db`·`grafana-admin`은 ESO가 만든다.
+  `creationPolicy: Owner`인 ExternalSecret은 주인(controller ownerReference)이 없는 같은 이름의 Secret을 자기 것으로 가져가 값을 덮어쓴다(ESO v2.12.0 소스로 확인. 다른 컨트롤러가 주인이면 실패한다).
+  그래서 3·3-1번에서 손으로 만든 `shortener-db`·`grafana-admin`은 ESO가 새 무작위 값으로 바꾼다. 앱 워크로드는 sync-wave -1의 ExternalSecret이 Ready가 될 때까지 적용되지 않아
+  PostgreSQL이 처음 시작하기 전에 바뀌므로 문제가 없다(그래서 이 둘은 만들 필요가 없다). 필요한 것은 `alertmanager-discord`뿐이다: ESO가 SSM에서 값을 읽지 못하면 Secret을 쓰기 전에 실패하므로
+  손으로 만든 가짜 웹훅 Secret이 그대로 남는다. 상태는 `kubectl -n monitoring describe externalsecret`로 본다.
 - 모니터링(kube-prometheus-stack·Loki·Alloy, 메모리 요청만 약 1.4GiB)은 EC2 클러스터(메모리 8GiB)를 위한 것이다. 로컬 k3d의 Docker VM(2.84GiB)은 앱만으로도 메모리가 모자라
   EC2로 옮겼으므로(아래 메모리 메모) 그 위에는 자리가 없다. 루트 Application은 argocd/apps를 모두 배포하므로 로컬 k3d에서도 모니터링 Application이 생긴다.
   그래도 로컬에서 띄운다면 3-1의 Secret을 위처럼 무작위 비밀번호와 가짜 웹훅 주소로 만든다.
@@ -187,7 +190,7 @@ kubectl apply -f argocd/root.yaml
 확인:
 
 ```bash
-kubectl -n argocd get applications          # root, shortener-dev·prod, kube-prometheus-stack, loki, alloy, monitoring-dashboards, argo-rollouts, cert-manager, cert-issuers가 Synced·Healthy가 될 때까지 몇 분 걸린다
+kubectl -n argocd get applications          # root, shortener-dev·prod, kube-prometheus-stack, loki, alloy, monitoring-dashboards, argo-rollouts, cert-manager, cert-issuers, external-secrets, external-secrets-config가 Synced·Healthy가 될 때까지 몇 분 걸린다
 kubectl -n shortener-dev get pods
 kubectl -n shortener-prod get pods
 kubectl -n monitoring get pods              # 아래 "모니터링"의 파드 8개
@@ -238,8 +241,16 @@ monitoring/ServiceAccount eso-ssm 의 토큰(aud sts.amazonaws.com, sub system:s
 
 - 액세스 키는 어디에도 없다. 노드(인스턴스) 역할도 쓰지 않는다: ESO는 자기 ServiceAccount 토큰으로 이 역할만 맡는다. 노드 역할은 DuckDNS 파라미터만 읽는다.
 - 클러스터를 새로 만들면 서명 키가 새로 생기고, 부트스트랩의 "OIDC 공개" 단계가 부팅마다 discovery 문서와 JWKS를 S3에 다시 올린다(`infra/aws/README.md`). 올리기 전이나 실패했을 때는 STS가 토큰을 거부하고 ESO가 다시 시도한다.
-- ArgoCD가 Secret을 prune하지 못하게 ExternalSecret은 `target.template.metadata`를 직접 적는다. 이 경우 ESO는 ExternalSecret의 레이블·어노테이션(ArgoCD 추적 정보)을 Secret에 복사하지 않는다.
-  복사되면 ArgoCD가 Secret을 자기 것으로 알고 지워서 DB 비밀번호가 새로 만들어질 수 있기 때문이다.
+- ExternalSecret은 `target.template.metadata`를 직접 적는다. 이 경우 ESO는 ExternalSecret의 레이블·어노테이션(ArgoCD 추적 정보)을 Secret에 복사하지 않는다.
+  추적 방식을 label로 바꾸면(또는 복사된 레이블 때문에) ArgoCD가 Secret을 자기 것으로 오인해 prune할 수 있어 막아 둔 것이다. ArgoCD v3 기본(annotation 추적)에서는 tracking-id가 ExternalSecret을 가리켜
+  Secret과 맞지 않으므로 복사돼도 그 자체로는 prune되지 않는다. 방어를 겹친 것이다.
+- **롤아웃 순서(중요)**: `creationPolicy: Owner`는 주인이 없는 같은 이름의 Secret을 자기 것으로 가져가 값을 덮어쓴다(ESO v2.12.0 소스로 확인). 이 변경이 `main`에 들어온 뒤 손으로 만든 `shortener-db`가 있는
+  기존 클러스터가 `main`을 따라가면 ESO가 `shortener-db`를 새 무작위 비밀번호로 바꾸는데, PostgreSQL의 PVC에는 옛 비밀번호가 그대로라 앱이 DB 인증에 실패한다(dev·prod 모두. 데이터는 남는다).
+  안전한 순서는 새로 만드는 것이다: 옛 인스턴스를 `infra/aws/down.sh`로 없애거나 다시 켜지 않은 채로 병합하고(인프라 PR과 이 PR을 이어서), 부트스트랩을 적용한 뒤 `up.sh`로 띄운다.
+  둘 중 하나만 병합된 채로 띄우면 안 된다(인프라만 있으면 Secret이 없어 `CreateContainerConfigError`, 매니페스트만 있으면 OIDC 발급자가 없어 ESO가 STS에 닿지 못한다).
+  이미 덮어쓴 클러스터를 지켜야 한다면: 병합 전에 옛 비밀번호를 적어 둔다(`kubectl -n shortener-<환경> get secret shortener-db -o jsonpath='{.data.password}' | base64 -d`).
+  덮어쓴 뒤에는 둘 중 하나로 맞춘다. (a) 아래 "shortener-db를 지웠을 때"의 `ALTER USER`로 DB를 새 Secret 값에 맞춘다. (b) Secret의 `password`를 옛 값으로 되돌리고(`kubectl patch`) 앱·PostgreSQL 파드를 다시 띄운다.
+  (b)는 ESO의 `CreatedOnce`가 status가 채워진 뒤에는 값을 다시 쓰지 않는다는 점에 기댄다. 먼저 dev에서 시험한다.
 - 배포 순서: 앱 차트에서 Password(sync-wave -2) → ExternalSecret(-1) → 나머지(0)다. ArgoCD는 ExternalSecret이 Ready가 될 때까지 기다린 뒤 앱과 PostgreSQL을 적용한다. ESO가 아직 없으면 동기화는 `retry`로 다시 시도한다.
 
 ### 강제 동기화
@@ -261,18 +272,20 @@ PostgreSQL의 데이터 디렉터리(PVC `data-shortener-<환경>-postgresql-0`)
 
 - 데이터를 버려도 되면(dev): PVC를 지우고 파드를 다시 띄운다. 새 볼륨이 새 비밀번호로 초기화된다.
 - 데이터를 지키려면: PostgreSQL 안의 비밀번호를 새 Secret의 값으로 바꾼다. 파드가 새 Secret을 환경 변수로 읽고 있어야 하므로 파드를 한 번 다시 띄운 뒤 한다
-  (`kubectl -n shortener-<환경> delete pod shortener-<환경>-postgresql-0`). 비밀번호가 명령줄에 나오지 않게 SQL은 표준입력으로 넘기고 값은 파드의 환경 변수에서 psql 변수로 받는다.
+  (`kubectl -n shortener-<환경> delete pod shortener-<환경>-postgresql-0`). SQL은 표준입력으로 넘기고 값은 psql이 파드의 환경 변수에서 `\getenv`로 읽는다. 그래서 비밀번호가 맥의 셸 기록·kubectl 인자·파드 안 psql의 인자(`ps`)에 나타나지 않는다(psql 18은 `\getenv`를 지원한다).
   파드 안의 Unix 소켓 접속이 비밀번호 없이 되는지는 이미지의 `pg_hba.conf` 설정에 달렸으니 안 되면 이 방법은 쓸 수 없다(그때는 위 첫 번째 방법). 먼저 dev에서 시험한다.
 
 ```bash
 kubectl -n shortener-dev exec -i shortener-dev-postgresql-0 -- \
-  sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v u="$POSTGRES_USER" -v pw="$POSTGRES_PASSWORD"' <<'SQL'
+  sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+\getenv u POSTGRES_USER
+\getenv pw POSTGRES_PASSWORD
 ALTER USER :"u" PASSWORD :'pw';
 SQL
 ```
 
 예방: `shortener-db`를 `kubectl delete`하지 않는다. ExternalSecret은 `creationPolicy: Owner`라 ExternalSecret이 지워지면(ArgoCD가 prune하거나 `database.generatePassword`를 끄면) Secret도 함께 지워진다.
-`generatePassword`를 끌 때는 먼저 같은 이름의 Secret을 손으로 만들어 두는 순서를 확인한다.
+`generatePassword`를 끌 때는 먼저 같은 이름의 Secret을 손으로 만들어 두는 순서를 확인한다. 반대로 손으로 만든 Secret이 있는 클러스터에서 켜면 ESO가 그것을 덮어쓴다(위 "롤아웃 순서").
 
 ## ArgoCD
 
@@ -570,7 +583,7 @@ Grafana의 **Shortener** 대시보드(http://localhost:3000/d/shortener)는 `pla
 - **Grafana 관리자 Secret은 ESO가 만든다**(`platform/external-secrets-config/grafana-admin.yaml`): 차트가 만들게 두면 ArgoCD가 렌더링할 때마다 무작위 비밀번호가 새로 나와 늘 OutOfSync가 된다.
 - **ServiceMonitor·PrometheusRule을 레이블 없이 모든 네임스페이스에서 고른다**(`*SelectorNilUsesHelmValues: false`): 앱 차트가 만드는 것에 이 릴리스의 `release` 레이블을 붙이지 않아도 된다.
 - **보존 3일·4GB**(PVC 5Gi, local-path): 인스턴스를 공부하는 동안만 띄우고 없애서 30일 오류 예산을 셀 만큼 쌓이지 않는다. 그래서 SLO는 소진 속도(burn rate)와 1h·6h·1d 가용성으로 본다.
-- **node-exporter도 hostNetwork 없이**: 노드의 네트워크를 같이 쓰는 파드는 IMDSv2의 홉 제한 1에 걸리지 않아 인스턴스 역할(SSM의 DuckDNS 토큰·Discord 웹훅 주소를 읽는다)을 얻을 수 있다.
+- **node-exporter도 hostNetwork 없이**: 노드의 네트워크를 같이 쓰는 파드는 IMDSv2의 홉 제한 1에 걸리지 않아 인스턴스 역할(SSM의 DuckDNS 토큰을 읽고, OIDC 발급자 버킷의 discovery 문서·JWKS를 덮어쓸 수 있다)을 얻을 수 있다.
   이 클러스터는 hostNetwork 파드를 띄우지 않는다(`infra/aws/README.md`). 대가는 네트워크 지표의 일부다: 송수신·오류 카운터(netdev 수집기, netlink)와 `/proc/net`을 읽는
   수집기(netstat·sockstat)는 노드가 아니라 그 파드의 네트워크(eth0, lo)를 보인다. 그래서 노드 트래픽 패널과 `NodeNetworkReceiveErrs`·`TransmitErrs`는 그 파드의 트래픽을 본다.
   인터페이스 상태(netclass 수집기: `node_network_up`·`_info`·`_mtu_bytes`·`_speed_bytes`·`_carrier` 등)는 노드의 sysfs(`/host/sys`)를 읽으므로 그대로 노드의 인터페이스이고,
@@ -1060,9 +1073,9 @@ helm template argocd argo/argo-cd --version 10.9.4 -n argocd -f bootstrap/argocd
 | Application이 `Unknown`이거나 `ComparisonError` | ArgoCD가 저장소를 읽지 못한다. 저장소가 GitHub에 올라가 있고 공개인지, `targetRevision: main`이 있는지 본다 |
 | 앱·PostgreSQL 파드가 `CreateContainerConfigError` | 그 네임스페이스에 `shortener-db` Secret이 없다. EC2에서는 ESO가 만든다: `kubectl -n shortener-<환경> get externalsecret,password`로 ExternalSecret이 `SecretSynced`인지 보고, 아니면 아래 ExternalSecret 행을 본다. 로컬 k3d는 부트스트랩 3번대로 만든다 |
 | 동기화가 `Failed`로 멈춘 채 그대로다 | `syncPolicy.retry`를 두지 않아도 자동 동기화는 실패하면 ArgoCD의 기본 재시도를 한다(ArgoCD v3.5.3 소스 기준 최대 5번, 대기는 5초에서 시작해 2배씩 늘고 최대 3분. 진행 중에는 상태 메시지에 `Retrying attempt #N`이 보인다). 이 재시도까지 모두 실패하면 같은 커밋으로는 새 동기화를 시작하지 않는다(selfHeal이 켜져 있어도 같다). 상태 메시지에서 원인을 읽고, 원인을 고친 커밋을 올리거나 UI에서 직접 Sync한다 |
-| 고친 커밋을 올렸는데 반영되지 않고 동기화 작업이 `Running`이며 상태 메시지에 `Retrying attempt #N`이 보인다 | 다시 시도를 기다리는 동안 동기화 작업이 `Running`으로 남아 있고, 자동 동기화는 그동안 새 커밋으로 새 동기화를 시작하지 않는다(다시 시도도 처음 커밋을 쓴다). 고친 커밋을 바로 적용하려면 UI에서 그 작업을 Terminate한 뒤 Sync한다. 기다리는 시간은 argo-rollouts가 최대 약 8분(6번), 다른 Application은 ArgoCD 기본값으로 약 2분 반(5번)이다 |
+| 고친 커밋을 올렸는데 반영되지 않고 동기화 작업이 `Running`이며 상태 메시지에 `Retrying attempt #N`이 보인다 | 다시 시도를 기다리는 동안 동기화 작업이 `Running`으로 남아 있고, 자동 동기화는 그동안 새 커밋으로 새 동기화를 시작하지 않는다(다시 시도도 처음 커밋을 쓴다). 고친 커밋을 바로 적용하려면 UI에서 그 작업을 Terminate한 뒤 Sync한다. 기다리는 시간은 argo-rollouts·external-secrets-config·shortener-dev·prod가 최대 약 8분(6번)이고(ESO가 늦으면 자동 커밋이 없는 shortener-prod는 Sync를 눌러야 올라온다), 다른 Application은 ArgoCD 기본값으로 약 2분 반(5번)이다 |
 | Application이 오래 `Progressing` | ArgoCD는 Ingress의 `status.loadBalancer.ingress`가 채워져야 Healthy로 본다. `kubectl -n shortener-dev get ingress`의 ADDRESS를 확인한다 |
-| 앱이 DB 인증에 실패한다 | `shortener-db`가 새로 만들어졌는데(지웠거나 ExternalSecret이 새로 생겼다) PostgreSQL 볼륨이 옛 비밀번호로 이미 초기화되어 있다(위 "shortener-db를 지웠을 때"). `POSTGRES_PASSWORD`는 빈 볼륨을 처음 만들 때만 쓰인다. 데이터를 버려도 되면 PVC(`data-shortener-<환경>-postgresql-0`)를 지우고 파드를 다시 띄운다 |
+| 앱이 DB 인증에 실패한다 | `shortener-db`가 새로 만들어졌는데(지웠거나 ExternalSecret이 새로 생겼거나, 손으로 만든 Secret을 ESO가 덮어썼다. 위 "Secret"의 롤아웃 순서) PostgreSQL 볼륨이 옛 비밀번호로 이미 초기화되어 있다(위 "shortener-db를 지웠을 때"). `POSTGRES_PASSWORD`는 빈 볼륨을 처음 만들 때만 쓰인다. 데이터를 버려도 되면 PVC(`data-shortener-<환경>-postgresql-0`)를 지우고 파드를 다시 띄운다 |
 | 커밋했는데 반영이 안 된다 | 폴링을 기다린다(60초 안팎, 길면 2분 가까이). 바로 보려면 위의 `argocd.argoproj.io/refresh` 어노테이션으로 새로고침한다 |
 | ArgoCD 파드가 `OOMKilled` | 위 메모리 메모 참고 |
 | Grafana 파드가 `CreateContainerConfigError` | `monitoring`에 `grafana-admin` Secret이 없다. ESO가 만든다: `kubectl -n monitoring get externalsecret grafana-admin`과 ESO 파드(`external-secrets` 네임스페이스)를 본다. 로컬 k3d는 부트스트랩 3-1대로 만든다 |
